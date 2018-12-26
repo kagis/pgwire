@@ -1,23 +1,10 @@
 language: node_js
 node_js:
-  - '11'
-# services:
-#   - postgresql
-#   postgresql: '11'
-#   apt:
-#     packages:
-#       - postgresql-11
-#       - postgresql-client-11
-# before_install:
-#   - echo "host replication postgres 127.0.0.1/32 trust" >> /etc/postgresql/11/main/pg_hba.conf
-#   - echo "wal_level='logical'" >> /etc/postgresql/11/main/postgresql.conf"
-# before_script:
-#   - psql -c 'alter system set wal_level to logical;' -U postgres
+- '11'
 deploy:
   provider: npm
   email: exe-dealer@yandex.ru
   api_key:
-    secure: EQ/Bc1AbXJOSZuzeMuwbL89tvSlSAM+KeJ4yr2iR609QwqmrpV/Gt8ICJh7vvAC9xyPq46klqpd4pOpCvh+bt09WAmXnAOHpYpOzFTUWkJedEhGFVLeVDrBT5AGU6bZo55mBLEKO47UdZWtlcdb5yvg7aowF2alX4zks+p2NP37WURlVqRzadzdufyYLm1rz8/GFKRRSUCpyw2we3zSvm/fDl09zuIsHdkdZKICgHDZUYcytboYqGNSKTeIIskf7vI3bg6fRGMHtbAdjdLeqYtij0An8cdYspevQFg74qm64dL8c5QahWM35f4oVaRRTfuz2OuqvoVUbM5Icuy0yF8jAkbqxYGtHvbFmSNM0Ttx1x3lWKx+pabAVYrZD6mHghP7hViM+iIz3qCGVCK2NxZqe7KcQ/75Um++rygzEvofFWym6A+R9ERKCg+cvk2mCai/TUJNUbHQV1HbT9Ohf7uJ0MVnKI0oGhad7jyZivVDWWSvNwWgN8rZKE0aIumgclGJMTeAw6ydmXewBeNn7Xm0HCp4aANda0xqXuGyK2usmbHMd3uPDXXKYfC/YSH2mDxCw1SvS7Vxc1qW4Rij/rFxuLAzK1ovfUe9CmzLb2hQ2o2KFl35+LdifJ/89E6jEObmg10FiBk7oYJYqKYxVgMG2ru4TIVR81VW9jGRK8NU=
+    secure: j6PssYOp3BcQgy8Tmv8af/07Y6K+peBE04rxPQspEYriwzy4LfZ08qpZQlBralW4dNG1h/snrm4uvlJaHOhB500XlUTQb1oSdHpLytBpGYwrLBdStl7O+hjaIQlL7mvmpr0MreGsxx3clYAzE+on340EBMzeGBTWd18rmL3kY/tTRloOSeGYy753t1Ows/vhASlbFWZ9FZfeHsEaFo++89hCk4x4u3gDRWRre95auB9zwFpYazg2cQU67+sL/BoY4/Ppxuq1+HFFGotJnAZE1Sn38LOQSyfO9cAzqHBs+EAskw2V6f19i6d4YM5BESSGhXZ93S5sJWgk2f6fJ05RZm61vm2jUeDACgffHIw+kMjo/R8jyfa0pEAe+dtUm1zER7L7NWZgJ2mDHCeAxfJ2MCIrrT7tjEBpxlE4df+m0HCQva1ZGr3eIbOS6j/0K8jNfmlKwAi9VNkQm6PJWC04m3T23rYgQT+71ba890d0bT+yjFK4/9aIEADpeBz6Ce4/tvdH4iL+YcT1yc5Y+RpaOiTUXRESkgJZppgKD2cFC4l5m9Z5pd8LUcdBBND21cjhYhN/2TKCq1OQxOws4zrcJKgdX8srqkdp78TvxufDpdcbTqWiyIlAlUw131/ZRxmReLdqw1owWzC9cb0ah+4kINLQ5EjNRsLZlXft8ODLZzw=
   on:
-    # tags: true
     repo: kagis/pgwire
