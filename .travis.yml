@@ -1,6 +1,12 @@
 language: node_js
 node_js:
   - '11'
+services:
+  - postgresql
+addons:
+  postgresql: '11'
+before_script:
+  - psql -c 'alter system set wal_level to logical;' -U postgres
 deploy:
   provider: npm
   email: exe-dealer@yandex.ru
