@@ -13,6 +13,7 @@ const { pgconnect } = require('pgwire');
 const conn = await pgconnect({ url: 'postgres://USER@HOST:PORT/DATABASE' });
 const cursor = conn.query(` SELECT 'hello', 'world' UNION ALL SELECT 'foo', 'bar' `);
 const results = await cursor.fetch();
+conn.terminate();
 const [first_result] = results;
 console.log(first_result.rows); // [['hello', 'world'], ['foo', 'bar']]
 ```
