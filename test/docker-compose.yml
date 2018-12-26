@@ -1,0 +1,12 @@
+version: '3.4'
+services:
+  test:
+    build: .
+    environment:
+      POSTGRES: postgres://postgres:5432
+    working_dir: /opt/pgwire
+    volumes:
+      - ..:/opt/pgwire
+
+  postgres:
+    image: postgres:11-alpine
