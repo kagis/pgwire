@@ -9,4 +9,4 @@ services:
       - ..:/opt/pgwire
 
   postgres:
-    image: postgres:11-alpine
+    build: postgres

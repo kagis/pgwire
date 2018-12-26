@@ -1,6 +1,41 @@
 const assert = require('assert');
 const { pgconnect } = require('../lib/connect.js');
 
+it('logical replication', async _ => {
+  const conn = await pgconnect({
+    replication: 'database',
+  });
+
+  await conn.query(`CREATE_REPLICATION_SLOT testslot LOGICAL test_decoding`).fetch();
+  await conn.query(`CREATE TABLE hello AS SELECT 'hello' foo`);
+  
+  const repl_stream = (
+    conn
+    .query(`START_REPLICATION SLOT testslot LOGICAL 0/0`)
+    .replication()
+  );
+
+  const changes = [];
+  for await (const repl_msg of repl_stream) {
+    const change = repl_msg.data.toString();
+    if (/^COMMIT/.test(change)) {
+      changes.push('COMMIT');
+      break;
+    } else if (/^BEGIN/.test(change)) {
+      changes.push('BEGIN');
+    } else {
+      changes.push(change);
+    }
+  }
+  conn.terminate();
+
+  assert.deepEqual(changes, [
+    `BEGIN`,
+    `table public.hello: INSERT: foo[text]:'hello'`,
+    `COMMIT`,
+  ]);
+});
+
 it('simple proto', async _ => {
   const conn = await pgconnect();
   const result = await conn.query(`SELECT 1`).fetch();
@@ -158,7 +193,8 @@ it('multiplexing', async _ => {
     '16', '17', '26', '27',
     '18', '19', '28', '29',
   ]);
-})
+});
+
 
 function it(testname, fn) {
   it.tests = it.tests || [];
