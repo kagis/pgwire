@@ -126,6 +126,40 @@ it('empty query', async _ => {
   }]);
 });
 
+it('multiplexing', async _ => {
+  const conn = await pgconnect();
+  conn.query('BEGIN').fetch();
+  conn
+  .parse({ name: 'stmt1', statement: `SELECT generate_series(10, 19)` })
+  .bind({ name: 'stmt1', portal: 'portal1' })
+  .parse({ name: 'stmt2', statement: `SELECT generate_series(20, 29)` })
+  .bind({ name: 'stmt2', portal: 'portal2' });
+
+  let some_portal_was_suspended;
+  const elems = [];
+  do {
+    const [first_result, second_result] = await (
+      conn
+      .execute({ portal: 'portal1', limit: 2 })
+      .execute({ portal: 'portal2', limit: 2 })
+      .sync()
+      .fetch()
+    );
+    elems.push(...first_result.rows.map(([it]) => it))
+    elems.push(...second_result.rows.map(([it]) => it))
+    some_portal_was_suspended = first_result.suspended || second_result.suspended;
+  } while (some_portal_was_suspended);
+  conn.terminate();
+
+  assert.deepEqual(elems, [
+    '10', '11', '20', '21',
+    '12', '13', '22', '23',
+    '14', '15', '24', '25',
+    '16', '17', '26', '27',
+    '18', '19', '28', '29',
+  ]);
+})
+
 function it(testname, fn) {
   it.tests = it.tests || [];
   it.tests.push({ testname, fn });

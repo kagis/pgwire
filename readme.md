@@ -103,10 +103,11 @@ for await (const msg of cursor) {
 ```js
 const { pgconnect } = require('pgwire');
 const conn = await pgconnect({ url: 'postgres://USER@HOST:PORT/DATABASE' });
+
+// start explicit transaction to preserve portals between Sync commands
+conn.query('BEGIN').fetch();
+
 conn
-// need explicit transaction to preserve prepared statements
-// between Sync commands
-.parse('BEGIN').bind().execute()
 .parse({ name: 'stmt50', statement: `SELECT generate_series( 1, 50)` })
 .bind({ name: 'stmt50', portal: 'portal50' })
 .parse({ name: 'stmt99', statement: `SELECT generate_series(50, 99)` })
