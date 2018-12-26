@@ -4,7 +4,7 @@ node_js:
 services:
   - postgresql
 addons:
-  postgresql: '11'
+  postgresql: '10'
 before_script:
   - psql -c 'alter system set wal_level to logical;' -U postgres
 deploy:
