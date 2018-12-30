@@ -1,5 +1,8 @@
 # pgwire
 
+[![Build Status](https://travis-ci.com/kagis/pgwire.svg?branch=master)](https://travis-ci.com/kagis/pgwire)
+[![](https://img.shields.io/npm/v/pgwire.svg)](https://www.npmjs.com/package/pgwire)
+
 Low level PostgreSQL client lib for Node.js
 
 - memory efficient data streaming
