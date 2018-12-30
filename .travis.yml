@@ -7,6 +7,8 @@ addons:
     packages:
       - postgresql-11
       - postgresql-client-11
+before_install:
+  - sudo apt purge postgresql-9.2 postgresql-client-9.2
 after_install:
   - psql -p5433 -c 'ALTER SYSTEM SET wal_level TO logical'
 env:
