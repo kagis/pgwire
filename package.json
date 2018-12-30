@@ -2,6 +2,8 @@
   "name": "pgwire",
   "version": "0.2.0",
   "description": "Low level PostgreSQL client lib for Node.js",
+  "author": "exe-dealer@ya.ru",
+  "license": "MIT",
   "main": "lib/connect.js",
   "engines": {
     "node": ">=10"
@@ -13,19 +15,22 @@
   "scripts": {
     "test": "node test/test.js"
   },
+  "homepage": "https://github.com/kagis/pgwire#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kagiskz/pgwire.git"
+    "url": "git+https://github.com/kagis/pgwire.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kagis/pgwire/issues"
   },
   "keywords": [
     "postgres",
     "postgresql",
-    "pg"
-  ],
-  "author": "exe-dealer",
-  "license": "MIT",
-  "bugs": {
-    "url": "https://github.com/kagiskz/pgwire/issues"
-  },
-  "homepage": "https://github.com/kagiskz/pgwire#readme"
+    "pg",
+    "libpq",
+    "postgresql-driver",
+    "logical-replication",
+    "streaming-replication",
+    "node-postgres"
+  ]
 }
