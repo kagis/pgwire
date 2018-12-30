@@ -1,6 +1,18 @@
 language: node_js
 node_js:
-- '11'
+  - '11'
+addons:
+  postgresql: '11'
+  apt:
+    packages:
+      - postgresql-11
+      - postgresql-client-11
+after_install:
+  - psql -p5433 -c 'ALTER SYSTEM SET wal_level TO logical'
+env:
+  global:
+    - PGPORT=5433
+    - POSTGRES=127.0.0.1:5433
 deploy:
   provider: npm
   email: exe-dealer@yandex.ru

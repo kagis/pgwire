@@ -12,7 +12,7 @@ it('logical replication', async _ => {
 
   await conn.query(`CREATE_REPLICATION_SLOT testslot LOGICAL test_decoding`).fetch();
   await conn.query(`CREATE TABLE hello AS SELECT 'hello' foo`);
-  
+
   const repl_stream = (
     conn
     .query(`START_REPLICATION SLOT testslot LOGICAL 0/0`)
