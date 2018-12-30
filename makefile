@@ -11,4 +11,11 @@ release-minor:
 	git commit -m "release $$VERSION" &&\
 	git tag -a "$$VERSION" -m "release $$VERSION"
 
+.PHONY: release-patch
 release-patch:
+	git diff --cached --exit-code > /dev/null &&\
+	VERSION=$$(docker run --rm -v "$$PWD":/app -w /app node:11-alpine npm version patch) &&\
+	git add package.json &&\
+	git commit -m "release $$VERSION" &&\
+	git tag -a "$$VERSION" -m "release $$VERSION"
+
