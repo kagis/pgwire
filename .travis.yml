@@ -1,6 +1,10 @@
 language: node_js
 node_js:
-- '11'
+  - '11'
+services:
+  - docker
+script:
+  - make test
 deploy:
   provider: npm
   email: exe-dealer@yandex.ru
