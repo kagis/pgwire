@@ -1,6 +1,6 @@
 {
   "name": "pgwire",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Low level PostgreSQL client lib for Node.js",
   "main": "lib/connect.js",
   "engines": {
