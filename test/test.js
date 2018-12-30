@@ -1,6 +1,10 @@
 const assert = require('assert');
 const { pgconnect } = require('../lib/connect.js');
 
+it('logical replication pgoutput', async _ => {
+
+});
+
 it('logical replication', async _ => {
   const conn = await pgconnect({
     replication: 'database',

@@ -1,14 +1,17 @@
 {
   "name": "pgwire",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Low level PostgreSQL client lib for Node.js",
   "main": "lib/connect.js",
+  "engines" : {
+    "node" : ">=10"
+  },
   "directories": {
     "lib": "lib",
     "test": "test"
   },
   "scripts": {
-    "test_": "node test/test.js"
+    "test": "node test/test.js"
   },
   "repository": {
     "type": "git",
@@ -20,7 +23,7 @@
     "pg"
   ],
   "author": "exe-dealer",
-  "license": "ISC",
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/kagiskz/pgwire/issues"
   },

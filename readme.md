@@ -105,14 +105,17 @@ for await (const msg of cursor) {
 const { pgconnect } = require('pgwire');
 const conn = await pgconnect({ url: 'postgres://USER@HOST:PORT/DATABASE' });
 
-// start explicit transaction to preserve portals between Sync commands
-conn.query('BEGIN').fetch();
-
-conn
-.parse({ name: 'stmt50', statement: `SELECT generate_series( 1, 50)` })
-.bind({ name: 'stmt50', portal: 'portal50' })
-.parse({ name: 'stmt99', statement: `SELECT generate_series(50, 99)` })
-.bind({ name: 'stmt99', portal: 'portal99' });
+await (
+  conn
+  // start explicit transaction to preserve portals between Sync commands
+  .parse('BEGIN').bind().execute()
+  .parse({ name: 'stmt50', statement: `SELECT generate_series( 1, 50)` })
+  .bind({ name: 'stmt50', portal: 'portal50' })
+  .parse({ name: 'stmt99', statement: `SELECT generate_series(50, 99)` })
+  .bind({ name: 'stmt99', portal: 'portal99' })
+  .sync()
+  .fetch()
+);
 
 let some_portal_was_suspended;
 do {

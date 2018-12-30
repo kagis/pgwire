@@ -9,4 +9,6 @@ services:
       - ..:/opt/pgwire
 
   postgres:
-    build: postgres
+    build:
+      context: .
+      dockerfile: pg.dockerfile
