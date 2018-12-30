@@ -3,8 +3,8 @@
   "version": "0.1.2",
   "description": "Low level PostgreSQL client lib for Node.js",
   "main": "lib/connect.js",
-  "engines" : {
-    "node" : ">=10"
+  "engines": {
+    "node": ">=10"
   },
   "directories": {
     "lib": "lib",
