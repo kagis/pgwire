@@ -1,7 +1,7 @@
 .PHONY: test
 test:
 	docker-compose -f test/docker-compose.yml down -v
-	docker-compose -f test/docker-compose.yml up --build --exit-code-from test
+	docker-compose -f test/docker-compose.yml up --build --exit-code-from test test
 
 .PHONY: release-minor
 release-minor:
@@ -19,3 +19,9 @@ release-patch:
 	git commit -m "release $$VERSION" &&\
 	git tag -a "$$VERSION" -m "release $$VERSION"
 
+.PHONY: repl
+repl:
+	-docker-compose -f test/docker-compose.yml run --rm repl
+	docker-compose -f test/docker-compose.yml down -v
+
+	# docker run -it --rm -v "$$PWD":/app -w /app node:11-alpine node bin/pgwire.js
