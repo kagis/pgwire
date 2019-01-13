@@ -3,7 +3,7 @@ services:
   test:
     build: .
     environment:
-      POSTGRES: postgres://postgres:5432
+      POSTGRES: postgres://postgres@postgres:5432
     depends_on: [postgres]
     working_dir: /opt/pgwire
     volumes: ['..:/opt/pgwire']
