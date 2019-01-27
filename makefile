@@ -21,7 +21,13 @@ release-patch:
 
 .PHONY: repl
 repl:
-	-docker-compose -f test/docker-compose.yml run --rm repl
+	-docker-compose -f test/docker-compose.yml build \
+		&& docker-compose -f test/docker-compose.yml run --rm repl
+	docker-compose -f test/docker-compose.yml down -v
+
+.PHONY: psql
+psql:
+	-docker-compose -f test/docker-compose.yml run --rm psql
 	docker-compose -f test/docker-compose.yml down -v
 
 	# docker run -it --rm -v "$$PWD":/app -w /app node:11-alpine node bin/pgwire.js

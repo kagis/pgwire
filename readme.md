@@ -9,15 +9,17 @@ PostgreSQL client library for Node.js
 ## Features
 
 - Memory efficient data streaming
-- Logical replication using pgoutput protocol
+- [Logical replication using pgoutput protocol](test/test.js#L373)
+- [Multi-statement queries](test/test.js#L45)
+- Efficient bytea transfering
 - Copy from stdin and to stdout
-- Multi-statement queries
-- True asynchronous
-- Pure js without dependencies
-<!-- - Bandwidth efficient binary transfering -->
-<!-- - Single round-trip requests for trusted pgBouncer connections -->
+- Single round-trip queries for trusted connections
+- [Pure js without dependencies](package.json#L36)
+<!-- - True asynchronous -->
+<!-- - Interchangeable connection strategies -->
+<!-- - Session safety guards -->
 
-## ![Examples](test/test.js)
+## [Examples](test/test.js)
 
 - Simple query protocol
 - Extended query protocol
@@ -29,33 +31,39 @@ PostgreSQL client library for Node.js
 - Logical replication
 
 ```js
-const { pgconnect } = require('pgwire');
-const conn = await pgconnect({ url: 'postgres://<user>@<host>:<port>/<database>' });
-const { rows } = await conn.query(`SELECT 'hello', 'world'`);
+// run with env POSTGRES=postgres://<user>@<host>:<port>/<database>
+const pg = require('pgwire');
+const { rows } = await pg.query(`SELECT 'hello', 'world'`);
 console.log(rows);
 // [['hello', 'world']]
 ```
 
 ## API Reference
 
-- pgconnect()
-  - .query()
-  - .queryStream()
-  - .extendedQuery()
-    - .parse()
-    - .bind()
-    - .execute()
-    - .describeStatement()
-    - .describePortal()
-    - .closeStatement()
-    - .closePortal()
-    - .fetch()
-    - .stream()
+- .connectRetry() -> [IClient](#IClient)
+- .connect() -> [IClient](#IClient)
+- .oneshot() -> [IClient](#IClient)
+- .pool() -> [IClient](#IClient)
+
+pgwire itself is `oneshot(process.env.POSTGRES)` instance
+
+### IClient
+
+- .query()
+- .queryStream()
+- .queryExtended()
+  - .parse()
+  - .bind()
+  - .execute()
+  - .describeStatement()
+  - .describePortal()
+  - .closeStatement()
+  - .closePortal()
+  - .fetch()
+  - .stream()
+- .session()
+- .logicalReplication()
+  - .pgoutput()
+  - .ack()
+  - .ackImmediate()
   - .end()
-  - .logicalReplication()
-    - .pgoutput()
-    - .ack()
-    - .ackImmediate()
-    - .end()
-- pgliteral()
-- pgident()

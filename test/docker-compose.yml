@@ -15,7 +15,14 @@ services:
     working_dir: /opt/pgwire
     volumes: ['..:/opt/pgwire']
 
+  psql:
+    image: postgres:11-alpine
+    depends_on: [postgres]
+    command: sh -c 'sleep 5 && psql postgres://postgres@postgres:5432/postgres'
+
   postgres:
     build:
       context: .
       dockerfile: pg.dockerfile
+    # environment:
+    #   POSTGRES_PASSWORD: qwerty

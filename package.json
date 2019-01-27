@@ -32,5 +32,6 @@
     "logical-replication",
     "streaming-replication",
     "node-postgres"
-  ]
+  ],
+  "dependencies": {}
 }

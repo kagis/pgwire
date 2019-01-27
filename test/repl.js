@@ -9,6 +9,7 @@ const tx = new fe.FrontendEncoder();
 tx.pipe(socket).pipe(new BackendDecoder()).pipe(new Writable({
   objectMode: true,
   write(message, _enc, done) {
+    message.datas = String(message.data);
     console.log('->', JSON.stringify(message));
     return done();
   }

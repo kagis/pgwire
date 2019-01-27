@@ -1,7 +1,302 @@
 const { deepStrictEqual } = require('assert');
 const { Readable } = require('stream');
 const { execSync } = require('child_process');
-const { pgconnect } = require('../lib/connect.js');
+const pg = require('../lib/index.js');
+
+it('wait for ready', async _ => {
+  const conn = await pg.connectRetry()
+  conn.end();
+});
+
+// it('connection url', async _ => {
+//   const conn = await pg.connect();
+//   const conn = await pg.connect('postgres://postgres@postgres:5432/postgres?a=1');
+//   const conn = await pg.connect({
+//     hostname: '127.0.0.1',
+//     port: 5432,
+//     user: 'postgres',
+//     database: 'postgres',
+//     application_name: 'hello',
+//   });
+
+//   const conn = await pg.connect({
+//     ...pg.config,
+//     application_name: 'hello',
+//     replication: 'database',
+//   });
+// });
+
+it('simple proto', async _ => {
+  const result = await pg.query(/*sql*/ `SELECT 'hello'`);
+  deepStrictEqual(result, {
+    inTransaction: false,
+    rows: [['hello']],
+    empty: false,
+    suspended: false,
+    scalar: 'hello',
+    command: 'SELECT 1',
+    results: [{
+      rows: [['hello']],
+      command: 'SELECT 1',
+    }],
+  });
+});
+
+it('simple proto multi stmt', async _ => {
+  const result = await pg.query(/*sql*/ `
+    VALUES ('a'), ('b');
+    VALUES ('c', 'd');
+  `);
+  deepStrictEqual(result, {
+    inTransaction: false,
+    results:[{
+      rows: [['a'], ['b']],
+      command: 'SELECT 2',
+    }, {
+      rows: [['c', 'd']],
+      command: 'SELECT 1',
+    }],
+    rows: [[ 'c', 'd' ]],
+    scalar: 'c',
+    command: 'SELECT 1',
+    empty: false,
+    suspended: false,
+  });
+});
+
+it('multiple queries', async _ => {
+  const conn = await pg.connect();
+  try {
+    const [{ scalar: r1 }, { scalar: r2 }] = await Promise.all([
+      conn.query(/*sql*/ `SELECT 'a'`),
+      conn.query(/*sql*/ `SELECT 'b'`),
+    ]);
+    deepStrictEqual([r1, r2], ['a', 'b']);
+  } finally {
+    conn.end();
+  }
+});
+
+it('extended proto', async _ => {
+  const result = await (
+    pg.queryExtended()
+    .parse(/*sql*/ `SELECT 'hello'`)
+    .bind()
+    .execute()
+    .fetch()
+  );
+  deepStrictEqual(result, {
+    inTransaction: false,
+    results: [{
+      rows: [['hello']],
+      command: 'SELECT 1',
+    }],
+    rows: [['hello']],
+    scalar: 'hello',
+    command: 'SELECT 1',
+    empty: false,
+    suspended: false,
+  });
+});
+
+it('portal suspended', async _ => {
+  const result = await (
+    pg.queryExtended()
+    .parse(`SELECT 'hello' FROM generate_series(0, 10)`)
+    .bind()
+    .execute({ limit: 2 })
+    .fetch()
+  );
+  deepStrictEqual(result, {
+    inTransaction: false,
+    results: [{
+      rows: [['hello'], ['hello']],
+      suspended: true,
+    }],
+    rows: [['hello'], ['hello']],
+    scalar: 'hello',
+    command: undefined,
+    empty: false,
+    suspended: true,
+  });
+});
+
+it('empty query', async _ => {
+  const result = await (
+    pg.queryExtended()
+    .parse(``).bind().execute()
+    .fetch()
+  );
+  deepStrictEqual(result, {
+    inTransaction: false,
+    results: [{
+      rows: [],
+      empty: true,
+    }],
+    rows: [],
+    scalar: undefined,
+    command: undefined,
+    empty: true,
+    suspended: false,
+  });
+});
+
+it('simple copy in', async _ => {
+  const { rows } = await pg.query({
+    stdin: arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
+    sql: /*sql*/ `
+      BEGIN;
+      CREATE TABLE test(foo TEXT, bar TEXT);
+      COPY test FROM STDIN;
+      SELECT * FROM test;
+    `,
+  });
+  deepStrictEqual(rows, [
+    ['1', 'hello'],
+    ['2', 'world'],
+  ]);
+});
+
+it('extended copy in', async _ => {
+  const { rows } = await (
+    pg.queryExtended()
+    .parse(/*sql*/ `BEGIN`).bind().execute()
+    .parse(/*sql*/ `CREATE TEMP TABLE test(foo TEXT, bar TEXT)`).bind().execute()
+    .parse(/*sql*/ `COPY test FROM STDIN`).bind().execute({
+      stdin: arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
+    })
+    .parse(/*sql*/ `TABLE test`).bind().execute()
+    .fetch()
+  );
+  deepStrictEqual(rows, [
+    ['1', 'hello'],
+    ['2', 'world'],
+  ]);
+});
+
+it('extended copy in missing 1', async _ => {
+  const result = await (
+    pg.queryExtended()
+    .parse(/*sql*/ `BEGIN`).bind().execute()
+    .parse(/*sql*/ `CREATE TEMP TABLE test(foo INT, bar TEXT)`).bind().execute()
+    .parse(/*sql*/ `COPY test FROM STDIN`).bind().execute()
+    .fetch()
+    .catch(err => err.code)
+  );
+  deepStrictEqual(result, 'PGERR_57014');
+});
+
+it('simple copy in missing', async _ => {
+  const result = await (
+    pg.query({
+      sql: /*sql*/ `
+        BEGIN;
+        CREATE TABLE test(foo INT, bar TEXT);
+        COPY test FROM STDIN;
+        SELECT 'hello';
+        COPY test FROM STDIN;
+        COPY test FROM STDIN;
+      `,
+      stdin: [
+        arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
+        arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
+        // here should be third one
+      ],
+    })
+    .catch(err => err.code)
+  );
+  deepStrictEqual(result, 'PGERR_57014');
+});
+
+it('row decode simple', async _ => {
+  const { rows } = await pg.query(/*sql*/ `
+    SELECT null,
+      true, false,
+      'hello'::text,
+      '\\xdeadbeaf'::bytea,
+      42::int2, -42::int2,
+      42::int4, -42::int4,
+      jsonb_build_object('hello', 'world', 'num', 1),
+      json_build_object('hello', 'world', 'num', 1)
+  `);
+  deepStrictEqual(rows, [[
+    null,
+    true, false,
+    'hello',
+    Buffer.from('deadbeaf', 'hex'),
+    42, -42,
+    42, -42,
+    { hello: 'world', num: 1 },
+    { hello: 'world', num: 1 },
+  ]]);
+});
+
+xit('array decode simple', async _ => {
+  const { rows } = await pg.query(/*sql*/ `
+    SELECT
+      array[true, false],
+      array[['a', 'b'], ['c', 'd']]
+  `);
+  deepStrictEqual(rows, [[
+    [true, false],
+    [['a', 'b'], ['c', 'd']],
+  ]]);
+});
+
+it('row decode extended', async _ => {
+  const { rows } = await (
+    pg.queryExtended()
+    .parse(/*sql*/ `
+      SELECT null, true, false,
+      'hello'::text,
+      '\\xdeadbeaf'::bytea,
+      42::int2, -42::int2,
+      42::int4, -42::int4
+    `)
+    .bind()
+    .execute()
+    .fetch()
+  );
+  deepStrictEqual(rows, [[
+    null, true, false,
+    'hello',
+    Buffer.from('deadbeaf', 'hex'),
+    42, -42,
+    42, -42,
+  ]]);
+});
+
+it('bigint decode extended', async _ => {
+  const { rows } = await (
+    pg.queryExtended()
+    .parse(/*sql*/ `SELECT 42::int8, -42::int8`)
+    .bind()
+    .execute()
+    .fetch()
+  );
+  deepStrictEqual(rows, [[42n, -42n]]);
+});
+
+it('listen/notify', async _ => {
+  const conn = await pg.connect();
+  try {
+    const payload = Promise.race([
+      new Promise((_resolve, reject) => setTimeout(
+        _ => reject(Error('no notification received in 1s')),
+        1000
+      )),
+      new Promise((resolve, reject) => {
+        conn.on('notify:test', ({ payload }) => resolve(payload));
+        conn.on('error', reject);
+      })
+    ]);
+    await conn.query(/*sql*/ `LISTEN test`);
+    psql(/*sql*/ `NOTIFY test, 'hello'`);
+    deepStrictEqual(await payload, 'hello');
+  } finally {
+    conn.end();
+  }
+});
 
 it('logical replication', async _ => {
   psql(/*sql*/ `
@@ -16,10 +311,7 @@ it('logical replication', async _ => {
     ))
     FROM pg_logical_slot_peek_changes('test', NULL, NULL)
   `));
-  const conn = await pgconnect({
-    replication: 'database',
-  });
-  const replstream = await conn.logicalReplication({
+  const replstream = await pg.logicalReplication({
     slot: 'test',
     startLsn: '0/0',
   });
@@ -29,20 +321,17 @@ it('logical replication', async _ => {
     lines.push({ lsn, data: data.toString() });
     timer.refresh();
   }
-  conn.end();
   deepStrictEqual(lines, expected);
 });
 
 it('CREATE_REPLICATION_SLOT issue', async _ => {
-  const conn = await pgconnect({
-    replication: 'database',
-  });
-  await Promise.all([
-    conn.query('CREATE_REPLICATION_SLOT crs_iss LOGICAL test_decoding'),
-    conn.query('CREATE_REPLICATION_SLOT crs_iss LOGICAL test_decoding').catch(_ => null),
-    conn.query('SELECT 1'),
-    conn.end(),
-  ]);
+  // should not throw
+  await pg.session(async conn => {
+    await Promise.all([
+      conn.query('CREATE_REPLICATION_SLOT crs_iss LOGICAL test_decoding'),
+      conn.query('SELECT 1'),
+    ]);
+  }, { replication: 'database' });
 });
 
 it('logical replication pgoutput', async _ => {
@@ -81,10 +370,7 @@ it('logical replication pgoutput', async _ => {
     FROM pg_logical_slot_peek_binary_changes('test1', NULL, NULL,
       'proto_version', '1', 'publication_names', 'pub1')
   `));
-  const conn = await pgconnect({
-    replication: 'database',
-  });
-  const replstream = await conn.logicalReplication({
+  const replstream = await pg.logicalReplication({
     slot: 'test1',
     startLsn: '0/0',
     options: {
@@ -104,7 +390,6 @@ it('logical replication pgoutput', async _ => {
     pgomsgs.push(pgomsg);
     timer.refresh();
   }
-  conn.end();
   deepStrictEqual(pgomsgs, [{
     tag: 'begin',
     xid: peekedChanges[0].xid,
@@ -152,275 +437,81 @@ it('logical replication pgoutput', async _ => {
   }]);
 });
 
-xit('logical replication ack'); // todo
+it('logical replication ack', async _ => {
+  psql(/*sql*/ `
+    BEGIN;
+    CREATE TABLE acktest(a INT NOT NULL PRIMARY KEY);
+    CREATE PUBLICATION acktest FOR TABLE acktest;
+    COMMIT;
 
-it('simple proto', async _ => {
-  const conn = await pgconnect();
-  const response = conn.query(`SELECT 1`);
-  conn.end();
+    SELECT pg_create_logical_replication_slot('acktest', 'test_decoding');
 
-  deepStrictEqual(await response, {
-    inTransaction: false,
-    rows: [['1']],
-    empty: false,
-    suspended: false,
-    scalar: '1',
-    command: 'SELECT 1',
-    results: [{
-      rows: [['1']],
-      command: 'SELECT 1',
-    }],
+    BEGIN;
+    INSERT INTO acktest VALUES (1), (2);
+    COMMIT;
+    BEGIN;
+    INSERT INTO acktest VALUES (3), (4);
+    COMMIT;
+  `);
+  const changesCount = JSON.parse(psql(/*sql*/ `
+    SELECT count(*) FROM pg_logical_slot_peek_changes('acktest', NULL, NULL)
+  `));
+  deepStrictEqual(changesCount, 8);
+  const firstCommitLsn = JSON.parse(psql(/*sql*/ `
+    SELECT to_json(lsn)
+    FROM pg_logical_slot_peek_changes('acktest', NULL, NULL)
+    WHERE data LIKE 'COMMIT%'
+    LIMIT 1
+  `));
+  const replstream = await pg.logicalReplication({
+    slot: 'acktest',
+    startLsn: '0/0',
   });
+  replstream.ack(firstCommitLsn);
+  replstream.end();
+  for await (const _ of replstream);
+  const changesCountAfterAck = JSON.parse(psql(/*sql*/ `
+    SELECT count(*) FROM pg_logical_slot_peek_changes('acktest', NULL, NULL)
+  `));
+  deepStrictEqual(changesCountAfterAck, 4);
 });
 
-it('simple proto multi stmt', async _ => {
-  const conn = await pgconnect();
-  const response = conn.query(`VALUES (1), (2); VALUES ('a', 'b');`);
-  conn.end();
-  deepStrictEqual(await response, {
-    inTransaction: false,
-    results:[{
-      rows: [['1'], ['2']],
-      command: 'SELECT 2',
-    }, {
-      rows: [['a', 'b']],
-      command: 'SELECT 1',
-    }],
-    rows: [[ 'a', 'b' ]],
-    scalar: 'a',
-    command: 'SELECT 1',
-    empty: false,
-    suspended: false,
-  });
-});
-
-it('extended proto', async _ => {
-  const conn = await pgconnect();
-  const response = (
-    conn.extendedQuery()
-    .parse(`SELECT 1`)
-    .bind()
-    .execute()
-    .fetch()
-  );
-  conn.end();
-  deepStrictEqual(await response, {
-    inTransaction: false,
-    results: [{
-      rows: [['1']],
-      command: 'SELECT 1',
-    }],
-    rows: [['1']],
-    scalar: '1',
-    command: 'SELECT 1',
-    empty: false,
-    suspended: false,
-  });
-});
-
-it('query queue', async _ => {
-  const conn = await pgconnect();
-  const response1 = (
-    conn.extendedQuery()
-    .parse(`SELECT 1`)
-    .bind()
-    .execute()
-    .fetch()
-  );
-  const response2 = (
-    conn.extendedQuery()
-    .parse(`SELECT 2`)
-    .bind()
-    .execute()
-    .fetch()
-  );
-  conn.end();
-  const result = await Promise.all([
-    response1,
-    response2,
-  ]);
-
-  deepStrictEqual(result, [{
-    inTransaction: false,
-    results: [{
-      rows: [['1']],
-      command: 'SELECT 1',
-    }],
-    rows: [['1']],
-    scalar: '1',
-    command: 'SELECT 1',
-    empty: false,
-    suspended: false,
-  }, {
-    inTransaction: false,
-    results: [{
-      rows: [['2']],
-      command: 'SELECT 1',
-    }],
-    rows: [['2']],
-    scalar: '2',
-    command: 'SELECT 1',
-    empty: false,
-    suspended: false
-  }]);
-});
-
-it('portal suspended', async _ => {
-  const conn = await pgconnect();
-  const response = (
-    conn.extendedQuery()
-    .parse(`SELECT generate_series(0, 10)`)
-    .bind()
-    .execute({ limit: 2 })
-    .fetch()
-  );
-  conn.end();
-  deepStrictEqual(await response, {
-    inTransaction: false,
-    results: [{
-      rows: [['0'], ['1']],
-      suspended: true,
-    }],
-    rows: [['0'], ['1']],
-    scalar: '0',
-    command: undefined,
-    empty: false,
-    suspended: true,
-  });
-});
-
-it('empty query', async _ => {
-  const conn = await pgconnect();
-  const response = (
-    conn.extendedQuery()
-    .parse(``).bind().execute()
-    .fetch()
-  );
-  conn.end();
-  deepStrictEqual(await response, {
-    inTransaction: false,
-    results: [{
-      rows: [],
-      empty: true,
-    }],
-    rows: [],
-    scalar: undefined,
-    command: undefined,
-    empty: true,
-    suspended: false,
-  });
-});
-
-it('multiplexing', async _ => {
-  const conn = await pgconnect();
-
-  await (
-    conn.extendedQuery()
-    .parse('BEGIN').bind().execute()
-    .parse({ name: 'stmt1', statement: `SELECT generate_series(10, 19)` })
-    .bind({ name: 'stmt1', portal: 'portal1' })
-    .parse({ name: 'stmt2', statement: `SELECT generate_series(20, 29)` })
-    .bind({ name: 'stmt2', portal: 'portal2' })
-    .fetch()
-  );
-
-  let some_portal_was_suspended;
-  const elems = [];
-  do {
-    const { results: [first_result, second_result] } = await (
-      conn.extendedQuery()
-      .execute({ portal: 'portal1', limit: 2 })
-      .execute({ portal: 'portal2', limit: 2 })
-      .fetch()
-    );
-    elems.push(...first_result.rows.map(([it]) => it))
-    elems.push(...second_result.rows.map(([it]) => it))
-    some_portal_was_suspended = first_result.suspended || second_result.suspended;
-  } while (some_portal_was_suspended);
-  conn.end();
-
-  deepStrictEqual(elems, [
-    '10', '11', '20', '21',
-    '12', '13', '22', '23',
-    '14', '15', '24', '25',
-    '16', '17', '26', '27',
-    '18', '19', '28', '29',
-  ]);
-});
-
-it('simple copy in', async _ => {
-  const conn = await pgconnect();
-  const response = conn.query({
-    sql: /*sql*/ `
-      BEGIN;
-      CREATE TABLE test(foo INT, bar TEXT);
-      COPY test FROM STDIN;
-      SELECT * FROM test;
-    `,
-    stdin: arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
-  });
-  conn.end();
-  const { rows } = await response;
-  deepStrictEqual(rows, [
-    ['1', 'hello'],
-    ['2', 'world']
-  ]);
-});
-
-it('extended copy in', async _ => {
-  const conn = await pgconnect();
-  const response = (
-    conn.extendedQuery()
-    .parse('BEGIN').bind().execute()
-    .parse('CREATE TEMP TABLE test(foo INT, bar TEXT)').bind().execute()
-    .parse('COPY test FROM STDIN').bind().execute({
-      stdin: arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
+it('param hint', async _ => {
+  const { scalar } = await (
+    pg.queryExtended()
+    .parse({
+      sql: /*sql*/ `SELECT $1`,
+      paramTypes: ['int4'],
     })
-    .parse('SELECT * FROM test').bind().execute()
+    .bind({ params: [1] })
+    .execute()
     .fetch()
   );
-  conn.end();
-  const { rows } = await response;
-  deepStrictEqual(rows, [
-    ['1', 'hello'],
-    ['2', 'world'],
-  ]);
+  deepStrictEqual(typeof scalar, 'number');
 });
 
-it('extended copy in missing 1', async _ => {
-  const conn = await pgconnect();
-  const response = (
-    conn.extendedQuery()
-    .parse('BEGIN').bind().execute()
-    .parse('CREATE TEMP TABLE test(foo INT, bar TEXT)').bind().execute()
-    .parse('COPY test FROM STDIN').bind().execute()
-    .fetch()
-    .catch(err => err.code)
-  );
-  conn.end();
-  deepStrictEqual(await response, 'PGERR_57014');
-});
-
-it('simple copy in missing', async _ => {
-  const conn = await pgconnect();
-  const response = conn.query({
-    sql: /*sql*/ `
-      BEGIN;
-      CREATE TABLE test(foo INT, bar TEXT);
-      COPY test FROM STDIN;
-      SELECT 'hello';
-      COPY test FROM STDIN;
-      COPY test FROM STDIN;
-
-    `,
-    stdin: [
-      arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
-      arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
-      // here should be third one
-    ],
-  });
-  conn.end();
-  deepStrictEqual(await response.catch(err => err.code), 'PGERR_57014');
+xit('connection session', async _ => {
+  psql(/*sql*/ `CREATE SEQUENCE test_sess`);
+  const conn = await pg.connect();
+  try {
+    const shouldBe1 = conn.session(async sess => {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      return (
+        sess.query(/*sql*/ `SELECT nextval('test_sess')::int`)
+        .then(it => it.scalar)
+      );
+    });
+    const shouldBe2 = (
+      conn.query(/*sql*/ `SELECT nextval('test_sess')::int`)
+      .then(it => it.scalar)
+    );
+    deepStrictEqual(
+      await Promise.all([shouldBe1, shouldBe2]),
+      [1, 2],
+    );
+  } finally {
+    conn.end();
+  }
 });
 
 function xit() {}
@@ -430,8 +521,13 @@ function it(name, fn) {
 }
 async function main() {
   for (const { name, fn } of it.tests) {
-    await fn();
-    console.log(name, '- ok');
+    try {
+      await fn();
+      console.log(name, '- ok');
+    } catch (err) {
+      console.log(name, '- failed');
+      throw err;
+    }
   }
 }
 main().catch(err => {
