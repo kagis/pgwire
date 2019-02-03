@@ -401,25 +401,25 @@ it('logical replication pgoutput', async _ => {
   }, {
     tag: 'insert',
     lsn: peekedChanges.shift().lsn,
-    after: ['1', 'hello'],
+    after: { a: 1, b: 'hello' },
     relation: expectedRelation,
   }, {
     tag: 'insert',
     lsn: peekedChanges.shift().lsn,
-    after: ['2', 'world'],
+    after: { a: 2, b: 'world' },
     relation: expectedRelation,
   }, {
     tag: 'update',
     lsn: peekedChanges.shift().lsn,
     relation: expectedRelation,
     before: null,
-    after: ['1', 'all'],
+    after: { a: 1, b: 'all' },
   }, {
     tag: 'delete',
     lsn: peekedChanges.shift().lsn,
     relation: expectedRelation,
     keyOnly: true,
-    before: ['2', null],
+    before: { a: 2, b: null },
   }, {
     tag: 'relation',
     lsn: (peekedChanges.shift().lsn, '00000000/00000000'), // why?
