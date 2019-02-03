@@ -217,7 +217,8 @@ it('row decode simple', async _ => {
       42::int2, -42::int2,
       42::int4, -42::int4,
       jsonb_build_object('hello', 'world', 'num', 1),
-      json_build_object('hello', 'world', 'num', 1)
+      json_build_object('hello', 'world', 'num', 1),
+      '1/2'::pg_lsn
   `);
   deepStrictEqual(rows, [[
     null,
@@ -228,6 +229,7 @@ it('row decode simple', async _ => {
     42, -42,
     { hello: 'world', num: 1 },
     { hello: 'world', num: 1 },
+    '00000001/00000002',
   ]]);
 });
 
@@ -251,7 +253,8 @@ it('row decode extended', async _ => {
       'hello'::text,
       '\\xdeadbeaf'::bytea,
       42::int2, -42::int2,
-      42::int4, -42::int4
+      42::int4, -42::int4,
+      '1/2'::pg_lsn
     `)
     .bind()
     .execute()
@@ -263,6 +266,7 @@ it('row decode extended', async _ => {
     Buffer.from('deadbeaf', 'hex'),
     42, -42,
     42, -42,
+    '00000001/00000002',
   ]]);
 });
 
