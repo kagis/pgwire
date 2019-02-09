@@ -518,6 +518,22 @@ xit('connection session', async _ => {
   }
 });
 
+it('reject pending responses when connection close', async _ => {
+  const conn = await pg.connect();
+  try {
+    const result = await Promise.race([
+      Promise.all([
+        conn.query(/*sql*/ `SELECT pg_terminate_backend(pg_backend_pid())`).catch(_ => 'error'),
+        conn.query('SELECT 1').catch(_ => 'error'),
+      ]),
+      new Promise((_, reject) => setTimeout(__ => reject(Error('timeout')), 1000)),
+    ]);
+    deepStrictEqual(result, ['error', 'error']);
+  } finally {
+    conn.end();
+  }
+});
+
 function xit() {}
 function it(name, fn) {
   it.tests = it.tests || [];
