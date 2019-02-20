@@ -9,7 +9,7 @@ PostgreSQL client library for Node.js
 ## Features
 
 - Memory efficient data streaming
-- [Logical replication using pgoutput protocol](test/test.js#L373)
+- [Logical replication using pgoutput protocol](test/test.js#L378)
 - [Multi-statement queries](test/test.js#L45)
 - Efficient bytea transfering
 - Copy from stdin and to stdout
