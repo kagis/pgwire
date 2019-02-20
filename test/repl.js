@@ -4,7 +4,10 @@ const { Writable } = require('stream');
 const { BackendDecoder } = require('../lib/backend.js');
 const fe = require('../lib/frontend.js');
 
-const socket = net.connect({ host: 'postgres', port: 5432  });
+const socket = net.connect({
+  host: 'postgres', port: 5432,
+  // host: 'pgbouncer', port: 6432,
+});
 const tx = new fe.FrontendEncoder();
 tx.pipe(socket).pipe(new BackendDecoder()).pipe(new Writable({
   objectMode: true,

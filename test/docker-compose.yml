@@ -4,14 +4,16 @@ services:
     build: .
     environment:
       POSTGRES: postgres://postgres@postgres:5432
-    depends_on: [postgres]
+    depends_on:
+      - postgres
+      - pgbouncer
     working_dir: /opt/pgwire
     volumes: ['..:/opt/pgwire']
 
   repl:
     image: node:11-alpine
     command: sh -c 'sleep 5 && node test/repl.js'
-    depends_on: [postgres]
+    depends_on: [postgres, pgbouncer]
     working_dir: /opt/pgwire
     volumes: ['..:/opt/pgwire']
 
@@ -24,5 +26,9 @@ services:
     build:
       context: .
       dockerfile: pg.dockerfile
-    # environment:
-    #   POSTGRES_PASSWORD: qwerty
+
+  pgbouncer:
+    image: brainsam/pgbouncer
+    environment:
+      DB_HOST: postgres
+      DB_USER: postgres

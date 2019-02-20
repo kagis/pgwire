@@ -4,7 +4,7 @@ const { execSync } = require('child_process');
 const pg = require('../lib/index.js');
 
 it('wait for ready', async _ => {
-  const conn = await pg.connectRetry()
+  const conn = await pg.connectRetry();
   conn.end();
 });
 
@@ -333,6 +333,7 @@ it('CREATE_REPLICATION_SLOT issue', async _ => {
   await pg.session(async conn => {
     await Promise.all([
       conn.query('CREATE_REPLICATION_SLOT crs_iss LOGICAL test_decoding'),
+      conn.query('SELECT 1/0').catch(_ => _),
       conn.query('SELECT 1'),
     ]);
   }, { replication: 'database' });
@@ -532,6 +533,23 @@ it('reject pending responses when connection close', async _ => {
   } finally {
     conn.end();
   }
+});
+
+it('oneshot error while startup', async _ => {
+  const res = await (
+    pg.oneshot('postgres://postgres@postgres:5432/god')
+    .query(/*sql*/ `SELECT 1`)
+    .catch(({ code }) => ({ code }))
+  );
+  deepStrictEqual(res, { code: 'PGERR_3D000' });
+});
+
+it('pgbouncer', async _ => {
+  const { scalar } = await (
+    pg.oneshot('postgres://postgres@pgbouncer:6432/postgres')
+    .query(/*sql*/ `SELECT 1`)
+  );
+  deepStrictEqual(scalar, 1);
 });
 
 function xit() {}
