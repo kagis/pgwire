@@ -4,6 +4,7 @@ node_js:
 services:
   - docker
 script:
+  - make lint
   - make test
 deploy:
   provider: npm

@@ -715,6 +715,16 @@ it('pool async error', async () => {
   assert.notEqual(pid1, pid2);
 });
 
+it('connection uri options', async () => {
+  const conn = await pg.connect('postgres://postgres@postgres:5432/postgres?application_name=test');
+  try {
+    const { scalar } = await conn.query(/*sql*/ `SELECT current_setting('application_name')`);
+    assert.equal(scalar, 'test');
+  } finally {
+    conn.end();
+  }
+});
+
 // it('pool', async () => {
 //   const pool = pg.pool(process.env.POSTGRES, {
 //     poolMaxConnections: 4,
