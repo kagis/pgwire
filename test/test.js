@@ -1,34 +1,26 @@
-const { deepStrictEqual } = require('assert');
-const { Readable } = require('stream');
+const assert = require('assert');
+const { Readable, finished } = require('stream');
 const { execSync } = require('child_process');
+const { promisify } = require('util');
 const pg = require('../lib/index.js');
 
-it('wait for ready', async _ => {
-  const conn = await pg.connectRetry();
+const finished_p = promisify(finished);
+
+it('wait for ready', async () => {
+  const conn = await pg.connectRetry(process.env.POSTGRES);
   conn.end();
 });
 
-// it('connection url', async _ => {
-//   const conn = await pg.connect();
-//   const conn = await pg.connect('postgres://postgres@postgres:5432/postgres?a=1');
-//   const conn = await pg.connect({
-//     hostname: '127.0.0.1',
-//     port: 5432,
-//     user: 'postgres',
-//     database: 'postgres',
-//     application_name: 'hello',
-//   });
+it('autoclose connections', async () => {
+  const { scalar: pid } = await pg.query(/*sql*/ `SELECT pg_backend_pid()`);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const terminated = psql(/*sql*/ `SELECT pg_terminate_backend('${pid}')`).trim();
+  assert.equal(terminated, 'f');
+});
 
-//   const conn = await pg.connect({
-//     ...pg.config,
-//     application_name: 'hello',
-//     replication: 'database',
-//   });
-// });
-
-it('simple proto', async _ => {
+it('simple proto', async () => {
   const result = await pg.query(/*sql*/ `SELECT 'hello'`);
-  deepStrictEqual(result, {
+  assert.deepStrictEqual(result, {
     inTransaction: false,
     rows: [['hello']],
     empty: false,
@@ -38,25 +30,28 @@ it('simple proto', async _ => {
     results: [{
       rows: [['hello']],
       command: 'SELECT 1',
+      notices: [],
     }],
   });
 });
 
-it('simple proto multi stmt', async _ => {
+it('simple proto multi stmt', async () => {
   const result = await pg.query(/*sql*/ `
     VALUES ('a'), ('b');
     VALUES ('c', 'd');
   `);
-  deepStrictEqual(result, {
+  assert.deepStrictEqual(result, {
     inTransaction: false,
-    results:[{
+    results: [{
       rows: [['a'], ['b']],
       command: 'SELECT 2',
+      notices: [],
     }, {
       rows: [['c', 'd']],
       command: 'SELECT 1',
+      notices: [],
     }],
-    rows: [[ 'c', 'd' ]],
+    rows: [['c', 'd']],
     scalar: 'c',
     command: 'SELECT 1',
     empty: false,
@@ -64,20 +59,20 @@ it('simple proto multi stmt', async _ => {
   });
 });
 
-it('multiple queries', async _ => {
-  const conn = await pg.connect();
+it('multiple queries', async () => {
+  const conn = await pg.connect(process.env.POSTGRES);
   try {
     const [{ scalar: r1 }, { scalar: r2 }] = await Promise.all([
       conn.query(/*sql*/ `SELECT 'a'`),
       conn.query(/*sql*/ `SELECT 'b'`),
     ]);
-    deepStrictEqual([r1, r2], ['a', 'b']);
+    assert.deepStrictEqual([r1, r2], ['a', 'b']);
   } finally {
     conn.end();
   }
 });
 
-it('extended proto', async _ => {
+it('extended proto', async () => {
   const result = await (
     pg.queryExtended()
     .parse(/*sql*/ `SELECT 'hello'`)
@@ -85,11 +80,12 @@ it('extended proto', async _ => {
     .execute()
     .fetch()
   );
-  deepStrictEqual(result, {
+  assert.deepStrictEqual(result, {
     inTransaction: false,
     results: [{
       rows: [['hello']],
       command: 'SELECT 1',
+      notices: [],
     }],
     rows: [['hello']],
     scalar: 'hello',
@@ -99,19 +95,20 @@ it('extended proto', async _ => {
   });
 });
 
-it('portal suspended', async _ => {
+it('portal suspended', async () => {
   const result = await (
     pg.queryExtended()
-    .parse(`SELECT 'hello' FROM generate_series(0, 10)`)
+    .parse(/*sql*/ `SELECT 'hello' FROM generate_series(0, 10)`)
     .bind()
     .execute({ limit: 2 })
     .fetch()
   );
-  deepStrictEqual(result, {
+  assert.deepStrictEqual(result, {
     inTransaction: false,
     results: [{
       rows: [['hello'], ['hello']],
       suspended: true,
+      notices: [],
     }],
     rows: [['hello'], ['hello']],
     scalar: 'hello',
@@ -121,17 +118,18 @@ it('portal suspended', async _ => {
   });
 });
 
-it('empty query', async _ => {
+it('empty query', async () => {
   const result = await (
     pg.queryExtended()
     .parse(``).bind().execute()
     .fetch()
   );
-  deepStrictEqual(result, {
+  assert.deepStrictEqual(result, {
     inTransaction: false,
     results: [{
       rows: [],
       empty: true,
+      notices: [],
     }],
     rows: [],
     scalar: undefined,
@@ -141,7 +139,7 @@ it('empty query', async _ => {
   });
 });
 
-it('simple copy in', async _ => {
+it('simple copy in', async () => {
   const { rows } = await pg.query({
     stdin: arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
     sql: /*sql*/ `
@@ -151,13 +149,13 @@ it('simple copy in', async _ => {
       SELECT * FROM test;
     `,
   });
-  deepStrictEqual(rows, [
+  assert.deepStrictEqual(rows, [
     ['1', 'hello'],
     ['2', 'world'],
   ]);
 });
 
-it('extended copy in', async _ => {
+it('extended copy in', async () => {
   const { rows } = await (
     pg.queryExtended()
     .parse(/*sql*/ `BEGIN`).bind().execute()
@@ -168,47 +166,47 @@ it('extended copy in', async _ => {
     .parse(/*sql*/ `TABLE test`).bind().execute()
     .fetch()
   );
-  deepStrictEqual(rows, [
+  assert.deepStrictEqual(rows, [
     ['1', 'hello'],
     ['2', 'world'],
   ]);
 });
 
-it('extended copy in missing 1', async _ => {
-  const result = await (
+it('extended copy in missing 1', async () => {
+  const response = (
     pg.queryExtended()
     .parse(/*sql*/ `BEGIN`).bind().execute()
     .parse(/*sql*/ `CREATE TEMP TABLE test(foo INT, bar TEXT)`).bind().execute()
     .parse(/*sql*/ `COPY test FROM STDIN`).bind().execute()
     .fetch()
-    .catch(err => err.code)
   );
-  deepStrictEqual(result, 'PGERR_57014');
+  await assert.rejects(response, {
+    code: 'PGERR_57014',
+  });
 });
 
-it('simple copy in missing', async _ => {
-  const result = await (
-    pg.query({
-      sql: /*sql*/ `
-        BEGIN;
-        CREATE TABLE test(foo INT, bar TEXT);
-        COPY test FROM STDIN;
-        SELECT 'hello';
-        COPY test FROM STDIN;
-        COPY test FROM STDIN;
-      `,
-      stdin: [
-        arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
-        arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
-        // here should be third one
-      ],
-    })
-    .catch(err => err.code)
-  );
-  deepStrictEqual(result, 'PGERR_57014');
+it('simple copy in missing', async () => {
+  const response = pg.query({
+    sql: /*sql*/ `
+      BEGIN;
+      CREATE TABLE test(foo INT, bar TEXT);
+      COPY test FROM STDIN;
+      SELECT 'hello';
+      COPY test FROM STDIN;
+      COPY test FROM STDIN;
+    `,
+    stdin: [
+      arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
+      arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
+      // here should be third one
+    ],
+  });
+  await assert.rejects(response, {
+    code: 'PGERR_57014',
+  });
 });
 
-it('row decode simple', async _ => {
+it('row decode simple', async () => {
   const { rows } = await pg.query(/*sql*/ `
     SELECT null,
       true, false,
@@ -220,7 +218,7 @@ it('row decode simple', async _ => {
       json_build_object('hello', 'world', 'num', 1),
       '1/2'::pg_lsn
   `);
-  deepStrictEqual(rows, [[
+  assert.deepStrictEqual(rows, [[
     null,
     true, false,
     'hello',
@@ -233,34 +231,34 @@ it('row decode simple', async _ => {
   ]]);
 });
 
-xit('array decode simple', async _ => {
+xit('array decode simple', async () => {
   const { rows } = await pg.query(/*sql*/ `
     SELECT
       array[true, false],
       array[['a', 'b'], ['c', 'd']]
   `);
-  deepStrictEqual(rows, [[
+  assert.deepStrictEqual(rows, [[
     [true, false],
     [['a', 'b'], ['c', 'd']],
   ]]);
 });
 
-it('row decode extended', async _ => {
+it('row decode extended', async () => {
   const { rows } = await (
     pg.queryExtended()
     .parse(/*sql*/ `
       SELECT null, true, false,
-      'hello'::text,
-      '\\xdeadbeaf'::bytea,
-      42::int2, -42::int2,
-      42::int4, -42::int4,
-      '1/2'::pg_lsn
+        'hello'::text,
+        '\\xdeadbeaf'::bytea,
+        42::int2, -42::int2,
+        42::int4, -42::int4,
+        '1/2'::pg_lsn
     `)
     .bind()
     .execute()
     .fetch()
   );
-  deepStrictEqual(rows, [[
+  assert.deepStrictEqual(rows, [[
     null, true, false,
     'hello',
     Buffer.from('deadbeaf', 'hex'),
@@ -270,7 +268,7 @@ it('row decode extended', async _ => {
   ]]);
 });
 
-it('bigint decode extended', async _ => {
+it('bigint decode extended', async () => {
   const { rows } = await (
     pg.queryExtended()
     .parse(/*sql*/ `SELECT 42::int8, -42::int8`)
@@ -278,31 +276,31 @@ it('bigint decode extended', async _ => {
     .execute()
     .fetch()
   );
-  deepStrictEqual(rows, [[42n, -42n]]);
+  assert.deepStrictEqual(rows, [[BigInt(42), BigInt(-42)]]);
 });
 
-it('listen/notify', async _ => {
-  const conn = await pg.connect();
+it('listen/notify', async () => {
+  const conn = await pg.connect(process.env.POSTGRES);
   try {
-    const payload = Promise.race([
+    const response = Promise.race([
       new Promise((_resolve, reject) => setTimeout(
-        _ => reject(Error('no notification received in 1s')),
-        1000
+        () => reject(Error('no notification received in 1s')),
+        1000,
       )),
       new Promise((resolve, reject) => {
         conn.on('notify:test', ({ payload }) => resolve(payload));
         conn.on('error', reject);
-      })
+      }),
     ]);
     await conn.query(/*sql*/ `LISTEN test`);
     psql(/*sql*/ `NOTIFY test, 'hello'`);
-    deepStrictEqual(await payload, 'hello');
+    assert.deepStrictEqual(await response, 'hello');
   } finally {
     conn.end();
   }
 });
 
-it('logical replication', async _ => {
+it('logical replication', async () => {
   psql(/*sql*/ `
     SELECT pg_create_logical_replication_slot('test', 'test_decoding');
     CREATE TABLE foo AS SELECT 1 a;
@@ -325,21 +323,39 @@ it('logical replication', async _ => {
     lines.push({ lsn, data: data.toString() });
     timer.refresh();
   }
-  deepStrictEqual(lines, expected);
+  assert.deepStrictEqual(lines, expected);
 });
 
-it('CREATE_REPLICATION_SLOT issue', async _ => {
-  // should not throw
-  await pg.session(async conn => {
+it('CREATE_REPLICATION_SLOT issue', async () => {
+  const conn = await pg.connect(process.env.POSTGRES, {
+    replication: 'database',
+  });
+  try {
     await Promise.all([
       conn.query('CREATE_REPLICATION_SLOT crs_iss LOGICAL test_decoding'),
-      conn.query('SELECT 1/0').catch(_ => _),
-      conn.query('SELECT 1'),
+      conn.query(/*sql*/ `SELECT 1`),
     ]);
-  }, { replication: 'database' });
+  } finally {
+    conn.end();
+  }
 });
 
-it('logical replication pgoutput', async _ => {
+it('CREATE_REPLICATION_SLOT issue 1', async () => {
+  const conn = await pg.connect(process.env.POSTGRES, {
+    replication: 'database',
+  });
+  try {
+    await Promise.all([
+      conn.query('CREATE_REPLICATION_SLOT crs_iss1 LOGICAL test_decoding'),
+      assert.rejects(conn.query(/*sql*/ `SELECT 1/0`)),
+      conn.query(/*sql*/ `SELECT 1`),
+    ]);
+  } finally {
+    conn.end();
+  }
+});
+
+it('logical replication pgoutput', async () => {
   psql(/*sql*/ `
     BEGIN;
     CREATE TABLE foo1(a INT NOT NULL PRIMARY KEY, b TEXT);
@@ -395,7 +411,7 @@ it('logical replication pgoutput', async _ => {
     pgomsgs.push(pgomsg);
     timer.refresh();
   }
-  deepStrictEqual(pgomsgs, [{
+  assert.deepStrictEqual(pgomsgs, [{
     tag: 'begin',
     xid: peekedChanges[0].xid,
     lsn: peekedChanges.shift().lsn,
@@ -442,7 +458,7 @@ it('logical replication pgoutput', async _ => {
   }]);
 });
 
-it('logical replication ack', async _ => {
+it('logical replication ack', async () => {
   psql(/*sql*/ `
     BEGIN;
     CREATE TABLE acktest(a INT NOT NULL PRIMARY KEY);
@@ -461,7 +477,7 @@ it('logical replication ack', async _ => {
   const changesCount = JSON.parse(psql(/*sql*/ `
     SELECT count(*) FROM pg_logical_slot_peek_changes('acktest', NULL, NULL)
   `));
-  deepStrictEqual(changesCount, 8);
+  assert.deepStrictEqual(changesCount, 8);
   const firstCommitLsn = JSON.parse(psql(/*sql*/ `
     SELECT to_json(lsn)
     FROM pg_logical_slot_peek_changes('acktest', NULL, NULL)
@@ -474,14 +490,15 @@ it('logical replication ack', async _ => {
   });
   replstream.ack(firstCommitLsn);
   replstream.end();
-  for await (const _ of replstream);
+  replstream.resume();
+  await finished_p(replstream);
   const changesCountAfterAck = JSON.parse(psql(/*sql*/ `
     SELECT count(*) FROM pg_logical_slot_peek_changes('acktest', NULL, NULL)
   `));
-  deepStrictEqual(changesCountAfterAck, 4);
+  assert.deepStrictEqual(changesCountAfterAck, 4);
 });
 
-it('param hint', async _ => {
+it('param hint', async () => {
   const { scalar } = await (
     pg.queryExtended()
     .parse({
@@ -492,25 +509,25 @@ it('param hint', async _ => {
     .execute()
     .fetch()
   );
-  deepStrictEqual(typeof scalar, 'number');
+  assert.deepStrictEqual(typeof scalar, 'number');
 });
 
-xit('connection session', async _ => {
+xit('connection session', async () => {
   psql(/*sql*/ `CREATE SEQUENCE test_sess`);
-  const conn = await pg.connect();
+  const conn = await pg.connect(process.env.POSTGRES);
   try {
     const shouldBe1 = conn.session(async sess => {
       await new Promise(resolve => setTimeout(resolve, 100));
       return (
         sess.query(/*sql*/ `SELECT nextval('test_sess')::int`)
-        .then(it => it.scalar)
+        .then(({ scalar }) => scalar)
       );
     });
     const shouldBe2 = (
       conn.query(/*sql*/ `SELECT nextval('test_sess')::int`)
-      .then(it => it.scalar)
+      .then(({ scalar }) => scalar)
     );
-    deepStrictEqual(
+    assert.deepStrictEqual(
       await Promise.all([shouldBe1, shouldBe2]),
       [1, 2],
     );
@@ -519,55 +536,222 @@ xit('connection session', async _ => {
   }
 });
 
-it('reject pending responses when connection close', async _ => {
-  const conn = await pg.connect();
+it('reject pending responses when connection close', async () => {
+  const conn = await pg.connect(process.env.POSTGRES);
   try {
-    const result = await Promise.race([
-      Promise.all([
-        conn.query(/*sql*/ `SELECT pg_terminate_backend(pg_backend_pid())`).catch(_ => 'error'),
-        conn.query('SELECT 1').catch(_ => 'error'),
-      ]),
-      new Promise((_, reject) => setTimeout(__ => reject(Error('timeout')), 1000)),
+    await Promise.all([
+      assert.rejects(conn.query(/*sql*/ `SELECT pg_terminate_backend(pg_backend_pid())`)),
+      assert.rejects(conn.query(/*sql*/ `SELECT`)),
     ]);
-    deepStrictEqual(result, ['error', 'error']);
   } finally {
     conn.end();
   }
 });
 
-it('oneshot error while startup', async _ => {
-  const res = await (
-    pg.oneshot('postgres://postgres@postgres:5432/god')
-    .query(/*sql*/ `SELECT 1`)
-    .catch(({ code }) => ({ code }))
-  );
-  deepStrictEqual(res, { code: 'PGERR_3D000' });
+it('notice', async () => {
+  const { results } = await pg.query(/*sql*/ `ROLLBACK`);
+  assert.deepStrictEqual(results[0].notices[0].code, '25P01');
 });
 
-it('pgbouncer', async _ => {
-  const { scalar } = await (
-    pg.oneshot('postgres://postgres@pgbouncer:6432/postgres')
-    .query(/*sql*/ `SELECT 1`)
-  );
-  deepStrictEqual(scalar, 1);
+it('pgbouncer', async () => {
+  const pool = pg.pool(process.env.POSTGRES_PGBOUNCER);
+  const { scalar } = await pool.query(/*sql*/ `SELECT 1`);
+  assert.deepStrictEqual(scalar, 1);
 });
+
+it('auth clear text', async () => {
+  const conn = await pg.connect(process.env.POSTGRES, {
+    user: 'u_clear',
+    password: 'qwerty',
+  });
+  conn.end();
+});
+
+it('auth md5', async () => {
+  const conn = await pg.connect(process.env.POSTGRES, {
+    user: 'u_md5',
+    password: 'qwerty',
+  });
+  conn.end();
+});
+
+it('write after end', async () => {
+  const conn = await pg.connect(process.env.POSTGRES);
+  conn.end();
+  await assert.rejects(conn.query(/*sql*/ `SELECT`));
+});
+
+it('write after end 2', async () => {
+  const conn = await pg.connect(process.env.POSTGRES);
+  conn.end();
+  await new Promise(resolve => setImmediate(resolve, 0));
+  await assert.rejects(conn.query(/*sql*/ `SELECT`));
+});
+
+it('pool - reset reused connection', async () => {
+  const pool = pg.pool(process.env.POSTGRES, {
+    // force all queries to execute in single connection
+    poolMaxConnections: 1,
+  });
+  try {
+    const { scalar: pid1 } = await pool.query(/*sql*/ `
+      BEGIN;
+      CREATE TABLE test(a TEXT);
+      SELECT pg_backend_pid();
+    `);
+    // if previous query was not rollbacked then next query will fail
+    const { scalar: pid2 } = await pool.query(/*sql*/ `
+      BEGIN;
+      CREATE TABLE test(a TEXT);
+      SELECT pg_backend_pid();
+    `);
+    // ensure connection was reused
+    assert.deepStrictEqual(pid1, pid2);
+  } finally {
+    pool.clear();
+  }
+});
+
+it('pool - unexisting database', async () => {
+  const pool = pg.pool(process.env.POSTGRES, {
+    database: 'unicorn',
+  });
+  try {
+    await assert.rejects(pool.query(/*sql*/ `SELECT`), {
+      code: 'PGERR_3D000',
+    });
+  } finally {
+    pool.clear();
+  }
+});
+
+it('idle timeout', async () => {
+  const conn = await pg.connect(process.env.POSTGRES, {
+    idleTimeout: 200,
+  });
+  try {
+    await Promise.race([
+      new Promise(resolve => conn.on('close', resolve)),
+      new Promise((_, reject) => setTimeout(reject, 400, Error(
+        'Connection was not closed after idleTimeout',
+      ))),
+    ]);
+  } finally {
+    conn.end(); // close manually if fail
+  }
+});
+
+it('idle timeout 2', async () => {
+  const conn = await pg.connect(process.env.POSTGRES, {
+    idleTimeout: 200,
+  });
+  await Promise.all([
+    conn.query(/*sql*/ `SELECT`),
+    conn.query(/*sql*/ `SELECT`),
+    conn.query(/*sql*/ `SELECT`),
+  ]);
+  try {
+    await Promise.race([
+      new Promise(resolve => conn.on('close', resolve)),
+      new Promise((_, reject) => setTimeout(reject, 400, Error(
+        'Connection was not closed after idleTimeout',
+      ))),
+    ]);
+  } finally {
+    conn.end(); // close manually if fail
+  }
+});
+
+it('idle timeout 3', async () => {
+  const conn = await pg.connect(process.env.POSTGRES, {
+    idleTimeout: 200,
+  });
+  await conn.query(/*sql*/ `SELECT`);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  await conn.query(/*sql*/ `SELECT`);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  await conn.query(/*sql*/ `SELECT`);
+  try {
+    await Promise.race([
+      new Promise(resolve => conn.on('close', resolve)),
+      new Promise((_, reject) => setTimeout(reject, 400, Error(
+        'Connection was not closed after idleTimeout',
+      ))),
+    ]);
+  } finally {
+    conn.end();
+  }
+});
+
+it('pool - idle timeout', async () => {
+  const pool = pg.pool(process.env.POSTGRES, {
+    idleTimeout: 200,
+    poolMaxConnections: 1,
+  });
+  try {
+    const { scalar: pid } = await pool.query(/*sql*/ `SELECT pg_backend_pid()`);
+    const alive = Number(psql(/*sql*/ `
+      SELECT count(*) FROM pg_stat_activity WHERE pid = '${pid}'
+    `));
+    assert.deepStrictEqual(alive, 1);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    const stillAlive = Number(psql(/*sql*/ `
+      SELECT count(*) FROM pg_stat_activity WHERE pid = '${pid}'
+    `));
+    assert.deepStrictEqual(stillAlive, 0, 'idleTimeout is not working');
+  } finally {
+    pool.clear();
+  }
+});
+
+it('pool async error', async () => {
+  const pool = pg.pool(process.env.POSTGRES, {
+    poolMaxConnections: 1,
+  });
+  const { scalar: pid1 } = await pool.query(/*sql*/ `SELECT pg_backend_pid()`);
+  psql(/*sql*/ `SELECT pg_terminate_backend('${pid1}')`);
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const { scalar: pid2 } = await pool.query(/*sql*/ `SELECT pg_backend_pid()`);
+  assert.notEqual(pid1, pid2);
+});
+
+// it('pool', async () => {
+//   const pool = pg.pool(process.env.POSTGRES, {
+//     poolMaxConnections: 4,
+//     application_name: 'pgwire-pool-test',
+//   });
+//   for (let i = 0; i < 10; i++) {
+//     pool.query(/*sql*/ `SELECT pg_sleep(.1)`);
+//     await new Promise(resolve => setTimeout(resolve, 50));
+//     console.log();
+//   }
+// });
 
 function xit() {}
 function it(name, fn) {
   it.tests = it.tests || [];
   it.tests.push({ name, fn });
 }
+
 async function main() {
   for (const { name, fn } of it.tests) {
+    let testTimeout;
     try {
-      await fn();
+      await Promise.race([fn(), new Promise((_, reject) => {
+        testTimeout = setTimeout(reject, 5000, Error('test timeout'));
+      })]);
+      // eslint-disable-next-line no-console
       console.log(name, '- ok');
     } catch (err) {
-      console.log(name, '- failed');
-      throw err;
+      // eslint-disable-next-line no-console
+      console.log(name, '- failed', err);
+      throw Error('test failed');
+    } finally {
+      clearTimeout(testTimeout);
     }
   }
 }
+
 main().catch(err => {
   console.error(err);
   process.exitCode = 1;
@@ -578,8 +762,8 @@ function arrstream(chunks) {
     read() {
       chunks.forEach(x => this.push(x));
       this.push(null);
-    }
-  })
+    },
+  });
 }
 
 function psql(input) {

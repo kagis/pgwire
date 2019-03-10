@@ -1,5 +1,4 @@
 FROM node:11-alpine
 RUN sed -i -e 's/dl-cdn/dl-4/' /etc/apk/repositories \
  && apk add --update postgresql-client
-# CMD until pg_isready -h postgres; do sleep 1; done &&
-CMD npm test
+CMD node --no-warnings test/test.js

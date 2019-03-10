@@ -3,10 +3,10 @@ services:
   test:
     build: .
     environment:
-      POSTGRES: postgres://postgres@postgres:5432
-    depends_on:
-      - postgres
-      - pgbouncer
+      - POSTGRES=postgres://postgres@postgres:5432/postgres
+      - POSTGRES_PGBOUNCER=postgres://postgres@pgbouncer:6432/postgres
+      - NODE_DEBUG
+    depends_on: [postgres, pgbouncer]
     working_dir: /opt/pgwire
     volumes: ['..:/opt/pgwire']
 
@@ -32,3 +32,12 @@ services:
     environment:
       DB_HOST: postgres
       DB_USER: postgres
+
+  lint:
+    build:
+      context: .
+      dockerfile: lint.dockerfile
+    working_dir: /app
+    volumes:
+      - ..:/app
+

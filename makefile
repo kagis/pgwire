@@ -30,4 +30,7 @@ psql:
 	-docker-compose -f test/docker-compose.yml run --rm psql
 	docker-compose -f test/docker-compose.yml down -v
 
-	# docker run -it --rm -v "$$PWD":/app -w /app node:11-alpine node bin/pgwire.js
+.PHONY: lint
+lint:
+	docker-compose -f test/docker-compose.yml down -v
+	docker-compose -f test/docker-compose.yml up --build --exit-code-from lint lint

@@ -13,12 +13,14 @@ tx.pipe(socket).pipe(new BackendDecoder()).pipe(new Writable({
   objectMode: true,
   write(message, _enc, done) {
     message.datas = String(message.data);
+    // eslint-disable-next-line no-console
     console.log('->', JSON.stringify(message));
     return done();
-  }
+  },
 }));
 
-socket.on('connect', _ => {
+socket.on('connect', () => {
+  // eslint-disable-next-line no-console
   console.log('connected');
   const replServer = repl.start('');
   for (const m in fe) {
@@ -26,10 +28,11 @@ socket.on('connect', _ => {
       tx.write(new fe[m](options));
     };
   }
-  replServer.on('exit', _ => {
+  replServer.on('exit', () => {
     socket.end();
   });
-  socket.on('close', _ => {
+  socket.on('close', () => {
+    // eslint-disable-next-line no-console
     console.log('closed');
     process.exit(0);
   });

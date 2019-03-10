@@ -1,0 +1,85 @@
+{
+  "extends": "eslint:recommended",
+  "env": {
+    "browser": true,
+    "node": true,
+    "es6": true
+  },
+  "globals": {
+    "gx_page": true,
+    "BigInt": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2019,
+    "sourceType": "module"
+  },
+  "rules": {
+    "no-console": ["warn", {
+      "allow": ["error", "warn", "assert"]
+    }],
+    "prefer-const": "error",
+    "prefer-rest-params": "error",
+    "prefer-spread": "error",
+    "no-var": "error",
+    "no-unused-expressions": "error",
+    "no-unused-vars": ["error", {
+      "argsIgnorePattern": "^_",
+      "varsIgnorePattern": "^_"
+    }],
+    "no-shadow": "error",
+    "no-async-promise-executor": "error",
+    "no-self-compare": "error",
+    "no-with": "error",
+    "prefer-promise-reject-errors": "error",
+
+    "indent": ["error", 2, {
+      "MemberExpression": 0,
+      "SwitchCase": 1,
+      "flatTernaryExpressions": true
+    }],
+    "eol-last": "error",
+    "no-trailing-spaces": "error",
+    "curly": ["error", "all"],
+    "semi": ["error", "always"],
+    "semi-spacing": "error",
+    "no-extra-semi": "error",
+    "key-spacing": "error",
+    "comma-dangle": ["error", "always-multiline"],
+    "comma-spacing": "error",
+    "comma-style": ["error", "last"],
+    "object-curly-newline": ["error", {
+      "consistent": true
+    }],
+    "brace-style": ["error", "1tbs"],
+    "array-bracket-spacing": "error",
+    "object-curly-spacing": ["error", "always"],
+    "space-before-function-paren": ["error", {
+      "anonymous": "always",
+      "named": "never",
+      "asyncArrow": "always"
+    }],
+    "arrow-spacing": ["error", {
+      "before": true,
+      "after": true
+    }],
+    "keyword-spacing": "error",
+    "space-in-parens": ["error", "never"],
+    "space-before-blocks": ["error", "always"],
+    "space-infix-ops": "error",
+    "object-shorthand": ["error", "always"],
+    "one-var": ["error", "never"],
+    "no-multiple-empty-lines": ["error", {
+      "max": 1
+    }],
+    "func-call-spacing": ["error", "never"],
+    "quotes": ["error", "single", {
+      "allowTemplateLiterals": true
+    }],
+    "no-multi-spaces": "error",
+    "no-lonely-if": "error",
+    "no-tabs": "error",
+    "no-unneeded-ternary": "error",
+    "no-whitespace-before-property": "error",
+    "linebreak-style": ["error", "unix"]
+  }
+}
