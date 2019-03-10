@@ -708,11 +708,15 @@ it('pool async error', async () => {
   const pool = pg.pool(process.env.POSTGRES, {
     poolMaxConnections: 1,
   });
-  const { scalar: pid1 } = await pool.query(/*sql*/ `SELECT pg_backend_pid()`);
-  psql(/*sql*/ `SELECT pg_terminate_backend('${pid1}')`);
-  await new Promise(resolve => setTimeout(resolve, 200));
-  const { scalar: pid2 } = await pool.query(/*sql*/ `SELECT pg_backend_pid()`);
-  assert.notEqual(pid1, pid2);
+  try {
+    const { scalar: pid1 } = await pool.query(/*sql*/ `SELECT pg_backend_pid()`);
+    psql(/*sql*/ `SELECT pg_terminate_backend('${pid1}')`);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const { scalar: pid2 } = await pool.query(/*sql*/ `SELECT pg_backend_pid()`);
+    assert.notEqual(pid1, pid2);
+  } finally {
+    pool.clear();
+  }
 });
 
 it('connection uri options', async () => {
@@ -720,6 +724,16 @@ it('connection uri options', async () => {
   try {
     const { scalar } = await conn.query(/*sql*/ `SELECT current_setting('application_name')`);
     assert.equal(scalar, 'test');
+  } finally {
+    conn.end();
+  }
+});
+
+it('idleTimeout=0 should not close connection', async () => {
+  const conn = await pg.connect('postgres://postgres@postgres:5432/postgres');
+  try {
+    await new Promise(resolve => setTimeout(resolve, 200));
+    await conn.query(/*sql*/ `SELECT`);
   } finally {
     conn.end();
   }
