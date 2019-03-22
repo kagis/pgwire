@@ -1,4 +1,4 @@
-FROM node:11-alpine
+FROM node:10.13.0-alpine
 RUN sed -i -e 's/dl-cdn/dl-4/' /etc/apk/repositories \
  && apk add --update postgresql-client
 CMD node --no-warnings test/test.js

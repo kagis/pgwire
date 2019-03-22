@@ -9,15 +9,12 @@ PostgreSQL client library for Node.js
 ## Features
 
 - Memory efficient data streaming
-- [Logical replication using pgoutput protocol](test/test.js#L358)
+- [Logical replication using pgoutput protocol](test/test.js#L368)
 - [Multi-statement queries](test/test.js#L38)
 - Efficient bytea transfering
 - Copy from stdin and to stdout
-- Single round-trip queries for trusted connections
 - [Pure js without dependencies](package.json#L36)
 <!-- - True asynchronous -->
-<!-- - Interchangeable connection strategies -->
-<!-- - Session safety guards -->
 
 ## [Examples](test/test.js)
 
@@ -56,18 +53,7 @@ pgwire itself is `pool(process.env.POSTGRES)` instance
 ### IClient
 
 - .query()
-- .queryStream()
-- .queryExtended()
-  - .parse()
-  - .bind()
-  - .execute()
-  - .describeStatement()
-  - .describePortal()
-  - .closeStatement()
-  - .closePortal()
-  - .fetch()
-  - .stream()
-- .session()
+- .stream()
 - .logicalReplication()
   - .pgoutput()
   - .ack()
