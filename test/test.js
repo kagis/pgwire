@@ -4,7 +4,7 @@ const { execSync } = require('child_process');
 const { promisify } = require('util');
 const pg = require('../lib/index.js');
 
-const finished_p = promisify(finished);
+const finishedp = promisify(finished);
 
 it('wait for ready', async () => {
   const conn = await pg.connectRetry(process.env.POSTGRES);
@@ -501,7 +501,7 @@ it('logical replication ack', async () => {
   replstream.ack(firstCommitLsn);
   replstream.end();
   replstream.resume();
-  await finished_p(replstream);
+  await finishedp(replstream);
   const changesCountAfterAck = JSON.parse(psql(/*sql*/ `
     SELECT count(*) FROM pg_logical_slot_peek_changes('acktest', NULL, NULL)
   `));

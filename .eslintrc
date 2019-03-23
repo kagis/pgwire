@@ -6,7 +6,6 @@
     "es6": true
   },
   "globals": {
-    "gx_page": true,
     "BigInt": true
   },
   "parserOptions": {
