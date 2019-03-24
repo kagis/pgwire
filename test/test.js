@@ -556,7 +556,7 @@ it('param explicit type', async () => {
         },
       }, {
         type: 'text[]',
-        value: ['1', '2', '3'],
+        value: ['1', '2', '3', null],
       }, {
         type: 'bytea[]',
         value: ['x', 'y', 'z'],
@@ -567,7 +567,7 @@ it('param explicit type', async () => {
     'integer', 1,
     'boolean', true,
     'jsonb', 'hello',
-    'text[]', '{1,2,3}',
+    'text[]', '{1,2,3,NULL}',
     'bytea[]', '{"\\\\x78","\\\\x79","\\\\x7a"}',
   ]);
 });
