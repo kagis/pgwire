@@ -218,11 +218,18 @@ it('row decode simple', async () => {
       '\\xdeadbeaf'::bytea,
       42::int2, -42::int2,
       42::int4, -42::int4,
+      42::int8, -42::int8,
       36.6::float4, -36.6::float4,
       36.6::float8, -36.6::float8,
       jsonb_build_object('hello', 'world', 'num', 1),
       json_build_object('hello', 'world', 'num', 1),
-      '1/2'::pg_lsn
+      '1/2'::pg_lsn,
+      ARRAY[1, 2, 3]::int[],
+      ARRAY[1, 2, 3]::text[],
+      ARRAY['"quoted"', '{string}', '"{-,-}"'],
+      ARRAY[[1, 2], [3, 4]],
+      '[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}'::int[],
+      ARRAY[1, NULL, 2]
   `);
   assert.deepStrictEqual(rows, [[
     null,
@@ -231,23 +238,18 @@ it('row decode simple', async () => {
     Buffer.from('deadbeaf', 'hex'),
     42, -42,
     42, -42,
+    BigInt(42), BigInt(-42),
     36.6, -36.6,
     36.6, -36.6,
     { hello: 'world', num: 1 },
     { hello: 'world', num: 1 },
     '00000001/00000002',
-  ]]);
-});
-
-xit('array decode simple', async () => {
-  const { rows } = await pg.query(/*sql*/ `
-    SELECT
-      array[true, false],
-      array[['a', 'b'], ['c', 'd']]
-  `);
-  assert.deepStrictEqual(rows, [[
-    [true, false],
-    [['a', 'b'], ['c', 'd']],
+    [1, 2, 3],
+    ['1', '2', '3'],
+    ['"quoted"', '{string}', '"{-,-}"'],
+    [[1, 2], [3, 4]],
+    [[[1, 2, 3], [4, 5, 6]]],
+    [1, null, 2],
   ]]);
 });
 
@@ -261,9 +263,18 @@ it('row decode extended', async () => {
           '\\xdeadbeaf'::bytea,
           42::int2, -42::int2,
           42::int4, -42::int4,
+          42::int8, -42::int8,
           36.599998474121094::float4, -36.599998474121094::float4,
           36.6::float8, -36.6::float8,
-          '1/2'::pg_lsn
+          jsonb_build_object('hello', 'world', 'num', 1),
+          json_build_object('hello', 'world', 'num', 1),
+          '1/2'::pg_lsn,
+          ARRAY[1, 2, 3]::int[],
+          ARRAY[1, 2, 3]::text[],
+          ARRAY['"quoted"', '{string}', '"{-,-}"'],
+          ARRAY[[1, 2], [3, 4]],
+          '[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}'::int[],
+          ARRAY[1, NULL, 2]
       `,
     }],
   });
@@ -273,35 +284,28 @@ it('row decode extended', async () => {
     Buffer.from('deadbeaf', 'hex'),
     42, -42,
     42, -42,
+    BigInt(42), BigInt(-42),
     36.599998474121094, -36.599998474121094,
     36.6, -36.6,
+    { hello: 'world', num: 1 },
+    { hello: 'world', num: 1 },
     '00000001/00000002',
+    [1, 2, 3],
+    ['1', '2', '3'],
+    ['"quoted"', '{string}', '"{-,-}"'],
+    [[1, 2], [3, 4]],
+    [[[1, 2, 3], [4, 5, 6]]],
+    [1, null, 2],
   ]]);
-});
-
-it('bigint decode extended', async () => {
-  const { rows } = await pg.query({
-    extended: true,
-    script: [{
-      sql: /*sql*/ `SELECT 42::int8, -42::int8`,
-    }],
-  });
-  assert.deepStrictEqual(rows, [[BigInt(42), BigInt(-42)]]);
 });
 
 it('listen/notify', async () => {
   const conn = await pg.connect(process.env.POSTGRES);
   try {
-    const response = Promise.race([
-      new Promise((_resolve, reject) => setTimeout(
-        () => reject(Error('no notification received in 1s')),
-        1000,
-      )),
-      new Promise((resolve, reject) => {
-        conn.on('notify:test', ({ payload }) => resolve(payload));
-        conn.on('error', reject);
-      }),
-    ]);
+    const response = new Promise((resolve, reject) => {
+      conn.on('notify:test', ({ payload }) => resolve(payload));
+      conn.on('error', reject);
+    });
     await conn.query(/*sql*/ `LISTEN test`);
     psql(/*sql*/ `NOTIFY test, 'hello'`);
     assert.deepStrictEqual(await response, 'hello');
@@ -536,7 +540,8 @@ it('param explicit type', async () => {
         SELECT pg_typeof($1)::text, $1,
           pg_typeof($2)::text, $2,
           pg_typeof($3)::text, $3->>'key',
-          pg_typeof($4)::text, array_to_string($4, ',')
+          pg_typeof($4)::text, $4::text,
+          pg_typeof($5)::text, $5::text
       `,
       params: [{
         type: 'int4',
@@ -552,6 +557,9 @@ it('param explicit type', async () => {
       }, {
         type: 'text[]',
         value: ['1', '2', '3'],
+      }, {
+        type: 'bytea[]',
+        value: ['x', 'y', 'z'],
       }],
     }],
   });
@@ -559,7 +567,8 @@ it('param explicit type', async () => {
     'integer', 1,
     'boolean', true,
     'jsonb', 'hello',
-    'text[]', '1,2,3',
+    'text[]', '{1,2,3}',
+    'bytea[]', '{"\\\\x78","\\\\x79","\\\\x7a"}',
   ]);
 });
 
@@ -681,12 +690,7 @@ it('idle timeout', async () => {
     idleTimeout: 200,
   });
   try {
-    await Promise.race([
-      new Promise(resolve => conn.on('close', resolve)),
-      new Promise((_, reject) => setTimeout(reject, 400, Error(
-        'Connection was not closed after idleTimeout',
-      ))),
-    ]);
+    await new Promise(resolve => conn.on('close', resolve));
   } finally {
     conn.end(); // close manually if fail
   }

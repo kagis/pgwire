@@ -13,7 +13,7 @@
       value: 'hello',
     }],
     limit: 10,
-    stdin: fs.createFileStream(...)
+    stdin: fs.createReadStream(...),
   }, {
     // creates prepared statement
     op: 'parse',
@@ -66,7 +66,7 @@
     // if limit is exceeded then result will have `suspeded: true` flag
     limit: 10,
     // optional stdin source stream for `COPY target FROM STDIN` queries
-    stdin: fs.createFileStream(...),
+    stdin: fs.createReadStream(...),
   }],
 });
 ```
