@@ -512,6 +512,16 @@ it('logical replication ack', async () => {
   assert.deepStrictEqual(changesCountAfterAck, 4);
 });
 
+it('logical replication invalid startLsn', async () => {
+  const response = pg.logicalReplication({
+    slot: 'unicorn',
+    startLsn: 'invalid_lsn',
+  });
+  await assert.rejects(response, {
+    code: 'PGERR_INVALID_START_LSN',
+  });
+});
+
 it('parse bind execute', async () => {
   const { scalar } = await pg.query({
     extended: true,
