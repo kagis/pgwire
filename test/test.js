@@ -794,6 +794,16 @@ it('idleTimeout=0 should not close connection', async () => {
   }
 });
 
+it('unix socket', async () => {
+  const conn = await pg.connect(process.env.POSTGRES_UNIX);
+  try {
+    const { scalar } = await conn.query(/*sql*/ `SELECT 'hello'`);
+    assert.deepStrictEqual(scalar, 'hello');
+  } finally {
+    conn.end();
+  }
+});
+
 // it('pool', async () => {
 //   const pool = pg.pool(process.env.POSTGRES, {
 //     poolMaxConnections: 4,
@@ -834,6 +844,10 @@ async function main() {
 main().catch(err => {
   console.error(err);
   process.exitCode = 1;
+  setTimeout(_ => {
+    console.error('killing tests');
+    process.exit(1);
+  }, 1000).unref();
 });
 
 function arrstream(chunks) {
