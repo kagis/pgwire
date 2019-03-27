@@ -27,8 +27,10 @@ PostgreSQL client library for Node.js
 - Copy from stdin
 - Logical replication
 
+## Basic usage
+
 ```js
-// run with env POSTGRES=postgres://<user>@<host>:<port>/<database>
+// run with enviro POSTGRES=postgres://<user>@<host>:<port>/<database>
 const pg = require('pgwire');
 const { rows } = await pg.query(`SELECT 'hello', 'world'`);
 console.log(rows);
@@ -37,9 +39,18 @@ console.log(rows);
 
 ## API Reference
 
-- .connectRetry() -> [IClient](#IClient)
-- .connect() -> [IClient](#IClient)
-- .pool() -> [IClient](#IClient)
+- .connectRetry()
+- .connect()
+  - .query()
+  - .logicalReplication()
+    - .pgoutput()
+    - .ack()
+    - .ackImmediate()
+    - .end()
+- .pool()
+  - .query()
+  - .session()
+  - .clear()
 
 pgwire itself is `pool(process.env.POSTGRES)` instance
 
@@ -53,7 +64,6 @@ pgwire itself is `pool(process.env.POSTGRES)` instance
 ### IClient
 
 - .query()
-- .stream()
 - .logicalReplication()
   - .pgoutput()
   - .ack()

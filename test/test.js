@@ -818,6 +818,34 @@ it('unix socket', async () => {
   }
 });
 
+it('stream', async () => {
+  const resp = pg.query(/*sql*/ `SELECT 'hello' col`);
+  const result = [];
+  resp.on('data', msg => result.push(msg));
+  await finishedp(resp);
+  assert.deepStrictEqual(result, [{
+    tag: 'RowDescription',
+    fields: [{
+      name: 'col',
+      tableid: 0,
+      column: 0,
+      typeid: 25,
+      typelen: -1,
+      typemod: -1,
+      binary: 0,
+    }],
+  }, {
+    tag: 'DataRow',
+    data: ['hello'],
+  }, {
+    tag: 'CommandComplete',
+    command: 'SELECT 1',
+  }, {
+    tag: 'ReadyForQuery',
+    transactionStatus: 73,
+  }]);
+});
+
 // it('pool', async () => {
 //   const pool = pg.pool(process.env.POSTGRES, {
 //     poolMaxConnections: 4,
@@ -867,7 +895,9 @@ main().catch(err => {
 function arrstream(chunks) {
   return Readable({
     read() {
-      chunks.forEach(x => this.push(x));
+      for (const chunk of chunks) {
+        this.push(chunk);
+      }
       this.push(null);
     },
   });
