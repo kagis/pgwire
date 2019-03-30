@@ -649,6 +649,14 @@ it('auth md5', async () => {
   conn.end();
 });
 
+it('auth sha256', async () => {
+  const conn = await pg.connect(process.env.POSTGRES, {
+    user: 'u_sha256',
+    password: 'qwerty',
+  });
+  conn.end();
+});
+
 it('write after end', async () => {
   const conn = await pg.connect(process.env.POSTGRES);
   conn.end();
