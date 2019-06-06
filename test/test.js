@@ -877,11 +877,10 @@ it('stream', async () => {
   assert.deepStrictEqual(chunks.shift(), undefined);
 });
 
-xit('stream destroy', async () => {
+it('stream destroy', async () => {
   const conn = await pg.connect(process.env.POSTGRES);
   try {
     const resp = conn.query(/*sql*/ `SELECT generate_series(0, 2000)`);
-    // resp.resume();
     resp.destroy();
     const { scalar } = await conn.query(/*sql*/ `SELECT 'hello'`);
     assert.deepStrictEqual(scalar, 'hello');
