@@ -10,9 +10,10 @@ PostgreSQL client library for Node.js
 
 - Memory efficient data streaming
 - [Logical replication using pgoutput protocol](test/test.js#L368)
-- [Multi-statement queries](test/test.js#L38)
+- [Multi-statement queries](test/test.js#L39)
 - Efficient bytea transfering
 - Copy from stdin and to stdout
+- SCRAM-SHA-256 authentication method support
 - [Pure js without dependencies](package.json#L36)
 <!-- - True asynchronous -->
 
