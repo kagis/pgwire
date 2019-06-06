@@ -12,7 +12,9 @@ const tx = new FrontendEncoder();
 tx.pipe(socket).pipe(new BackendDecoder()).pipe(new Writable({
   objectMode: true,
   write(message, _enc, done) {
-    message.datas = String(message.data);
+    if (message.data) {
+      message.datas = String(message.data);
+    }
     // eslint-disable-next-line no-console
     console.log('->', JSON.stringify(message));
     return done();

@@ -1,6 +1,7 @@
 const assert = require('assert');
-const { Readable, finished } = require('stream');
+const { Readable, pipeline, finished } = require('stream');
 const { execSync } = require('child_process');
+const fs = require('fs');
 const { promisify } = require('util');
 const pg = require('../lib/index.js');
 
@@ -826,12 +827,33 @@ it('unix socket', async () => {
   }
 });
 
+it('copy to file', async () => {
+  const resp = pg.query(/*sql*/ `COPY (VALUES (1, 2)) TO STDOUT`);
+  const fw = fs.createWriteStream('/tmp/test');
+  await promisify(pipeline)(resp, fw);
+  const content = fs.readFileSync('/tmp/test', { encoding: 'utf-8' });
+  assert.deepStrictEqual(content, '1\t2\n');
+});
+
+it('copy to stdout', async () => {
+  const resp = pg.query(/*sql*/ `COPY (VALUES (1, 2)) TO STDOUT`);
+  const chunks = await readAllChunks(resp);
+  assert.deepStrictEqual(String(Buffer.concat(chunks)), '1\t2\n');
+});
+
+it('copy to stdout 2', async () => {
+  const resp = pg.query(/*sql*/ `
+    COPY (VALUES (1, 2)) TO STDOUT;
+    COPY (VALUES (3, 4)) TO STDOUT;
+  `);
+  const chunks = await readAllChunks(resp);
+  assert.deepStrictEqual(String(Buffer.concat(chunks)), '1\t2\n3\t4\n');
+});
+
 it('stream', async () => {
   const resp = pg.query(/*sql*/ `SELECT 'hello' col`);
-  const result = [];
-  resp.on('data', msg => result.push(msg));
-  await finishedp(resp);
-  assert.deepStrictEqual(result, [{
+  const chunks = await readAllChunks(resp);
+  assert.deepStrictEqual(chunks.shift().boundary, {
     tag: 'RowDescription',
     fields: [{
       name: 'col',
@@ -842,16 +864,30 @@ it('stream', async () => {
       typemod: -1,
       binary: 0,
     }],
-  }, {
-    tag: 'DataRow',
-    data: ['hello'],
-  }, {
+  });
+  assert.deepStrictEqual(chunks.shift(), ['hello']);
+  assert.deepStrictEqual(chunks.shift().boundary, {
     tag: 'CommandComplete',
     command: 'SELECT 1',
-  }, {
+  });
+  assert.deepStrictEqual(chunks.shift().boundary, {
     tag: 'ReadyForQuery',
     transactionStatus: 73,
-  }]);
+  });
+  assert.deepStrictEqual(chunks.shift(), undefined);
+});
+
+xit('stream destroy', async () => {
+  const conn = await pg.connect(process.env.POSTGRES);
+  try {
+    const resp = conn.query(/*sql*/ `SELECT generate_series(0, 2000)`);
+    // resp.resume();
+    resp.destroy();
+    const { scalar } = await conn.query(/*sql*/ `SELECT 'hello'`);
+    assert.deepStrictEqual(scalar, 'hello');
+  } finally {
+    conn.end();
+  }
 });
 
 // it('pool', async () => {
@@ -908,6 +944,14 @@ function arrstream(chunks) {
       }
       this.push(null);
     },
+  });
+}
+
+function readAllChunks(readable) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    readable.on('data', chunk => chunks.push(chunk));
+    finished(readable, err => err ? reject(err) : resolve(chunks));
   });
 }
 
