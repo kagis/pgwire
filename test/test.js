@@ -75,9 +75,10 @@ it('multiple queries', async () => {
 
 it('extended proto', async () => {
   const result = await pg.query({
-    extended: true,
-    script: [{
-      sql: /*sql*/ `SELECT 'hello'`,
+    statement: /*sql*/ `SELECT $1`,
+    params: [{
+      type: 'text',
+      value: 'hello',
     }],
   });
   assert.deepStrictEqual(result, {
@@ -95,13 +96,20 @@ it('extended proto', async () => {
   });
 });
 
+it('multi-statement extended query', async () => {
+  const { results } = await pg.query({
+    statement: /*sql*/ `SELECT 'a'`,
+  }, {
+    statement: /*sql*/ `SELECT 'b'`,
+  });
+  assert.deepStrictEqual(results[0].rows, [['a']]);
+  assert.deepStrictEqual(results[1].rows, [['b']]);
+});
+
 it('portal suspended', async () => {
   const result = await pg.query({
-    extended: true,
-    script: [{
-      sql: /*sql*/ `SELECT 'hello' FROM generate_series(0, 10)`,
-      limit: 2,
-    }],
+    statement: /*sql*/ `SELECT 'hello' FROM generate_series(0, 10)`,
+    limit: 2,
   });
   assert.deepStrictEqual(result, {
     inTransaction: false,
@@ -120,10 +128,7 @@ it('portal suspended', async () => {
 
 it('empty query', async () => {
   const result = await pg.query({
-    extended: true,
-    script: [{
-      sql: '',
-    }],
+    statement: '',
   });
   assert.deepStrictEqual(result, {
     inTransaction: false,
@@ -138,6 +143,23 @@ it('empty query', async () => {
     empty: true,
     suspended: false,
   });
+});
+
+it('extended copy in', async () => {
+  const { rows } = await pg.query({
+    statement: /*sql*/ `BEGIN`,
+  }, {
+    statement: /*sql*/ `CREATE TEMP TABLE test(foo TEXT, bar TEXT)`,
+  }, {
+    statement: /*sql*/ `COPY test FROM STDIN`,
+    stdin: arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
+  }, {
+    statement: /*sql*/ `TABLE test`,
+  });
+  assert.deepStrictEqual(rows, [
+    ['1', 'hello'],
+    ['2', 'world'],
+  ]);
 });
 
 it('simple copy in', async () => {
@@ -156,35 +178,12 @@ it('simple copy in', async () => {
   ]);
 });
 
-it('extended copy in', async () => {
-  const { rows } = await pg.query({
-    extended: true,
-    script: [{
-      sql: /*sql*/ `BEGIN`,
-    }, {
-      sql: /*sql*/ `CREATE TEMP TABLE test(foo TEXT, bar TEXT)`,
-    }, {
-      sql: /*sql*/ `COPY test FROM STDIN`,
-      stdin: arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
-    }, {
-      sql: /*sql*/ `TABLE test`,
-    }],
-  });
-  assert.deepStrictEqual(rows, [
-    ['1', 'hello'],
-    ['2', 'world'],
-  ]);
-});
-
 it('extended copy in missing 1', async () => {
-  const response = pg.query({
-    extended: true,
-    script: [
-      { sql: /*sql*/ `BEGIN` },
-      { sql: /*sql*/ `CREATE TEMP TABLE test(foo INT, bar TEXT)` },
-      { sql: /*sql*/ `COPY test FROM STDIN` },
-    ],
-  });
+  const response = pg.query(
+    { statement: /*sql*/ `BEGIN` },
+    { statement: /*sql*/ `CREATE TEMP TABLE test(foo INT, bar TEXT)` },
+    { statement: /*sql*/ `COPY test FROM STDIN` },
+  );
   await assert.rejects(response, {
     code: 'PGERR_57014',
   });
@@ -258,29 +257,26 @@ it('row decode simple', async () => {
 
 it('row decode extended', async () => {
   const { rows } = await pg.query({
-    extended: true,
-    script: [{
-      sql: /*sql*/ `
-        SELECT null, true, false,
-          'hello'::text,
-          '\\xdeadbeaf'::bytea,
-          42::int2, -42::int2,
-          42::int4, -42::int4,
-          42::int8, -42::int8,
-          36.599998474121094::float4, -36.599998474121094::float4,
-          36.6::float8, -36.6::float8,
-          jsonb_build_object('hello', 'world', 'num', 1),
-          json_build_object('hello', 'world', 'num', 1),
-          '1/2'::pg_lsn,
-          'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid,
-          ARRAY[1, 2, 3]::int[],
-          ARRAY[1, 2, 3]::text[],
-          ARRAY['"quoted"', '{string}', '"{-,-}"'],
-          ARRAY[[1, 2], [3, 4]],
-          '[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}'::int[],
-          ARRAY[1, NULL, 2]
-      `,
-    }],
+    statement: /*sql*/ `
+      SELECT null, true, false,
+        'hello'::text,
+        '\\xdeadbeaf'::bytea,
+        42::int2, -42::int2,
+        42::int4, -42::int4,
+        42::int8, -42::int8,
+        36.599998474121094::float4, -36.599998474121094::float4,
+        36.6::float8, -36.6::float8,
+        jsonb_build_object('hello', 'world', 'num', 1),
+        json_build_object('hello', 'world', 'num', 1),
+        '1/2'::pg_lsn,
+        'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid,
+        ARRAY[1, 2, 3]::int[],
+        ARRAY[1, 2, 3]::text[],
+        ARRAY['"quoted"', '{string}', '"{-,-}"'],
+        ARRAY[[1, 2], [3, 4]],
+        '[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}'::int[],
+        ARRAY[1, NULL, 2]
+    `,
   });
   assert.deepStrictEqual(rows, [[
     null, true, false,
@@ -529,53 +525,47 @@ it('logical replication invalid startLsn', async () => {
 
 it('parse bind execute', async () => {
   const { scalar } = await pg.query({
-    extended: true,
-    script: [{
-      op: 'parse',
-      sql: /*sql*/ `SELECT $1`,
-      paramTypes: ['int4'],
-    }, {
-      op: 'bind',
-      params: [{
-        type: 'int4',
-        value: 1,
-      }],
-    }, {
-      op: 'execute',
+    op: 'parse',
+    statement: /*sql*/ `SELECT $1`,
+    paramTypes: ['int4'],
+  }, {
+    op: 'bind',
+    params: [{
+      type: 'int4',
+      value: 1,
     }],
+  }, {
+    op: 'execute',
   });
   assert.deepStrictEqual(scalar, 1);
 });
 
 it('param explicit type', async () => {
   const { rows: [row] } = await pg.query({
-    extended: true,
-    script: [{
-      sql: /*sql*/ `
-        SELECT pg_typeof($1)::text, $1,
-          pg_typeof($2)::text, $2,
-          pg_typeof($3)::text, $3->>'key',
-          pg_typeof($4)::text, $4::text,
-          pg_typeof($5)::text, $5::text
-      `,
-      params: [{
-        type: 'int4',
-        value: 1,
-      }, {
-        type: 'bool',
-        value: true,
-      }, {
-        type: 'jsonb',
-        value: {
-          key: 'hello',
-        },
-      }, {
-        type: 'text[]',
-        value: ['1', '2', '3', null],
-      }, {
-        type: 'bytea[]',
-        value: ['x', 'y', 'z'],
-      }],
+    statement: /*sql*/ `
+      SELECT pg_typeof($1)::text, $1,
+        pg_typeof($2)::text, $2,
+        pg_typeof($3)::text, $3->>'key',
+        pg_typeof($4)::text, $4::text,
+        pg_typeof($5)::text, $5::text
+    `,
+    params: [{
+      type: 'int4',
+      value: 1,
+    }, {
+      type: 'bool',
+      value: true,
+    }, {
+      type: 'jsonb',
+      value: {
+        key: 'hello',
+      },
+    }, {
+      type: 'text[]',
+      value: ['1', '2', '3', null],
+    }, {
+      type: 'bytea[]',
+      value: ['x', 'y', 'z'],
     }],
   });
   assert.deepStrictEqual(row, [
