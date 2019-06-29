@@ -163,14 +163,13 @@ it('extended copy in', async () => {
 });
 
 it('simple copy in', async () => {
-  const { rows } = await pg.query({
+  const { rows } = await pg.query(/*sql*/ `
+    BEGIN;
+    CREATE TABLE test(foo TEXT, bar TEXT);
+    COPY test FROM STDIN;
+    SELECT * FROM test;
+  `, {
     stdin: arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
-    script: /*sql*/ `
-      BEGIN;
-      CREATE TABLE test(foo TEXT, bar TEXT);
-      COPY test FROM STDIN;
-      SELECT * FROM test;
-    `,
   });
   assert.deepStrictEqual(rows, [
     ['1', 'hello'],
@@ -190,15 +189,14 @@ it('extended copy in missing 1', async () => {
 });
 
 it('simple copy in missing', async () => {
-  const response = pg.query({
-    script: /*sql*/ `
+  const response = pg.query(/*sql*/ `
       BEGIN;
       CREATE TABLE test(foo INT, bar TEXT);
       COPY test FROM STDIN;
       SELECT 'hello';
       COPY test FROM STDIN;
       COPY test FROM STDIN;
-    `,
+  `, {
     stdin: [
       arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
       arrstream(['1\t', 'hello\n', '2\t', 'world\n']),
@@ -304,12 +302,14 @@ it('listen/notify', async () => {
   const conn = await pg.connect(process.env.POSTGRES);
   try {
     const response = new Promise((resolve, reject) => {
-      conn.on('notify:test', ({ payload }) => resolve(payload));
+      conn.on('notification', resolve);
       conn.on('error', reject);
     });
     await conn.query(/*sql*/ `LISTEN test`);
     psql(/*sql*/ `NOTIFY test, 'hello'`);
-    assert.deepStrictEqual(await response, 'hello');
+    const { channel, payload } = await response;
+    assert.deepStrictEqual(channel, 'test');
+    assert.deepStrictEqual(payload, 'hello');
   } finally {
     conn.end();
   }
@@ -372,20 +372,14 @@ it('CREATE_REPLICATION_SLOT issue 1', async () => {
 
 it('logical replication pgoutput', async () => {
   psql(/*sql*/ `
-    BEGIN;
     CREATE TABLE foo1(a INT NOT NULL PRIMARY KEY, b TEXT);
-    -- ALTER TABLE foo1 REPLICA IDENTITY FULL;
     CREATE PUBLICATION pub1 FOR TABLE foo1;
     COMMIT;
-
     SELECT pg_create_logical_replication_slot('test1', 'pgoutput');
-
-    BEGIN;
     INSERT INTO foo1 VALUES (1, 'hello'), (2, 'world');
     UPDATE foo1 SET b = 'all' WHERE a = 1;
     DELETE FROM foo1 WHERE a = 2;
     TRUNCATE foo1;
-    COMMIT;
   `);
   const expectedRelation = {
     relationid: Number(psql(/*sql*/ `SELECT 'public.foo1'::regclass::oid`)),
