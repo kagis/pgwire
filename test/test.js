@@ -3,24 +3,26 @@ const { Readable, pipeline, finished } = require('stream');
 const { execSync } = require('child_process');
 const fs = require('fs');
 const { promisify } = require('util');
-const pg = require('../lib/index.js');
+const pgwire = require('../lib/index.js');
 
 const finishedp = promisify(finished);
 
 it('wait for ready', async () => {
-  const conn = await pg.connectRetry(process.env.POSTGRES);
+  const conn = await pgwire.connectRetry(process.env.POSTGRES);
   conn.end();
 });
 
 it('autoclose connections', async () => {
-  const { scalar: pid } = await pg.query(/*sql*/ `SELECT pg_backend_pid()`);
+  const client = pgwire.pool(process.env.POSTGRES);
+  const { scalar: pid } = await client.query(/*sql*/ `SELECT pg_backend_pid()`);
   await new Promise(resolve => setTimeout(resolve, 100));
   const terminated = psql(/*sql*/ `SELECT pg_terminate_backend('${pid}')`).trim();
   assert.equal(terminated, 'f');
 });
 
 it('simple proto', async () => {
-  const result = await pg.query(/*sql*/ `SELECT 'hello'`);
+  const client = pgwire.pool(process.env.POSTGRES);
+  const result = await client.query(/*sql*/ `SELECT 'hello'`);
   assert.deepStrictEqual(result, {
     inTransaction: false,
     rows: [['hello']],
@@ -37,7 +39,8 @@ it('simple proto', async () => {
 });
 
 it('simple proto multi stmt', async () => {
-  const result = await pg.query(/*sql*/ `
+  const client = pgwire.pool(process.env.POSTGRES);
+  const result = await client.query(/*sql*/ `
     VALUES ('a'), ('b');
     VALUES ('c', 'd');
   `);
@@ -61,7 +64,7 @@ it('simple proto multi stmt', async () => {
 });
 
 it('multiple queries', async () => {
-  const conn = await pg.connect(process.env.POSTGRES);
+  const conn = await pgwire.connect(process.env.POSTGRES);
   try {
     const [{ scalar: r1 }, { scalar: r2 }] = await Promise.all([
       conn.query(/*sql*/ `SELECT 'a'`),
@@ -74,7 +77,8 @@ it('multiple queries', async () => {
 });
 
 it('extended proto', async () => {
-  const result = await pg.query({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const result = await client.query({
     statement: /*sql*/ `SELECT $1`,
     params: [{
       type: 'text',
@@ -97,7 +101,8 @@ it('extended proto', async () => {
 });
 
 it('multi-statement extended query', async () => {
-  const { results } = await pg.query({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const { results } = await client.query({
     statement: /*sql*/ `SELECT 'a'`,
   }, {
     statement: /*sql*/ `SELECT 'b'`,
@@ -107,7 +112,8 @@ it('multi-statement extended query', async () => {
 });
 
 it('portal suspended', async () => {
-  const result = await pg.query({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const result = await client.query({
     statement: /*sql*/ `SELECT 'hello' FROM generate_series(0, 10)`,
     limit: 2,
   });
@@ -127,7 +133,8 @@ it('portal suspended', async () => {
 });
 
 it('empty query', async () => {
-  const result = await pg.query({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const result = await client.query({
     statement: '',
   });
   assert.deepStrictEqual(result, {
@@ -146,7 +153,8 @@ it('empty query', async () => {
 });
 
 it('extended copy in', async () => {
-  const { rows } = await pg.query({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const { rows } = await client.query({
     statement: /*sql*/ `BEGIN`,
   }, {
     statement: /*sql*/ `CREATE TEMP TABLE test(foo TEXT, bar TEXT)`,
@@ -163,7 +171,8 @@ it('extended copy in', async () => {
 });
 
 it('simple copy in', async () => {
-  const { rows } = await pg.query(/*sql*/ `
+  const client = pgwire.pool(process.env.POSTGRES);
+  const { rows } = await client.query(/*sql*/ `
     BEGIN;
     CREATE TABLE test(foo TEXT, bar TEXT);
     COPY test FROM STDIN;
@@ -178,7 +187,8 @@ it('simple copy in', async () => {
 });
 
 it('extended copy in missing 1', async () => {
-  const response = pg.query(
+  const client = pgwire.pool(process.env.POSTGRES);
+  const response = client.query(
     { statement: /*sql*/ `BEGIN` },
     { statement: /*sql*/ `CREATE TEMP TABLE test(foo INT, bar TEXT)` },
     { statement: /*sql*/ `COPY test FROM STDIN` },
@@ -189,7 +199,8 @@ it('extended copy in missing 1', async () => {
 });
 
 it('simple copy in missing', async () => {
-  const response = pg.query(/*sql*/ `
+  const client = pgwire.pool(process.env.POSTGRES);
+  const response = client.query(/*sql*/ `
       BEGIN;
       CREATE TABLE test(foo INT, bar TEXT);
       COPY test FROM STDIN;
@@ -209,7 +220,8 @@ it('simple copy in missing', async () => {
 });
 
 it('row decode simple', async () => {
-  const { rows } = await pg.query(/*sql*/ `
+  const client = pgwire.pool(process.env.POSTGRES);
+  const { rows } = await client.query(/*sql*/ `
     SELECT null,
       true, false,
       'hello'::text,
@@ -254,7 +266,8 @@ it('row decode simple', async () => {
 });
 
 it('row decode extended', async () => {
-  const { rows } = await pg.query({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const { rows } = await client.query({
     statement: /*sql*/ `
       SELECT null, true, false,
         'hello'::text,
@@ -299,7 +312,7 @@ it('row decode extended', async () => {
 });
 
 it('listen/notify', async () => {
-  const conn = await pg.connect(process.env.POSTGRES);
+  const conn = await pgwire.connect(process.env.POSTGRES);
   try {
     const response = new Promise((resolve, reject) => {
       conn.on('notification', resolve);
@@ -328,7 +341,8 @@ it('logical replication', async () => {
     ))
     FROM pg_logical_slot_peek_changes('test', NULL, NULL)
   `));
-  const replstream = await pg.logicalReplication({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const replstream = await client.logicalReplication({
     slot: 'test',
     startLsn: '0/0',
   });
@@ -342,7 +356,7 @@ it('logical replication', async () => {
 });
 
 it('CREATE_REPLICATION_SLOT issue', async () => {
-  const conn = await pg.connect(process.env.POSTGRES, {
+  const conn = await pgwire.connect(process.env.POSTGRES, {
     replication: 'database',
   });
   try {
@@ -356,7 +370,7 @@ it('CREATE_REPLICATION_SLOT issue', async () => {
 });
 
 it('CREATE_REPLICATION_SLOT issue 1', async () => {
-  const conn = await pg.connect(process.env.POSTGRES, {
+  const conn = await pgwire.connect(process.env.POSTGRES, {
     replication: 'database',
   });
   try {
@@ -400,7 +414,8 @@ it('logical replication pgoutput', async () => {
     FROM pg_logical_slot_peek_binary_changes('test1', NULL, NULL,
       'proto_version', '1', 'publication_names', 'pub1')
   `));
-  const replstream = await pg.logicalReplication({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const replstream = await client.logicalReplication({
     slot: 'test1',
     startLsn: '0/0',
     options: {
@@ -493,7 +508,8 @@ it('logical replication ack', async () => {
     WHERE data LIKE 'COMMIT%'
     LIMIT 1
   `));
-  const replstream = await pg.logicalReplication({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const replstream = await client.logicalReplication({
     slot: 'acktest',
     startLsn: '0/0',
   });
@@ -508,7 +524,8 @@ it('logical replication ack', async () => {
 });
 
 it('logical replication invalid startLsn', async () => {
-  const response = pg.logicalReplication({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const response = client.logicalReplication({
     slot: 'unicorn',
     startLsn: 'invalid_lsn',
   });
@@ -518,7 +535,8 @@ it('logical replication invalid startLsn', async () => {
 });
 
 it('parse bind execute', async () => {
-  const { scalar } = await pg.query({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const { scalar } = await client.query({
     op: 'parse',
     statement: /*sql*/ `SELECT $1`,
     paramTypes: ['int4'],
@@ -535,7 +553,8 @@ it('parse bind execute', async () => {
 });
 
 it('param explicit type', async () => {
-  const { rows: [row] } = await pg.query({
+  const client = pgwire.pool(process.env.POSTGRES);
+  const { rows: [row] } = await client.query({
     statement: /*sql*/ `
       SELECT pg_typeof($1)::text, $1,
         pg_typeof($2)::text, $2,
@@ -573,7 +592,7 @@ it('param explicit type', async () => {
 
 xit('connection session', async () => {
   psql(/*sql*/ `CREATE SEQUENCE test_sess`);
-  const conn = await pg.connect(process.env.POSTGRES);
+  const conn = await pgwire.connect(process.env.POSTGRES);
   try {
     const shouldBe1 = conn.session(async sess => {
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -596,7 +615,7 @@ xit('connection session', async () => {
 });
 
 it('reject pending responses when connection close', async () => {
-  const conn = await pg.connect(process.env.POSTGRES);
+  const conn = await pgwire.connect(process.env.POSTGRES);
   try {
     await Promise.all([
       assert.rejects(conn.query(/*sql*/ `SELECT pg_terminate_backend(pg_backend_pid())`)),
@@ -608,18 +627,19 @@ it('reject pending responses when connection close', async () => {
 });
 
 it('notice', async () => {
-  const { results } = await pg.query(/*sql*/ `ROLLBACK`);
+  const client = pgwire.pool(process.env.POSTGRES);
+  const { results } = await client.query(/*sql*/ `ROLLBACK`);
   assert.deepStrictEqual(results[0].notices[0].code, '25P01');
 });
 
 it('pgbouncer', async () => {
-  const pool = pg.pool(process.env.POSTGRES_PGBOUNCER);
+  const pool = pgwire.pool(process.env.POSTGRES_PGBOUNCER);
   const { scalar } = await pool.query(/*sql*/ `SELECT 1`);
   assert.deepStrictEqual(scalar, 1);
 });
 
 it('auth clear text', async () => {
-  const conn = await pg.connect(process.env.POSTGRES, {
+  const conn = await pgwire.connect(process.env.POSTGRES, {
     user: 'u_clear',
     password: 'qwerty',
   });
@@ -627,7 +647,7 @@ it('auth clear text', async () => {
 });
 
 it('auth md5', async () => {
-  const conn = await pg.connect(process.env.POSTGRES, {
+  const conn = await pgwire.connect(process.env.POSTGRES, {
     user: 'u_md5',
     password: 'qwerty',
   });
@@ -635,7 +655,7 @@ it('auth md5', async () => {
 });
 
 it('auth sha256', async () => {
-  const conn = await pg.connect(process.env.POSTGRES, {
+  const conn = await pgwire.connect(process.env.POSTGRES, {
     user: 'u_sha256',
     password: 'qwerty',
   });
@@ -643,23 +663,23 @@ it('auth sha256', async () => {
 });
 
 it('write after end', async () => {
-  const conn = await pg.connect(process.env.POSTGRES);
+  const conn = await pgwire.connect(process.env.POSTGRES);
   conn.end();
   await assert.rejects(conn.query(/*sql*/ `SELECT`));
 });
 
 it('write after end 2', async () => {
-  const conn = await pg.connect(process.env.POSTGRES);
+  const conn = await pgwire.connect(process.env.POSTGRES);
   conn.end();
   await new Promise(resolve => setImmediate(resolve, 0));
   await assert.rejects(conn.query(/*sql*/ `SELECT`));
 });
 
 it('pool - reset reused connection', async () => {
-  const pool = pg.pool(process.env.POSTGRES, {
+  const pool = pgwire.pool({
     // force all queries to execute in single connection
     poolMaxConnections: 1,
-  });
+  }, process.env.POSTGRES);
   try {
     const { scalar: pid1 } = await pool.query(/*sql*/ `
       BEGIN;
@@ -680,9 +700,9 @@ it('pool - reset reused connection', async () => {
 });
 
 it('pool - unexisting database', async () => {
-  const pool = pg.pool(process.env.POSTGRES, {
+  const pool = pgwire.pool({
     database: 'unicorn',
-  });
+  }, process.env.POSTGRES);
   try {
     await assert.rejects(pool.query(/*sql*/ `SELECT`), {
       code: 'PGERR_3D000',
@@ -693,7 +713,7 @@ it('pool - unexisting database', async () => {
 });
 
 it('idle timeout', async () => {
-  const conn = await pg.connect(process.env.POSTGRES, {
+  const conn = await pgwire.connect(process.env.POSTGRES, {
     idleTimeout: 200,
   });
   try {
@@ -704,7 +724,7 @@ it('idle timeout', async () => {
 });
 
 it('idle timeout 2', async () => {
-  const conn = await pg.connect(process.env.POSTGRES, {
+  const conn = await pgwire.connect(process.env.POSTGRES, {
     idleTimeout: 200,
   });
   await Promise.all([
@@ -725,7 +745,7 @@ it('idle timeout 2', async () => {
 });
 
 it('idle timeout 3', async () => {
-  const conn = await pg.connect(process.env.POSTGRES, {
+  const conn = await pgwire.connect(process.env.POSTGRES, {
     idleTimeout: 200,
   });
   await conn.query(/*sql*/ `SELECT`);
@@ -746,7 +766,7 @@ it('idle timeout 3', async () => {
 });
 
 it('pool - idle timeout', async () => {
-  const pool = pg.pool(process.env.POSTGRES, {
+  const pool = pgwire.pool(process.env.POSTGRES, {
     idleTimeout: 200,
     poolMaxConnections: 1,
   });
@@ -767,7 +787,7 @@ it('pool - idle timeout', async () => {
 });
 
 it('pool async error', async () => {
-  const pool = pg.pool(process.env.POSTGRES, {
+  const pool = pgwire.pool(process.env.POSTGRES, {
     poolMaxConnections: 1,
   });
   try {
@@ -782,7 +802,7 @@ it('pool async error', async () => {
 });
 
 it('connection uri options', async () => {
-  const conn = await pg.connect('postgres://postgres@postgres:5432/postgres?application_name=test');
+  const conn = await pgwire.connect('postgres://postgres@postgres:5432/postgres?application_name=test');
   try {
     const { scalar } = await conn.query(/*sql*/ `SELECT current_setting('application_name')`);
     assert.equal(scalar, 'test');
@@ -792,7 +812,7 @@ it('connection uri options', async () => {
 });
 
 it('idleTimeout=0 should not close connection', async () => {
-  const conn = await pg.connect('postgres://postgres@postgres:5432/postgres');
+  const conn = await pgwire.connect('postgres://postgres@postgres:5432/postgres');
   try {
     await new Promise(resolve => setTimeout(resolve, 200));
     await conn.query(/*sql*/ `SELECT`);
@@ -802,7 +822,7 @@ it('idleTimeout=0 should not close connection', async () => {
 });
 
 it('unix socket', async () => {
-  const conn = await pg.connect(process.env.POSTGRES_UNIX);
+  const conn = await pgwire.connect(process.env.POSTGRES_UNIX);
   try {
     const { scalar } = await conn.query(/*sql*/ `SELECT 'hello'`);
     assert.deepStrictEqual(scalar, 'hello');
@@ -812,7 +832,8 @@ it('unix socket', async () => {
 });
 
 it('copy to file', async () => {
-  const resp = pg.query(/*sql*/ `COPY (VALUES (1, 2)) TO STDOUT`);
+  const client = pgwire.pool(process.env.POSTGRES);
+  const resp = client.query(/*sql*/ `COPY (VALUES (1, 2)) TO STDOUT`);
   const fw = fs.createWriteStream('/tmp/test');
   await promisify(pipeline)(resp, fw);
   const content = fs.readFileSync('/tmp/test', { encoding: 'utf-8' });
@@ -820,13 +841,15 @@ it('copy to file', async () => {
 });
 
 it('copy to stdout', async () => {
-  const resp = pg.query(/*sql*/ `COPY (VALUES (1, 2)) TO STDOUT`);
+  const client = pgwire.pool(process.env.POSTGRES);
+  const resp = client.query(/*sql*/ `COPY (VALUES (1, 2)) TO STDOUT`);
   const chunks = await readAllChunks(resp);
   assert.deepStrictEqual(String(Buffer.concat(chunks)), '1\t2\n');
 });
 
 it('copy to stdout 2', async () => {
-  const resp = pg.query(/*sql*/ `
+  const client = pgwire.pool(process.env.POSTGRES);
+  const resp = client.query(/*sql*/ `
     COPY (VALUES (1, 2)) TO STDOUT;
     COPY (VALUES (3, 4)) TO STDOUT;
   `);
@@ -835,7 +858,8 @@ it('copy to stdout 2', async () => {
 });
 
 it('stream', async () => {
-  const resp = pg.query(/*sql*/ `SELECT 'hello' col`);
+  const client = pgwire.pool(process.env.POSTGRES);
+  const resp = client.query(/*sql*/ `SELECT 'hello' col`);
   const chunks = await readAllChunks(resp);
   assert.deepStrictEqual(chunks.shift().boundary, {
     tag: 'RowDescription',
@@ -862,7 +886,7 @@ it('stream', async () => {
 });
 
 it('stream destroy', async () => {
-  const conn = await pg.connect(process.env.POSTGRES);
+  const conn = await pgwire.connect(process.env.POSTGRES);
   try {
     const resp = conn.query(/*sql*/ `SELECT generate_series(0, 2000)`);
     resp.destroy();
@@ -872,18 +896,6 @@ it('stream destroy', async () => {
     conn.end();
   }
 });
-
-// it('pool', async () => {
-//   const pool = pg.pool(process.env.POSTGRES, {
-//     poolMaxConnections: 4,
-//     application_name: 'pgwire-pool-test',
-//   });
-//   for (let i = 0; i < 10; i++) {
-//     pool.query(/*sql*/ `SELECT pg_sleep(.1)`);
-//     await new Promise(resolve => setTimeout(resolve, 50));
-//     console.log();
-//   }
-// });
 
 function xit() {}
 function it(name, fn) {

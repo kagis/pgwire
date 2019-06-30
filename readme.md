@@ -15,7 +15,6 @@ Under development
 - Copy from stdin and to stdout
 - SCRAM-SHA-256 authentication method support
 - [Pure js without dependencies](package.json#L36)
-<!-- - True asynchronous -->
 
 # Connecting to PostgreSQL server
 
@@ -53,15 +52,15 @@ const client = await pgwire.connect({
 });
 ```
 
-Its possible to pass multiple connection URIs or objects to `pgwire.connect()` function. In this case actual connection parameters will be computed by merging all parameters in last-win priority. Following technique can be used to set default connection parameters:
+Its possible to pass multiple connection URIs or objects to `pgwire.connect()` function. In this case actual connection parameters will be computed by merging all parameters in first-win priority. Following technique can be used to set default connection parameters:
 
 ```js
-const client = await pgwire.connect({
+const client = await pgwire.connect(process.env.POSTGRES, {
   application_name: 'my-awesome-app',
-}, process.env.POSTGRES);
+});
 ```
 
-Don't forget to close connection when you don't need it anymore:
+Don't forget to `.end()` connection when you don't need it anymore:
 
 ```js
 const client = await pgwire.connect(process.env.POSTGRES);
@@ -75,10 +74,12 @@ try {
 # Querying
 
 ```js
-const { rows } = await client.query(`
-  SELECT i, 'Mississippi'
-  FROM generate_series(1, 3) i
-`);
+const { rows } = await client.query({
+  statement: `
+    SELECT i, 'Mississippi'
+    FROM generate_series(1, 3) i
+  `,
+});
 
 console.assert(JSON.stringify(rows) == JSON.stringify([
   [1, 'Mississippi'],
@@ -90,9 +91,9 @@ console.assert(JSON.stringify(rows) == JSON.stringify([
 Function call and other single-value query result can be accessed by `scalar` property. It equals to the first cell of the first row. If query returns no rows then `scalar` equals to `undefined`.
 
 ```js
-const { scalar } = await client.query(`
-  SELECT current_user
-`);
+const { scalar } = await client.query({
+  statement: `SELECT current_user`,
+});
 
 console.assert(scalar == 'postgres');
 ```
@@ -101,18 +102,23 @@ console.assert(scalar == 'postgres');
 
 ```js
 const { rows } = await client.query({
-  statement: `SELECT $1, $2`,
+  statement: `
+    SELECT $1
+    FROM generate_series(1, $2)
+  `,
   params: [{
-    type: 'int4',
-    value: 42,
-  }, {
     type: 'text',
     value: 'hello',
+  }, {
+    type: 'int4',
+    value: 3,
   }],
 });
 
 console.assert(JSON.stringify(rows) == JSON.stringify([
-  [42, 'hello'],
+  ['hello'],
+  ['hello'],
+  ['hello'],
 ]));
 ```
 
@@ -139,49 +145,23 @@ const {
 });
 ```
 
-Benefit of multi-statement queries is that statements execute in single round trip between your app and PostgreSQL server and is wrapped into transaction implicitly. Implicit transaction rolls back automatically when error occures and commits when all statements succesfully executed.
+Benefit of multi-statement queries is that statements are wrapped into transaction implicitly. Implicit transaction does rollback automatically when error occures or does commit when all statements successfully executed. Multi-statement queries and implicit transactions are described here https://www.postgresql.org/docs/11/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT
 
-# Copy from stdin
 
-```js
-await client.query({
-  statement: `COPY foo FROM STDIN`,
-  stdin: fs.createReadableStream('/tmp/file'),
-});
-```
-
-If you want to use simple query protocol for some reason then it is possible by following api:
+Response top level `rows` and `scalar` properties take their values from last statement result:
 
 ```js
-await client.query(`COPY foo FROM STDIN`, {
-  stdin: fs.createReadableStream('/tmp/file'),
-});
-```
-
-Since simple query can have multiple `COPY FROM STDIN` statements so its possible to specify an array of source streams:
-
-```js
-await client.query(`
-  COPY foo FROM STDIN;
-  COPY bar FROM STDIN;
-`, {
-  stdin: [
-    fs.createReadableStream('/tmp/file1'),
-    fs.createReadableStream('/tmp/file2'),
-  ],
-});
-```
-
-But if you need multi-statement COPY FROM query so extended query protocol is preferred way:
-
-```js
-await client.query({
-  statement: `COPY foo FROM STDIN`,
-  stdin: fs.createReadableStream('/tmp/file1'),
+const { scalar, rows } = await client.query({
+  statement: `SELECT 'a'`,
 }, {
-  statement: `COPY bar FROM STDIN`,
-  stdin: fs.createReadableStream('/tmp/file2'),
+  statement: `SELECT 'b', 1`,
 });
+
+console.assert(scalar == 'b');
+console.assert(
+  JSON.stringify(rows) ==
+  JSON.stringify([['b', 1]])
+);
 ```
 
 # Reading from stream
@@ -192,9 +172,9 @@ Other way to consume response is to use it as Readable stream.
 
 ```js
 // omit `await` keyword to get underlying response stream
-const response = client.query(`
-  SELECT i FROM generate_series(1, 2000) i
-`);
+const response = client.query({
+  statement: `SELECT i FROM generate_series(1, 2000) i`,
+});
 let sum = 0;
 for await (const chunk of response) {
   if (chunk.boundary) {
@@ -210,10 +190,73 @@ for await (const chunk of response) {
 console.log(sum);
 ```
 
-# Listen and Notify
+# Copy from stdin
 
 ```js
-client.on('notify', ({ channel, payload }) => {
+await client.query({
+  statement: `COPY foo FROM STDIN`,
+  stdin: fs.createReadableStream('/tmp/file'),
+});
+```
+
+# Copy to stdout
+
+`COPY TO STDOUT` statement acts like `SELECT` but fills `rows` with `Buffer` instances instead of row tuples.
+
+```js
+const { rows } = await client.query({
+  statement: `
+    COPY (
+      SELECT i, 'Mississippi'
+      FROM generate_series(1, 3) i
+    ) TO STDOUT
+  `,
+});
+
+const tsv = Buffer.concat(rows).toString();
+console.assert(tsv == (
+  '1\tMississippi\n' +
+  '2\tMississippi\n' +
+  '3\tMississippi\n'
+));
+```
+
+Dump table data to TSV file:
+
+```js
+import { pipeline } from 'stream';
+import { promisify } from 'util';
+const ppipeline = promisify(pipeline);
+
+const copyUpstream = client.query({
+  statement: `COPY upstream_table TO STDOUT`,
+});
+await ppipeline(
+  copyUpstream,
+  fs.createWritableStream('/tmp/file.tsv'),
+);
+```
+
+Copy table from one database to another:
+
+```js
+const copyUpstream = clientA.query({
+  statement: `COPY upstream_table TO STDOUT`,
+});
+await clientB.query({
+  statement: `COPY downstream_table FROM STDIN`,
+  stdin: copyUpstream,
+});
+```
+
+Response stream emits boundary chunks at start and end of stream, but this chunks are ignored by piped writable stream since boundary chunks inherited from empty `Buffer`.
+
+# Listen and Notify
+
+https://www.postgresql.org/docs/11/sql-notify.html
+
+```js
+client.on('notification', ({ channel, payload }) => {
   console.log(channel, payload);
 });
 await client.query(`LISTEN some_channel`);
@@ -221,25 +264,57 @@ await client.query(`LISTEN some_channel`);
 
 # Extended query protocol
 
-pgwire exposes postgres extended query protocol api
+Postgres protocol has two subprotocols for querying - simple and extended. Simple protocol allows to send multi-statement query as single script where statements are delimited by semicolon. **pgwire** uses simple protocol when `.query()` is called with a string in first argument:
 
 ```js
-.query({
-  statement: 'SELECT $1, $2',
+await client.query(`
+  CREATE TABLE foo (a int, b text);
+  INSERT INTO foo VALUES (1, 'hello');
+  COPY foo FROM STDIN;
+  SELECT * FROM foo;
+`, {
+  // optional stdin for COPY FROM STDIN statements
+  stdin: fs.createReadableStream('/tmp/file1.tsv'),
+  // stdin also accepts array of streams for multiple
+  // COPY FROM STDIN statements
+  stdin: [
+    fs.createReadableStream(...),
+    fs.createReadableStream(...),
+    ...
+  ],
+});
+```
+
+Extended query protocol allows to pass parameters for each statement so it splits statements into separate chunks. Its possible to use extended query protocol by passing one or more statement objects to `.query()` function:
+
+```js
+await client.query({
+  statement: `CREATE TABLE foo (a int, b text)`,
+}, {
+  statement: `INSERT INTO foo VALUES ($1, $2)`,
   params: [{
     type: 'int4',
-    value: 42,
+    value: 1,
   }, {
-    type: 25,
+    type: 'text',
     value: 'hello',
   }],
-  limit: 10,
-  stdin: fs.createReadStream(...),
 }, {
+  statement: 'COPY foo FROM STDIN',
+  stdin: fs.createReadableStream('/tmp/file1.tsv'),
+}, {
+  statement: 'SELECT * FROM foo',
+});
+```
+
+Low level extended protocol messages:
+
+```js
+await client.query({
   // creates prepared statement
   op: 'parse',
   // sql statement body
-  statement: 'SELECT $1, $2',
+  statement: `SELECT $1, $2`,
   // optional statement name
   // if not specified then unnamed statement will be created
   statementName: 'example-statement',
@@ -299,6 +374,8 @@ const client = pgwire.pool(
 );
 ```
 
+When `poolMaxConnections` is not set then a new connection is created for each query. This option makes possible to switch to external connection pool like pgBouncer.
+
 # Logical replication
 
 Logical replication is native PostgreSQL mechanism which allows your app to subscribe on data modification events such as insert, update, delete and truncate. This mechanism can be useful in different ways - replicas synchronization, cache invalidation or history tracking. https://www.postgresql.org/docs/11/logical-replication.html
@@ -341,16 +418,18 @@ const replicationStream = await client.logicalReplication({
 });
 
 for await (const { lsn, data } of replicationStream) {
-  console.log(logicalEvent.toString());
+  console.log(data.toString());
   replicationStream.ack(lsn);
 }
 ```
 
 # "pgoutput" logical replication decoder
 
-Modification events go through plugable logical decoder at first before events emitted to client. PostgreSQL has two built-in logical decoders - `test_decoding` which emits human readable events for debug, and `pgoutput` logical decoder which is used for replicas synchronization.
+Modification events go through plugable logical decoder at first before events emitted to client. Purpose of logical decoder is to serialize in-memory events structures into consumable message stream. PostgreSQL has two built-in logical decoders:
 
-**pgwire** implements `pgoutput` events parser
+- `test_decoding` which emits human readable messages for debugging and testing,
+
+- and production usable `pgoutput` logical decoder which adapts modification events for replicas synchronization. **pgwire** implements `pgoutput` messages parser
 
 ```sql
 CREATE PUBLICATION "my-app-pub" FOR TABLE foo
