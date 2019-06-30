@@ -14,7 +14,7 @@ Under development
 - Efficient bytea transfering
 - Copy from stdin and to stdout
 - SCRAM-SHA-256 authentication method support
-- [Pure js without dependencies](package.json#L36)
+- [Pure js without dependencies](package.json#L33)
 
 # Connecting to PostgreSQL server
 
