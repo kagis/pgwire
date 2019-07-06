@@ -3,6 +3,11 @@ test:
 	docker-compose -f test/docker-compose.yml down -v
 	docker-compose -f test/docker-compose.yml up --build --exit-code-from test test
 
+.PHONY: bench
+bench:
+	docker-compose -f test/docker-compose.yml down -v
+	docker-compose -f test/docker-compose.yml up --build --exit-code-from bench bench
+
 .PHONY: release-minor
 release-minor:
 	git diff --cached --exit-code > /dev/null &&\

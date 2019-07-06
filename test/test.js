@@ -675,25 +675,37 @@ it('write after end 2', async () => {
   await assert.rejects(conn.query(/*sql*/ `SELECT`));
 });
 
-it('pool - reset reused connection', async () => {
+it('pool should reuse connection', async () => {
   const pool = pgwire.pool({
-    // force all queries to execute in single connection
     poolMaxConnections: 1,
   }, process.env.POSTGRES);
   try {
     const { scalar: pid1 } = await pool.query(/*sql*/ `
+      SELECT pg_backend_pid()
+    `);
+    const { scalar: pid2 } = await pool.query(/*sql*/ `
+      SELECT pg_backend_pid()
+    `);
+    assert.deepStrictEqual(pid1, pid2);
+  } finally {
+    pool.clear();
+  }
+});
+
+it('pool should auto rollback', async () => {
+  const pool = pgwire.pool({
+    poolMaxConnections: 1,
+  }, process.env.POSTGRES);
+  try {
+    await pool.query(/*sql*/ `
       BEGIN;
       CREATE TABLE test(a TEXT);
-      SELECT pg_backend_pid();
     `);
     // if previous query was not rollbacked then next query will fail
-    const { scalar: pid2 } = await pool.query(/*sql*/ `
-      BEGIN;
+    await pool.query(/*sql*/ `
       CREATE TABLE test(a TEXT);
-      SELECT pg_backend_pid();
+      ROLLBACK;
     `);
-    // ensure connection was reused
-    assert.deepStrictEqual(pid1, pid2);
   } finally {
     pool.clear();
   }
