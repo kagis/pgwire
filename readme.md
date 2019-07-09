@@ -71,6 +71,9 @@ try {
 }
 ```
 
+# Web application and connection pool
+
+
 # Querying
 
 ```js
@@ -88,7 +91,7 @@ console.assert(JSON.stringify(rows) == JSON.stringify([
 ]));
 ```
 
-Function call and other single-value query result can be accessed by `scalar` property. It equals to the first cell of the first row. If query returns no rows then `scalar` equals to `undefined`.
+Function call and other single-value query result can be accessed by `scalar` property. It equals to the first cell of the first row.
 
 ```js
 const { scalar } = await client.query({
@@ -97,6 +100,9 @@ const { scalar } = await client.query({
 
 console.assert(scalar == 'postgres');
 ```
+
+If query returns no rows then `scalar` equals to `undefined`.
+
 
 # Parametrized query
 
@@ -166,7 +172,7 @@ console.assert(
 
 # Reading from stream
 
-`.query()` response can be consumed in two ways. First way is to `await` response like a promise (or call `response.then` explicitly). In this case all rows will be loaded in memory.
+`.query()` response can be consumed in two ways. First way is to `await` response like a promise (or call `.then` explicitly). In this case all rows will be loaded in memory.
 
 Other way to consume response is to use it as Readable stream.
 
@@ -262,9 +268,9 @@ client.on('notification', ({ channel, payload }) => {
 await client.query(`LISTEN some_channel`);
 ```
 
-# Extended query protocol
+# Simple and Extended query protocols
 
-Postgres protocol has two subprotocols for querying - simple and extended. Simple protocol allows to send multi-statement query as single script where statements are delimited by semicolon. **pgwire** uses simple protocol when `.query()` is called with a string in first argument:
+Postgres protocol has two query subprotocols - simple and extended. Simple protocol allows to send multi-statement query as single script where statements are delimited by semicolon. **pgwire** uses simple protocol when `.query()` is called with a string in first argument:
 
 ```js
 await client.query(`
@@ -448,7 +454,7 @@ const client = await pgwire.connect(process.env.POSTGRES, {
   replication: 'database',
 });
 
-const replicationEvents = await client.logicalReplication({
+const replicationStream = await client.logicalReplication({
   slot: 'my-app-slot',
   startLsn: '0/0',
   options: {
@@ -457,10 +463,10 @@ const replicationEvents = await client.logicalReplication({
   },
 });
 
-const pgoEvents = replicationEvents.pgoutput();
+const pgoStream = replicationStream.pgoutput();
 
-for await (const logicalEvent of pgoEvents) {
-  switch (logicalEvent.tag) {
+for await (const pgoMessage of pgoStream) {
+  switch (pgoMessage.tag) {
     case 'begin':
     case 'relation':
     case 'type':
@@ -471,5 +477,6 @@ for await (const logicalEvent of pgoEvents) {
     case 'truncate':
     case 'commit':
   }
+  replicationStream.ack(lsn);
 }
 ```
