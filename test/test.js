@@ -225,6 +225,7 @@ it('row decode simple', async () => {
     SELECT null,
       true, false,
       'hello'::text,
+      'hello'::varchar(100),
       '\\xdeadbeaf'::bytea,
       42::int2, -42::int2,
       42::int4, -42::int4,
@@ -245,6 +246,7 @@ it('row decode simple', async () => {
   assert.deepStrictEqual(rows, [[
     null,
     true, false,
+    'hello',
     'hello',
     Buffer.from('deadbeaf', 'hex'),
     42, -42,
@@ -271,6 +273,7 @@ it('row decode extended', async () => {
     statement: /*sql*/ `
       SELECT null, true, false,
         'hello'::text,
+        'hello'::varchar(100),
         '\\xdeadbeaf'::bytea,
         42::int2, -42::int2,
         42::int4, -42::int4,
@@ -291,6 +294,7 @@ it('row decode extended', async () => {
   });
   assert.deepStrictEqual(rows, [[
     null, true, false,
+    'hello',
     'hello',
     Buffer.from('deadbeaf', 'hex'),
     42, -42,
@@ -560,7 +564,8 @@ it('param explicit type', async () => {
         pg_typeof($2)::text, $2,
         pg_typeof($3)::text, $3->>'key',
         pg_typeof($4)::text, $4::text,
-        pg_typeof($5)::text, $5::text
+        pg_typeof($5)::text, $5::text,
+        pg_typeof($6)::text, $6::varchar(100)
     `,
     params: [{
       type: 'int4',
@@ -579,6 +584,9 @@ it('param explicit type', async () => {
     }, {
       type: 'bytea[]',
       value: ['x', 'y', 'z'],
+    }, {
+      type: 'varchar',
+      value: 'hello',
     }],
   });
   assert.deepStrictEqual(row, [
@@ -587,6 +595,7 @@ it('param explicit type', async () => {
     'jsonb', 'hello',
     'text[]', '{1,2,3,NULL}',
     'bytea[]', '{"\\\\x78","\\\\x79","\\\\x7a"}',
+    'character varying', 'hello',
   ]);
 });
 
