@@ -12,7 +12,7 @@ PostgreSQL client library for Node.js
 - Efficient bytea transfering
 - Copy from stdin and to stdout
 - SCRAM-SHA-256 authentication method support
-- [Pure js without dependencies](package.json#L33)
+- Pure js without dependencies
 
 ## TODO
 
@@ -40,7 +40,7 @@ const client = await pgwire.connect(process.env.POSTGRES);
 Set `POSTGRES` environment variable when run node process:
 
 ```bash
-$ POSTGRES=postgres://USER:PASSWORD@HOST:PORT/DATABASE node myapp.js
+$ POSTGRES='postgres://USER:PASSWORD@HOST:PORT/DATABASE' node myapp.js
 ```
 
 `pgwire.connect()` function also accepts parameters as object:
@@ -74,7 +74,42 @@ try {
 }
 ```
 
-<!-- # Web application and connection pool -->
+# Using pgwire in web server
+
+```js
+// app.js
+import express from 'express';
+import pgwire from 'pgwire';
+
+const app = express();
+app.locals.pg = pgwire.pool(process.env.POSTGRES);
+
+app.get('/', function (req, res) {
+  const { pg } = req.app.locals;
+  pg.query({
+    statement: `SELECT 'hello world'`,
+  })
+  .then(({ scalar: greeting }) => {
+    res.end(greeting);
+  }, err => {
+    res.writeHead(500);
+    res.end(String(err));
+  });
+});
+
+app.listen(3000);
+
+process.on('SIGINT', _ => {
+  app.locals.pg.end();
+  app.close();
+});
+```
+
+```sh
+$ POSTGRES='postgres://USER:PASSWORD@HOST:PORT/DATABASE?poolMaxConnections=4&idleTimeout=900000' node app.js
+```
+
+When `poolMaxConnections` is not set then a new connection is created for each query. This option makes possible to switch to external connection pool like pgBouncer.
 
 # Querying
 
@@ -372,16 +407,6 @@ await client.query({
   stdin: fs.createReadStream(...),
 });
 ```
-
-# Connection pool
-
-```js
-const client = pgwire.pool(
-  'postgres://USER:PASSWORD@HOST:PORT/DATABASE?poolMaxConnections=4&idleTimeout=900000'
-);
-```
-
-When `poolMaxConnections` is not set then a new connection is created for each query. This option makes possible to switch to external connection pool like pgBouncer.
 
 # Logical replication
 
