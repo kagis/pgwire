@@ -153,8 +153,7 @@ const {
 });
 ```
 
-Benefit of multi-statement queries is that statements are wrapped into transaction implicitly. Implicit transaction does rollback automatically when error occures or does commit when all statements successfully executed. Multi-statement queries and implicit transactions are described here https://www.postgresql.org/docs/11/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT
-
+Multi-statement query is preferable to many single-statement queries because statements are wrapped into transaction implicitly. Implicit transaction does rollback automatically when error occures or does commit when all statements successfully executed. Multi-statement queries and implicit transactions are described here https://www.postgresql.org/docs/11/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT
 
 Response top level `rows` and `scalar` properties take their values from last statement result:
 
