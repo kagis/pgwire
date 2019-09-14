@@ -84,17 +84,15 @@ import pgwire from 'pgwire';
 const app = express();
 app.locals.pg = pgwire.pool(process.env.POSTGRES);
 
-app.get('/', function (req, res) {
+app.get('/', function (req, res, next) {
   const { pg } = req.app.locals;
   pg.query({
     statement: `SELECT 'hello world'`,
   })
   .then(({ scalar: greeting }) => {
     res.end(greeting);
-  }, err => {
-    res.writeHead(500);
-    res.end(String(err));
-  });
+  })
+  .catch(next);
 });
 
 app.listen(3000);
