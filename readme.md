@@ -4,8 +4,6 @@ PostgreSQL client library for Node.js
 
 [![npm](https://img.shields.io/npm/v/pgwire.svg)](https://www.npmjs.com/package/pgwire) [![travis](https://travis-ci.com/kagis/pgwire.svg?branch=master)](https://travis-ci.com/kagis/pgwire)
 
-Under development
-
 ## Features
 
 - Memory efficient data streaming
@@ -15,6 +13,11 @@ Under development
 - Copy from stdin and to stdout
 - SCRAM-SHA-256 authentication method support
 - [Pure js without dependencies](package.json#L33)
+
+## TODO
+
+- Connection leasing from pool
+- Benchmarks
 
 # Connecting to PostgreSQL server
 
@@ -71,8 +74,7 @@ try {
 }
 ```
 
-# Web application and connection pool
-
+<!-- # Web application and connection pool -->
 
 # Querying
 
@@ -386,13 +388,14 @@ When `poolMaxConnections` is not set then a new connection is created for each q
 
 Logical replication is native PostgreSQL mechanism which allows your app to subscribe on data modification events such as insert, update, delete and truncate. This mechanism can be useful in different ways - replicas synchronization, cache invalidation or history tracking. https://www.postgresql.org/docs/11/logical-replication.html
 
-Lets prepare database for logical replication
+Lets prepare database for logical replication. At first we need to configure PostgreSQL server to write enough information to WAL:
 
 ```sql
-CREATE TABLE foo(a INT NOT NULL PRIMARY KEY, b TEXT);
+ALTER SYSTEM SET wal_level = logical;
+-- then restart postgres server
 ```
 
-Replication slot is PostgreSQL entity which behaves like a message queue of replication events. Lets create replication slot for our app.
+We need to create replication slot for our app. Replication slot is PostgreSQL entity which behaves like a message queue of replication events.
 
 ```sql
 SELECT pg_create_logical_replication_slot(
@@ -404,13 +407,14 @@ SELECT pg_create_logical_replication_slot(
 Generate some modification events:
 
 ```sql
+CREATE TABLE foo(a INT NOT NULL PRIMARY KEY, b TEXT);
 INSERT INTO foo VALUES (1, 'hello'), (2, 'world');
 UPDATE foo SET b = 'all' WHERE a = 1;
 DELETE FROM foo WHERE a = 2;
 TRUNCATE foo;
 ```
 
-Now we are ready to consume replication events.
+Now we are ready to consume replication events:
 
 ```js
 import pgwire from 'pgwire';
@@ -418,30 +422,33 @@ const client = await pgwire.connect(process.env.POSTGRES, {
   replication: 'database',
 });
 
-const replicationStream = await client.logicalReplication({
-  slot: 'my-app-slot',
-  startLsn: '0/0',
-});
-
-for await (const { lsn, data } of replicationStream) {
-  console.log(data.toString());
-  replicationStream.ack(lsn);
+try {
+  const replicationStream = await client.logicalReplication({
+    slot: 'my-app-slot',
+    startLsn: '0/0', // optional start position
+  });
+  process.on('SIGINT', _ => replicationStream.end());
+  for await (const { lsn, data } of replicationStream) {
+    console.log(data.toString());
+    replicationStream.ack(lsn);
+  }
+} finally {
+  client.end();
 }
 ```
 
 # "pgoutput" logical replication decoder
 
-Modification events go through plugable logical decoder at first before events emitted to client. Purpose of logical decoder is to serialize in-memory events structures into consumable message stream. PostgreSQL has two built-in logical decoders:
+Modification events go through plugable logical decoder before events emitted to client. Purpose of logical decoder is to serialize in-memory events structures into consumable message stream. PostgreSQL has two built-in logical decoders:
 
 - `test_decoding` which emits human readable messages for debugging and testing,
 
-- and production usable `pgoutput` logical decoder which adapts modification events for replicas synchronization. **pgwire** implements `pgoutput` messages parser
+- and production usable `pgoutput` logical decoder which adapts modification events for replicas synchronization. **pgwire** implements `pgoutput` messages parser.
 
 ```sql
-CREATE PUBLICATION "my-app-pub" FOR TABLE foo
-```
+CREATE TABLE foo(a INT NOT NULL PRIMARY KEY, b TEXT);
+CREATE PUBLICATION "my-app-pub" FOR TABLE foo;
 
-```sql
 SELECT pg_create_logical_replication_slot(
   'my-app-slot',
   'pgoutput' -- logical decoder plugin
@@ -454,29 +461,32 @@ const client = await pgwire.connect(process.env.POSTGRES, {
   replication: 'database',
 });
 
-const replicationStream = await client.logicalReplication({
-  slot: 'my-app-slot',
-  startLsn: '0/0',
-  options: {
-    'proto_version': 1,
-    'publication_names': 'my-app-pub',
-  },
-});
-
-const pgoStream = replicationStream.pgoutput();
-
-for await (const pgoMessage of pgoStream) {
-  switch (pgoMessage.tag) {
-    case 'begin':
-    case 'relation':
-    case 'type':
-    case 'origin':
-    case 'insert':
-    case 'update':
-    case 'delete':
-    case 'truncate':
-    case 'commit':
+try {
+  const replicationStream = await client.logicalReplication({
+    slot: 'my-app-slot',
+    startLsn: '0/0', // optional start position
+    options: {
+      'proto_version': 1,
+      'publication_names': 'my-app-pub',
+    },
+  });
+  process.on('SIGINT', _ => replicationStream.end());
+  for await (const pgoMessage of replicationStream.pgoutput()) {
+    switch (pgoMessage.tag) {
+      case 'begin':
+      case 'relation':
+      case 'type':
+      case 'origin':
+      case 'insert':
+      case 'update':
+      case 'delete':
+      case 'truncate':
+      case 'commit':
+        // TODO describe pgoMessage shape
+    }
+    replicationStream.ack(pgoMessage.lsn);
   }
-  replicationStream.ack(lsn);
+} finally {
+  client.end();
 }
 ```

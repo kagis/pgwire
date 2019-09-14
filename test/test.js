@@ -332,33 +332,6 @@ it('listen/notify', async () => {
   }
 });
 
-it('logical replication', async () => {
-  psql(/*sql*/ `
-    SELECT pg_create_logical_replication_slot('test', 'test_decoding');
-    CREATE TABLE foo AS SELECT 1 a;
-  `);
-  const expected = JSON.parse(psql(/*sql*/ `
-    SELECT json_agg(jsonb_build_object(
-      'lsn', lpad(split_part(lsn::text, '/', 1), 8, '0') ||
-        '/' || lpad(split_part(lsn::text, '/', 2), 8, '0'),
-      'data', data
-    ))
-    FROM pg_logical_slot_peek_changes('test', NULL, NULL)
-  `));
-  const client = pgwire.pool(process.env.POSTGRES);
-  const replstream = await client.logicalReplication({
-    slot: 'test',
-    startLsn: '0/0',
-  });
-  const lines = [];
-  const timer = setTimeout(_ => replstream.end(), 500);
-  for await (const { lsn, data } of replstream) {
-    lines.push({ lsn, data: data.toString() });
-    timer.refresh();
-  }
-  assert.deepStrictEqual(lines, expected);
-});
-
 it('CREATE_REPLICATION_SLOT issue', async () => {
   const conn = await pgwire.connect(process.env.POSTGRES, {
     replication: 'database',
@@ -368,16 +341,6 @@ it('CREATE_REPLICATION_SLOT issue', async () => {
       conn.query('CREATE_REPLICATION_SLOT crs_iss LOGICAL test_decoding'),
       conn.query(/*sql*/ `SELECT 1`),
     ]);
-  } finally {
-    conn.end();
-  }
-});
-
-it('CREATE_REPLICATION_SLOT issue 1', async () => {
-  const conn = await pgwire.connect(process.env.POSTGRES, {
-    replication: 'database',
-  });
-  try {
     await Promise.all([
       conn.query('CREATE_REPLICATION_SLOT crs_iss1 LOGICAL test_decoding'),
       assert.rejects(conn.query(/*sql*/ `SELECT 1/0`)),
@@ -385,6 +348,72 @@ it('CREATE_REPLICATION_SLOT issue 1', async () => {
     ]);
   } finally {
     conn.end();
+  }
+});
+
+it('logical replication', async () => {
+  const client = await pgwire.connect(process.env.POSTGRES, {
+    replication: 'database',
+  });
+  try {
+    await client.query(/*sql*/ `
+      SELECT pg_create_logical_replication_slot(
+        'test_2b265aa1',
+        'test_decoding',
+        temporary:=true
+      )
+    `);
+    await client.query(/*sql*/ `CREATE TABLE foo_2b265aa1 AS SELECT 1 a`);
+    const { rows: expected } = await client.query(/*sql*/ `
+      SELECT lsn, data
+      FROM pg_logical_slot_peek_changes('test_2b265aa1', NULL, NULL)
+    `);
+    const replstream = await client.logicalReplication({
+      slot: 'test_2b265aa1',
+    });
+    const lines = [];
+    const timer = setTimeout(_ => replstream.end(), 500);
+    for await (const { lsn, data } of replstream) {
+      lines.push([lsn, data.toString()]);
+      timer.refresh();
+    }
+    assert.deepStrictEqual(lines.length, 3);
+    assert.deepStrictEqual(lines, expected);
+
+    // connection should be reusable after replication end
+    const { scalar: one } = await client.query(/*sql*/ `SELECT 1`);
+    assert.deepStrictEqual(one, 1);
+  } finally {
+    client.end();
+  }
+});
+
+it('logical replication - async iter break', async () => {
+  const client = await pgwire.connect(process.env.POSTGRES, {
+    replication: 'database',
+  });
+  try {
+    await client.query(/*sql*/ `
+      SELECT pg_create_logical_replication_slot(
+        'test_1b305eaf',
+        'test_decoding',
+        temporary:=true
+      )
+    `);
+    await client.query(/*sql*/ `
+      CREATE TABLE foo_1b305eaf AS SELECT 1 a
+    `);
+    const replstream = await client.logicalReplication({
+      slot: 'test_1b305eaf',
+    });
+    for await (const _ of replstream) {
+      break;
+    }
+    // connection should be reusable after replication end
+    const { scalar: one } = await client.query(/*sql*/ `SELECT 1`);
+    assert.deepStrictEqual(one, 1);
+  } finally {
+    client.end();
   }
 });
 
@@ -427,7 +456,6 @@ it('logical replication pgoutput', async () => {
       'publication_names': 'pub1',
     },
   });
-  const timer = setTimeout(_ => replstream.end(), 500);
   const pgomsgs = [];
   for await (const pgomsg of replstream.pgoutput()) {
     delete pgomsg.endLsn;
@@ -437,7 +465,9 @@ it('logical replication pgoutput', async () => {
     delete pgomsg.commitLsn;
     delete pgomsg._endLsn;
     pgomsgs.push(pgomsg);
-    timer.refresh();
+    if (pgomsg.tag == 'commit') {
+      break;
+    }
   }
   assert.deepStrictEqual(pgomsgs, [{
     tag: 'begin',

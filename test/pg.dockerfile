@@ -1,3 +1,4 @@
+# FROM postgres:12-beta3-alpine
 FROM postgres:11-alpine
 RUN echo 'ALTER SYSTEM SET wal_level = logical;' >> /docker-entrypoint-initdb.d/config.sql \
  && echo "ALTER SYSTEM SET wal_sender_timeout = '10s';" >> /docker-entrypoint-initdb.d/config.sql \

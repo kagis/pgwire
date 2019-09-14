@@ -32,7 +32,8 @@ repl:
 
 .PHONY: psql
 psql:
-	-docker-compose -f test/docker-compose.yml run --rm psql
+	-docker-compose -f test/docker-compose.yml build postgres \
+	  && docker-compose -f test/docker-compose.yml run --rm psql
 	docker-compose -f test/docker-compose.yml down -v
 
 .PHONY: lint

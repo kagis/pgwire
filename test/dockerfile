@@ -1,4 +1,7 @@
 FROM node:10.13.0-alpine
-RUN sed -i -e 's/dl-cdn/dl-4/' /etc/apk/repositories \
- && apk add --update postgresql-client
+# FROM node:12.9-alpine
+RUN apk add --no-cache \
+  --repositories-file /dev/null \
+  --repository https://mirror.ps.kz/alpine/v3.10/main \
+  postgresql-client
 CMD node --no-warnings test/test.js
