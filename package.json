@@ -8,10 +8,6 @@
   "engines": {
     "node": ">=10.13.0"
   },
-  "directories": {
-    "lib": "lib",
-    "test": "test"
-  },
   "homepage": "https://github.com/kagis/pgwire#readme",
   "repository": {
     "type": "git",
