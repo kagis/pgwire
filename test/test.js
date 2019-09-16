@@ -7,6 +7,18 @@ const pgwire = require('../lib/index.js');
 
 const finishedp = promisify(finished);
 
+it('pgliteral', async () => {
+  assert.deepStrictEqual(pgwire.pgliteral(`foo`), `'foo'`);
+  assert.deepStrictEqual(pgwire.pgliteral(`'foo'`), `'''foo'''`);
+  assert.deepStrictEqual(pgwire.pgliteral(null), `NULL`);
+});
+
+it('pgident', async () => {
+  assert.deepStrictEqual(pgwire.pgident(`foo`), `"foo"`);
+  assert.deepStrictEqual(pgwire.pgident(`"foo"`), `"""foo"""`);
+  assert.deepStrictEqual(pgwire.pgident(`public`, `foo`), `"public"."foo"`);
+});
+
 it('wait for ready', async () => {
   const conn = await pgwire.connectRetry(process.env.POSTGRES);
   conn.end();

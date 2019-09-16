@@ -17,6 +17,7 @@ PostgreSQL client library for Node.js
 ## TODO
 
 - Connection leasing from pool
+- SSL support
 - Benchmarks
 
 # Connecting to PostgreSQL server
@@ -33,14 +34,15 @@ https://www.postgresql.org/docs/11/libpq-connect.html#id-1.7.3.8.3.6
 Good practice is to get connection URI from environment variable:
 
 ```js
-// myapp.js
+// app.js
+import pgwire from 'pgwire';
 const client = await pgwire.connect(process.env.POSTGRES);
 ```
 
 Set `POSTGRES` environment variable when run node process:
 
 ```bash
-$ POSTGRES='postgres://USER:PASSWORD@HOST:PORT/DATABASE' node myapp.js
+$ POSTGRES='postgres://USER:PASSWORD@HOST:PORT/DATABASE' node app.js
 ```
 
 `pgwire.connect()` function also accepts parameters as object:
