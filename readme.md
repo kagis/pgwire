@@ -1,6 +1,6 @@
 # PGWIRE
 
-PostgreSQL client library for Node.js
+PostgreSQL client library for Node.js which exposes all features of wire protocol.
 
 [![npm](https://img.shields.io/npm/v/pgwire.svg)](https://www.npmjs.com/package/pgwire) [![travis](https://travis-ci.com/kagis/pgwire.svg?branch=master)](https://travis-ci.com/kagis/pgwire)
 
@@ -9,6 +9,7 @@ PostgreSQL client library for Node.js
 - Memory efficient data streaming
 - Logical replication using pgoutput protocol
 - Multi-statement queries
+- Query pipelining
 - Efficient bytea transfering
 - Copy from stdin and to stdout
 - SCRAM-SHA-256 authentication method support
@@ -188,7 +189,7 @@ const {
 });
 ```
 
-Multi-statement query is preferable to many single-statement queries because statements are wrapped into transaction implicitly. Implicit transaction does rollback automatically when error occures or does commit when all statements successfully executed. Multi-statement queries and implicit transactions are described here https://www.postgresql.org/docs/11/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT
+Multi-statement query is wrapped into transaction implicitly. Implicit transaction does rollback automatically when error occures or does commit when all statements successfully executed. Multi-statement queries and implicit transactions are described here https://www.postgresql.org/docs/11/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT
 
 Response top level `rows` and `scalar` properties take their values from last statement result:
 
@@ -234,6 +235,8 @@ console.log(sum);
 
 # Copy from stdin
 
+If statement is `COPY ... FROM STDIN` then `stdin` parameter must be set to instance of `stream.Readable`.
+
 ```js
 await client.query({
   statement: `COPY foo FROM STDIN`,
@@ -243,7 +246,7 @@ await client.query({
 
 # Copy to stdout
 
-`COPY TO STDOUT` statement acts like `SELECT` but fills `rows` with `Buffer` instances instead of row tuples.
+`COPY ... TO STDOUT` statement acts like `SELECT` but fills `rows` with `Buffer` instances instead of row tuples.
 
 ```js
 const { rows } = await client.query({
