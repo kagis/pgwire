@@ -18,6 +18,7 @@ PostgreSQL client library for Node.js which exposes all features of wire protoco
 ## TODO
 
 - Connection leasing from pool
+- Listen/notify resubscribe ?
 - SSL support
 - Benchmarks
 
