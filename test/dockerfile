@@ -1,4 +1,4 @@
-FROM node:10.13.0-alpine
+FROM node:10.16.0-alpine
 # FROM node:12.9-alpine
 RUN apk add --no-cache \
   --repositories-file /dev/null \

@@ -6,7 +6,7 @@
   "license": "MIT",
   "main": "lib/index.js",
   "engines": {
-    "node": ">=10.13.0"
+    "node": ">=10.16.0"
   },
   "homepage": "https://github.com/kagis/pgwire#readme",
   "repository": {

@@ -384,7 +384,7 @@ it('logical replication', async () => {
       slot: 'test_2b265aa1',
     });
     const lines = [];
-    const timer = setTimeout(_ => replstream.end(), 500);
+    const timer = setTimeout(_ => replstream.destroy(), 500);
     for await (const { lsn, data } of replstream) {
       lines.push([lsn, data.toString()]);
       timer.refresh();
@@ -560,8 +560,7 @@ it('logical replication ack', async () => {
     startLsn: '0/0',
   });
   replstream.ack(firstCommitLsn);
-  replstream.end();
-  replstream.resume();
+  replstream.destroy();
   await finishedp(replstream);
   const changesCountAfterAck = JSON.parse(psql(/*sql*/ `
     SELECT count(*) FROM pg_logical_slot_peek_changes('acktest', NULL, NULL)
