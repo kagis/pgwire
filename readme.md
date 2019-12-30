@@ -455,7 +455,7 @@ try {
     slot: 'my-app-slot',
     startLsn: '0/0', // optional start position
   });
-  process.on('SIGINT', _ => replicationStream.end());
+  process.on('SIGINT', _ => replicationStream.destroy());
   for await (const { lsn, data } of replicationStream) {
     console.log(data.toString());
     replicationStream.ack(lsn);
@@ -498,7 +498,7 @@ try {
       'publication_names': 'my-app-pub',
     },
   });
-  process.on('SIGINT', _ => replicationStream.end());
+  process.on('SIGINT', _ => replicationStream.destroy());
   for await (const pgoMessage of replicationStream.pgoutput()) {
     switch (pgoMessage.tag) {
       case 'begin':
