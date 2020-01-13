@@ -568,6 +568,43 @@ it('logical replication ack', async () => {
   assert.deepStrictEqual(changesCountAfterAck, 4);
 });
 
+it('logical replication ignore ack after destroy', async () => {
+  psql(/*sql*/ `
+    BEGIN;
+    CREATE TABLE acktest_1(a INT NOT NULL PRIMARY KEY);
+    CREATE PUBLICATION acktest_1 FOR TABLE acktest_1;
+    COMMIT;
+
+    SELECT pg_create_logical_replication_slot('acktest_1', 'test_decoding');
+
+    BEGIN;
+    INSERT INTO acktest_1 VALUES (1), (2);
+    COMMIT;
+    BEGIN;
+    INSERT INTO acktest_1 VALUES (3), (4);
+    COMMIT;
+  `);
+  const changesCount = JSON.parse(psql(/*sql*/ `
+    SELECT count(*) FROM pg_logical_slot_peek_changes('acktest_1', NULL, NULL)
+  `));
+  assert.deepStrictEqual(changesCount, 8);
+  const [firstCommitLsn, lastCommitLsn] = JSON.parse(psql(/*sql*/ `
+    SELECT json_agg(lsn)
+    FROM pg_logical_slot_peek_changes('acktest_1', NULL, NULL)
+    WHERE data LIKE 'COMMIT%'
+  `));
+  const client = pgwire.pool(process.env.POSTGRES);
+  const replstream = await client.logicalReplication({ slot: 'acktest_1' });
+  replstream.ack(firstCommitLsn);
+  replstream.destroy();
+  replstream.ack(lastCommitLsn);
+  await finishedp(replstream);
+  const changesCountAfterAck = JSON.parse(psql(/*sql*/ `
+    SELECT count(*) FROM pg_logical_slot_peek_changes('acktest_1', NULL, NULL)
+  `));
+  assert.deepStrictEqual(changesCountAfterAck, 4);
+});
+
 it('logical replication invalid startLsn', async () => {
   const client = pgwire.pool(process.env.POSTGRES);
   const response = client.logicalReplication({
