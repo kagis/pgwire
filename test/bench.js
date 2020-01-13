@@ -15,7 +15,7 @@ async function run() {
     console.time('pool');
     await Promise.all(
       Array(10).fill(0)
-      .map(_ => pool.query(`SELECT pg_sleep(1)`))
+      .map(_ => pool.query(`SELECT pg_sleep(1)`)),
     );
     // eslint-disable-next-line no-console
     console.timeEnd('pool');
