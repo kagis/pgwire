@@ -53,7 +53,7 @@ $ POSTGRES='postgres://USER:PASSWORD@HOST:PORT/DATABASE' node app.js
 const client = await pgwire.connect({
   user: 'postgres',
   password: 'postgres',
-  host: '127.0.0.1',
+  hostname: '127.0.0.1',
   port: 5432,
   database: 'postgres',
 });
