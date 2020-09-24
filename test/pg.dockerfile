@@ -13,3 +13,6 @@ RUN echo 'ALTER SYSTEM SET wal_level = logical;' >> /docker-entrypoint-initdb.d/
  && echo "echo 'host all u_clear all password' >> /var/lib/postgresql/data/pg_hba.conf" >> /docker-entrypoint-initdb.d/init-pg_hba.sh \
  && echo "echo 'host all u_md5 all md5' >> /var/lib/postgresql/data/pg_hba.conf" >> /docker-entrypoint-initdb.d/init-pg_hba.sh \
  && echo "echo 'host all u_sha256 all scram-sha-256' >> /var/lib/postgresql/data/pg_hba.conf" >> /docker-entrypoint-initdb.d/init-pg_hba.sh \
+ ;
+
+ENV POSTGRES_HOST_AUTH_METHOD=trust
