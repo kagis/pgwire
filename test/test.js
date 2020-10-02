@@ -24,6 +24,18 @@ it('wait for ready', async () => {
   conn.end();
 });
 
+it('connection with unexisting user', async () => {
+  await assert.rejects(pgwire.connect(
+    { user: 'beautiful_and_smart_girlfriend' },
+    process.env.POSTGRES,
+  ));
+  assert.deepStrictEqual(Number(psql(/*sql*/ `
+    SELECT count(*)
+    FROM pg_user
+    WHERE usename = 'beautiful_and_smart_girlfriend'
+  `)), 0);
+});
+
 it('autoclose connections', async () => {
   const client = pgwire.pool(process.env.POSTGRES);
   const { scalar: pid } = await client.query(/*sql*/ `SELECT pg_backend_pid()`);
