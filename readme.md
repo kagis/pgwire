@@ -102,7 +102,7 @@ app.get('/', function (req, res, next) {
 app.listen(3000);
 
 process.on('SIGINT', _ => {
-  app.locals.pg.end();
+  app.locals.pg.clear();
   app.close();
 });
 ```
