@@ -1,6 +1,6 @@
 {
   "name": "pgwire",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "PostgreSQL client library for Node.js which exposes all features of wire protocol",
   "author": "exe-dealer@ya.ru",
   "license": "MIT",
