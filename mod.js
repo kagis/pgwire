@@ -239,7 +239,7 @@ class Connection {
     this._whenReady = new Promise(this._whenReadyExecutor.bind(this));
     this._whenReady.connection = this;
     this._whenReady.catch(warnError);
-    this._saslClientFirstMessageBare = null;
+    this._saslScramSha256 = new SaslScramSha256();
     this._whenDestroyed = this._startup(startupOptions); // run background message processing
   }
   _whenReadyExecutor(resolve, reject) {
@@ -537,6 +537,7 @@ class Connection {
       case 'AuthenticationCleartextPassword': return this._recvAuthenticationCleartextPassword(m, m.payload);
       case 'AuthenticationSASL': return this._recvAuthenticationSASL(m, m.payload);
       case 'AuthenticationSASLContinue': return this._recvAuthenticationSASLContinue(m, m.payload);
+      case 'AuthenticationSASLFinal': return this._recvAuthenticationSASLFinal(m, m.payload);
       case 'AuthenticationOk': return this._recvAuthenticationOk(m, m.payload);
       case 'ParameterStatus': return this._recvParameterStatus(m, m.payload);
       case 'BackendKeyData': return this._recvBackendKeyData(m, m.payload);
@@ -634,52 +635,21 @@ class Connection {
       // TODO gracefull terminate (send Terminate before socket close)
       throw Error(`unsupported SASL mechanism ${mechanism}`);
     }
-    const clientNonce = new Uint8Array(24);
-    crypto.getRandomValues(clientNonce);
-    const clientNonceB64 = b64encode(clientNonce);
-    this._saslClientFirstMessageBare = 'n=,r=' + clientNonceB64;
     this._startTx.push(new SASLInitialResponse({
       mechanism: 'SCRAM-SHA-256',
-      data: utf8encoder.encode('n,,' + this._saslClientFirstMessageBare),
+      data: await this._saslScramSha256.start()
     }));
   }
   async _recvAuthenticationSASLContinue(_, data) {
-    const firstServerMessage = utf8decode(data);
-    const { i: iterations, s: saltB64, r: nonceB64 } = (
-      firstServerMessage
-      .split(',')
-      .map(it => /^([^=]*)=(.*)$/.exec(it))
-      .reduce((acc, [, key, val]) => ({ ...acc, [key]: val }), {})
-    );
-    const finalMessageWithoutProof = 'c=biws,r=' + nonceB64;
-    const salt = b64decode(saltB64);
-    const passwordUtf8 = utf8encoder.encode(this._password.normalize());
-
-    const saltedPassword = new Uint8Array(await crypto.subtle.deriveBits(
-      { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
-      await crypto.subtle.importKey('raw', passwordUtf8, 'PBKDF2', false, ['deriveBits']),
-      32,
+    this._startTx.push(new SASLResponse(
+      await this._saslScramSha256.continue(
+        utf8decode(data),
+        this._password,
+      ),
     ));
-
-    // const hmac = (key, inp) => createHmac('sha256', key).update(inp).digest();
-    const clientKey = hmac(saltedPassword, 'Client Key');
-    const storedKey = createHash('sha256').update(clientKey).digest();
-    const authMessage = (
-      this._saslClientFirstMessageBare + ',' +
-      firstServerMessage + ',' +
-      finalMessageWithoutProof
-    );
-    const clientSignature = hmac(storedKey, authMessage);
-    const clientProof = new Uint8Array(clientKey.map((b, i) => b ^ clientSignature[i]));
-    const serverKey = hmac(saltedPassword, 'Server Key');
-    this._saslServerSignatureB64 = hmac(serverKey, authMessage).toString('base64');
-    this._startTx.push(new SASLResponse(utf8encode(
-      finalMessageWithoutProof + ',p=' + clientProof.toString('base64'),
-    )));
-
-    function hmac(key, inp) {
-
-    }
+  }
+  async _recvAuthenticationSASLFinal(_, data) {
+    this._saslScramSha256.finish(utf8decode(data));
   }
   async _recvAuthenticationOk() {
     // we dont need password anymore, its more secure to forget it
@@ -1335,6 +1305,7 @@ class Bind extends FrontendMessage {
         encoded = new TextEncoder().encode(p);
       }
       w.writeInt32BE(encoded.length);
+      // TODO zero copy param encode
       w.write(encoded);
     }
     w.writeInt16BE(outFormats0t1b.length);
@@ -1602,6 +1573,7 @@ function getFieldDecoder({ typeid, binary }) {
   id: 17,
   arrayid: 1001,
   decodeBin: b => b.slice(),
+  // FIXME the only reason not to decode utf8
   decodeText: s => hexDecode(s.subarray(2 /* skip \x */)),
   encode: val => val,
   encodeBin: true,
@@ -1810,6 +1782,9 @@ const utf8encoder = new TextEncoder();
 function utf8decode(b) {
   return utf8decoder.decode(b);
 }
+function utf8encode(t) {
+  return utf8encoder.encode(t);
+}
 
 
 class Channel {
@@ -1884,14 +1859,77 @@ function warnError(err) {
 }
 
 
-// We will not use Deno std to make this module compatible with Node
 
-function b64encode(/** @type {Uint8Array} */ bytes) {
-  return btoa(new TextDecoder().decode(bytes));
+class SaslScramSha256 {
+  _clientFirstMessageBare;
+  _serverSignatureB64;
+  async start() {
+    const clientNonce = new Uint8Array(24);
+    crypto.getRandomValues(clientNonce);
+    this._clientFirstMessageBare = 'n=,r=' + this._b64encode(clientNonce);
+    return this._utf8encode('n,,' + this._clientFirstMessageBare);
+  }
+  async continue(serverFirstMessage, password) {
+    const { i: iterations, s: saltB64, r: nonceB64 } = (
+      serverFirstMessage
+      .split(',')
+      .map(it => /^([^=]*)=(.*)$/.exec(it))
+      .reduce((acc, [, key, val]) => ({ ...acc, [key]: val }), {})
+    );
+    const finalMessageWithoutProof = 'c=biws,r=' + nonceB64;
+    const salt = this._b64decode(saltB64);
+    const passwordUtf8 = this._utf8encode(password.normalize());
+    const saltedPassword = await this._pbkdf2(passwordUtf8, salt, +iterations, 32 * 8);
+    const clientKey = await this._hmac(saltedPassword, this._utf8encode('Client Key'));
+    const storedKey = await this._sha256(clientKey);
+    const authMessage = this._utf8encode(
+      this._clientFirstMessageBare + ',' +
+      serverFirstMessage + ',' +
+      finalMessageWithoutProof
+    );
+    const clientSignature = await this._hmac(storedKey, authMessage);
+    const clientProof = this._xor(clientKey, clientSignature);
+    const serverKey = await this._hmac(saltedPassword, this._utf8encode('Server Key'));
+    this._serverSignatureB64 = this._b64encode(await this._hmac(serverKey, authMessage));
+    return this._utf8encode(finalMessageWithoutProof + ',p=' + this._b64encode(clientProof));
+  }
+  async finish(response) {
+    const receivedServerSignatureB64 = /(?<=^v=)[^,]*/.exec(response);
+    if (this._serverSignatureB64 != receivedServerSignatureB64) {
+      throw Error('Invalid server SCRAM signature');
+    }
+  }
+  async _sha256(val) {
+    return new Uint8Array(await crypto.subtle.digest('SHA-256', val));
+  }
+  async _pbkdf2(pwd, salt, iterations, len) {
+    const cryptoKey = await crypto.subtle.importKey('raw', pwd, 'PBKDF2', false, ['deriveBits']);
+    const pbkdf2params = { name: 'PBKDF2', hash: 'SHA-256', salt, iterations };
+    return new Uint8Array(await crypto.subtle.deriveBits(pbkdf2params, cryptoKey, len));
+  }
+  async _hmac(key, inp) {
+    const importedKey = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    return new Uint8Array(await crypto.subtle.sign('HMAC', importedKey, inp));
+  }
+  _xor(a, b) {
+    return Uint8Array.from(a, (x, i) => x ^ b[i]);
+  }
+  _b64encode(bytes) {
+    return btoa(String.fromCharCode(...bytes));
+  }
+  _b64decode(b64) {
+    return Uint8Array.from(atob(b64), x => x.charCodeAt());
+  }
+  _utf8encode(str) {
+    return new TextEncoder().encode(str);
+  }
+  _utf8decode(bytes) {
+    return new TextDecoder().decode(bytes);
+  }
 }
-function b64decode(/** @type {string} */ b64) {
-  return new TextEncoder().encode(atob(b64));
-}
+
+
+// We will not use Deno std to make this module compatible with Node
 
 
 function hexEncode(/** @type {Uint8Array} */ bytes) {
