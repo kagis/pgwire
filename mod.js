@@ -467,9 +467,6 @@ class Connection {
         this._recvMessages(),
         this._sendMessage(this._startTx),
       ]);
-      if (this._lastErrorResponse) {
-        throw new PgError(this._lastErrorResponse);
-      }
     } catch (err) {
       caughtError = err;
     }
@@ -518,6 +515,13 @@ class Connection {
       // and will stopped only when socket.read reached
       await this._recvMessage(m);
     }
+    if (this._lastErrorResponse) {
+      throw new PgError(this._lastErrorResponse);
+    }
+    // TODO handle unexpected connection close when sendMessage still working.
+    // if sendMessage(this._startTx) is not resolved yet
+    // then _startup will not be resolved. But there no more active socket
+    // to keep process running
   }
   _recvMessage(m) {
     switch (m.tag) {
@@ -626,8 +630,9 @@ class Connection {
   async _recvAuthenticationMD5Password(_, { salt }) {
     // TODO stop if no password
     // if (!password) return this._startuptx.end(Error('no password));
-    const a = new Md5().update(this._password).update(this._user).toString();
-    const b = 'md5' + new Md5().update(a).update(salt).toString();
+    const utf8enc = new TextEncoder();
+    const a = utf8enc.encode(hexEncode(md5(utf8enc.encode(this._password + this._user))));
+    const b = 'md5' + hexEncode(md5(new Uint8Array([...a, ...salt])));
     this._startTx.push(new PasswordMessage(b));
   }
   async _recvAuthenticationSASL(_, { mechanism }) {
@@ -635,21 +640,25 @@ class Connection {
       // TODO gracefull terminate (send Terminate before socket close)
       throw Error(`unsupported SASL mechanism ${mechanism}`);
     }
+    const utf8enc = new TextEncoder();
     this._startTx.push(new SASLInitialResponse({
       mechanism: 'SCRAM-SHA-256',
-      data: await this._saslScramSha256.start()
+      data: utf8enc.encode(await this._saslScramSha256.start()),
     }));
   }
   async _recvAuthenticationSASLContinue(_, data) {
-    this._startTx.push(new SASLResponse(
+    const utf8enc = new TextEncoder();
+    const utf8dec = new TextDecoder();
+    this._startTx.push(new SASLResponse(utf8enc.encode(
       await this._saslScramSha256.continue(
-        utf8decode(data),
+        utf8dec.decode(data),
         this._password,
       ),
-    ));
+    )));
   }
   async _recvAuthenticationSASLFinal(_, data) {
     this._saslScramSha256.finish(utf8decode(data));
+    this._saslScramSha256 = null;
   }
   async _recvAuthenticationOk() {
     // we dont need password anymore, its more secure to forget it
@@ -657,8 +666,8 @@ class Connection {
   }
 
   _recvErrorResponse(_, payload) {
-    this._copyingOut = false;
     this._lastErrorResponse = payload;
+    this._copyingOut = false;
     // TODO ErrorResponse is associated with query only when followed by ReadyForQuery
     // ErrorResonse can be received when socket closed by server, and .query can be
     // called just before socket closed
@@ -1867,7 +1876,7 @@ class SaslScramSha256 {
     const clientNonce = new Uint8Array(24);
     crypto.getRandomValues(clientNonce);
     this._clientFirstMessageBare = 'n=,r=' + this._b64encode(clientNonce);
-    return this._utf8encode('n,,' + this._clientFirstMessageBare);
+    return 'n,,' + this._clientFirstMessageBare;
   }
   async continue(serverFirstMessage, password) {
     const { i: iterations, s: saltB64, r: nonceB64 } = (
@@ -1891,7 +1900,7 @@ class SaslScramSha256 {
     const clientProof = this._xor(clientKey, clientSignature);
     const serverKey = await this._hmac(saltedPassword, this._utf8encode('Server Key'));
     this._serverSignatureB64 = this._b64encode(await this._hmac(serverKey, authMessage));
-    return this._utf8encode(finalMessageWithoutProof + ',p=' + this._b64encode(clientProof));
+    return finalMessageWithoutProof + ',p=' + this._b64encode(clientProof);
   }
   async finish(response) {
     const receivedServerSignatureB64 = /(?<=^v=)[^,]*/.exec(response);
@@ -1933,7 +1942,7 @@ class SaslScramSha256 {
 
 
 function hexEncode(/** @type {Uint8Array} */ bytes) {
-  return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 }
 function hexDecode(hex) {
   return Uint8Array.from(
@@ -1949,46 +1958,123 @@ async function writeAll(w, arr) {
   }
 }
 
-// https://stackoverflow.com/a/60467595
-function md5(inputString) {
-  var hc="0123456789abcdef";
-  function rh(n) {var j,s="";for(j=0;j<=3;j++) s+=hc.charAt((n>>(j*8+4))&0x0F)+hc.charAt((n>>(j*8))&0x0F);return s;}
-  function ad(x,y) {var l=(x&0xFFFF)+(y&0xFFFF);var m=(x>>16)+(y>>16)+(l>>16);return (m<<16)|(l&0xFFFF);}
-  function rl(n,c)            {return (n<<c)|(n>>>(32-c));}
-  function cm(q,a,b,x,s,t)    {return ad(rl(ad(ad(a,q),ad(x,t)),s),b);}
-  function ff(a,b,c,d,x,s,t)  {return cm((b&c)|((~b)&d),a,b,x,s,t);}
-  function gg(a,b,c,d,x,s,t)  {return cm((b&d)|(c&(~d)),a,b,x,s,t);}
-  function hh(a,b,c,d,x,s,t)  {return cm(b^c^d,a,b,x,s,t);}
-  function ii(a,b,c,d,x,s,t)  {return cm(c^(b|(~d)),a,b,x,s,t);}
-  function sb(x) {
-      var i;var nblk=((x.length+8)>>6)+1;var blks=new Array(nblk*16);for(i=0;i<nblk*16;i++) blks[i]=0;
-      for(i=0;i<x.length;i++) blks[i>>2]|=x.charCodeAt(i)<<((i%4)*8);
-      blks[i>>2]|=0x80<<((i%4)*8);blks[nblk*16-2]=x.length*8;return blks;
+function md5(/** @type {Uint8Array} */ input) {
+  const padded = new Uint8Array(Math.ceil((input.byteLength + 1 + 8) / 64) * 64);
+  padded.set(input);
+  const paddedv = new DataView(padded.buffer);
+  paddedv.setUint8(input.byteLength, 0b10000000);
+  paddedv.setBigUint64(paddedv.byteLength - 8, BigInt(input.byteLength) * 8n, true);
+
+  const rol32 = (x, n) => (x << n) | (x >>> (32 - n));
+
+  let a0 = 0x67452301;
+  let b0 = 0xefcdab89;
+  let c0 = 0x98badcfe;
+  let d0 = 0x10325476;
+
+  for (let i = 0; i < paddedv.byteLength; i += 64) {
+    let a = a0, b = b0, c = c0, d = d0;
+
+    const x0 = paddedv.getUint32(i + 0x0 * 4, true);
+    const x1 = paddedv.getUint32(i + 0x1 * 4, true);
+    const x2 = paddedv.getUint32(i + 0x2 * 4, true);
+    const x3 = paddedv.getUint32(i + 0x3 * 4, true);
+    const x4 = paddedv.getUint32(i + 0x4 * 4, true);
+    const x5 = paddedv.getUint32(i + 0x5 * 4, true);
+    const x6 = paddedv.getUint32(i + 0x6 * 4, true);
+    const x7 = paddedv.getUint32(i + 0x7 * 4, true);
+    const x8 = paddedv.getUint32(i + 0x8 * 4, true);
+    const x9 = paddedv.getUint32(i + 0x9 * 4, true);
+    const xa = paddedv.getUint32(i + 0xa * 4, true);
+    const xb = paddedv.getUint32(i + 0xb * 4, true);
+    const xc = paddedv.getUint32(i + 0xc * 4, true);
+    const xd = paddedv.getUint32(i + 0xd * 4, true);
+    const xe = paddedv.getUint32(i + 0xe * 4, true);
+    const xf = paddedv.getUint32(i + 0xf * 4, true);
+
+    // round 1
+    a = b + rol32((((c ^ d) & b) ^ d) + a + x0 + 0xd76aa478, 7);
+    d = a + rol32((((b ^ c) & a) ^ c) + d + x1 + 0xe8c7b756, 12);
+    c = d + rol32((((a ^ b) & d) ^ b) + c + x2 + 0x242070db, 17);
+    b = c + rol32((((d ^ a) & c) ^ a) + b + x3 + 0xc1bdceee, 22);
+    a = b + rol32((((c ^ d) & b) ^ d) + a + x4 + 0xf57c0faf, 7);
+    d = a + rol32((((b ^ c) & a) ^ c) + d + x5 + 0x4787c62a, 12);
+    c = d + rol32((((a ^ b) & d) ^ b) + c + x6 + 0xa8304613, 17);
+    b = c + rol32((((d ^ a) & c) ^ a) + b + x7 + 0xfd469501, 22);
+    a = b + rol32((((c ^ d) & b) ^ d) + a + x8 + 0x698098d8, 7);
+    d = a + rol32((((b ^ c) & a) ^ c) + d + x9 + 0x8b44f7af, 12);
+    c = d + rol32((((a ^ b) & d) ^ b) + c + xa + 0xffff5bb1, 17);
+    b = c + rol32((((d ^ a) & c) ^ a) + b + xb + 0x895cd7be, 22);
+    a = b + rol32((((c ^ d) & b) ^ d) + a + xc + 0x6b901122, 7);
+    d = a + rol32((((b ^ c) & a) ^ c) + d + xd + 0xfd987193, 12);
+    c = d + rol32((((a ^ b) & d) ^ b) + c + xe + 0xa679438e, 17);
+    b = c + rol32((((d ^ a) & c) ^ a) + b + xf + 0x49b40821, 22);
+
+    // round 2
+    a = b + rol32((((b ^ c) & d) ^ c) + a + x1 + 0xf61e2562, 5);
+    d = a + rol32((((a ^ b) & c) ^ b) + d + x6 + 0xc040b340, 9);
+    c = d + rol32((((d ^ a) & b) ^ a) + c + xb + 0x265e5a51, 14);
+    b = c + rol32((((c ^ d) & a) ^ d) + b + x0 + 0xe9b6c7aa, 20);
+    a = b + rol32((((b ^ c) & d) ^ c) + a + x5 + 0xd62f105d, 5);
+    d = a + rol32((((a ^ b) & c) ^ b) + d + xa + 0x02441453, 9);
+    c = d + rol32((((d ^ a) & b) ^ a) + c + xf + 0xd8a1e681, 14);
+    b = c + rol32((((c ^ d) & a) ^ d) + b + x4 + 0xe7d3fbc8, 20);
+    a = b + rol32((((b ^ c) & d) ^ c) + a + x9 + 0x21e1cde6, 5);
+    d = a + rol32((((a ^ b) & c) ^ b) + d + xe + 0xc33707d6, 9);
+    c = d + rol32((((d ^ a) & b) ^ a) + c + x3 + 0xf4d50d87, 14);
+    b = c + rol32((((c ^ d) & a) ^ d) + b + x8 + 0x455a14ed, 20);
+    a = b + rol32((((b ^ c) & d) ^ c) + a + xd + 0xa9e3e905, 5);
+    d = a + rol32((((a ^ b) & c) ^ b) + d + x2 + 0xfcefa3f8, 9);
+    c = d + rol32((((d ^ a) & b) ^ a) + c + x7 + 0x676f02d9, 14);
+    b = c + rol32((((c ^ d) & a) ^ d) + b + xc + 0x8d2a4c8a, 20);
+
+    // round 3
+    a = b + rol32((b ^ c ^ d) + a + x5 + 0xfffa3942, 4);
+    d = a + rol32((a ^ b ^ c) + d + x8 + 0x8771f681, 11);
+    c = d + rol32((d ^ a ^ b) + c + xb + 0x6d9d6122, 16);
+    b = c + rol32((c ^ d ^ a) + b + xe + 0xfde5380c, 23);
+    a = b + rol32((b ^ c ^ d) + a + x1 + 0xa4beea44, 4);
+    d = a + rol32((a ^ b ^ c) + d + x4 + 0x4bdecfa9, 11);
+    c = d + rol32((d ^ a ^ b) + c + x7 + 0xf6bb4b60, 16);
+    b = c + rol32((c ^ d ^ a) + b + xa + 0xbebfbc70, 23);
+    a = b + rol32((b ^ c ^ d) + a + xd + 0x289b7ec6, 4);
+    d = a + rol32((a ^ b ^ c) + d + x0 + 0xeaa127fa, 11);
+    c = d + rol32((d ^ a ^ b) + c + x3 + 0xd4ef3085, 16);
+    b = c + rol32((c ^ d ^ a) + b + x6 + 0x04881d05, 23);
+    a = b + rol32((b ^ c ^ d) + a + x9 + 0xd9d4d039, 4);
+    d = a + rol32((a ^ b ^ c) + d + xc + 0xe6db99e5, 11);
+    c = d + rol32((d ^ a ^ b) + c + xf + 0x1fa27cf8, 16);
+    b = c + rol32((c ^ d ^ a) + b + x2 + 0xc4ac5665, 23);
+
+    // round 4
+    a = b + rol32((c ^ (b | ~d)) + a + x0 + 0xf4292244, 6);
+    d = a + rol32((b ^ (a | ~c)) + d + x7 + 0x432aff97, 10);
+    c = d + rol32((a ^ (d | ~b)) + c + xe + 0xab9423a7, 15);
+    b = c + rol32((d ^ (c | ~a)) + b + x5 + 0xfc93a039, 21);
+    a = b + rol32((c ^ (b | ~d)) + a + xc + 0x655b59c3, 6);
+    d = a + rol32((b ^ (a | ~c)) + d + x3 + 0x8f0ccc92, 10);
+    c = d + rol32((a ^ (d | ~b)) + c + xa + 0xffeff47d, 15);
+    b = c + rol32((d ^ (c | ~a)) + b + x1 + 0x85845dd1, 21);
+    a = b + rol32((c ^ (b | ~d)) + a + x8 + 0x6fa87e4f, 6);
+    d = a + rol32((b ^ (a | ~c)) + d + xf + 0xfe2ce6e0, 10);
+    c = d + rol32((a ^ (d | ~b)) + c + x6 + 0xa3014314, 15);
+    b = c + rol32((d ^ (c | ~a)) + b + xd + 0x4e0811a1, 21);
+    a = b + rol32((c ^ (b | ~d)) + a + x4 + 0xf7537e82, 6);
+    d = a + rol32((b ^ (a | ~c)) + d + xb + 0xbd3af235, 10);
+    c = d + rol32((a ^ (d | ~b)) + c + x2 + 0x2ad7d2bb, 15);
+    b = c + rol32((d ^ (c | ~a)) + b + x9 + 0xeb86d391, 21);
+
+    a0 = (a0 + a) >>> 0;
+    b0 = (b0 + b) >>> 0;
+    c0 = (c0 + c) >>> 0;
+    d0 = (d0 + d) >>> 0;
   }
-  var i,x=sb(inputString),a=1732584193,b=-271733879,c=-1732584194,d=271733878,olda,oldb,oldc,oldd;
-  for(i=0;i<x.length;i+=16) {olda=a;oldb=b;oldc=c;oldd=d;
-      a=ff(a,b,c,d,x[i+ 0], 7, -680876936);d=ff(d,a,b,c,x[i+ 1],12, -389564586);c=ff(c,d,a,b,x[i+ 2],17,  606105819);
-      b=ff(b,c,d,a,x[i+ 3],22,-1044525330);a=ff(a,b,c,d,x[i+ 4], 7, -176418897);d=ff(d,a,b,c,x[i+ 5],12, 1200080426);
-      c=ff(c,d,a,b,x[i+ 6],17,-1473231341);b=ff(b,c,d,a,x[i+ 7],22,  -45705983);a=ff(a,b,c,d,x[i+ 8], 7, 1770035416);
-      d=ff(d,a,b,c,x[i+ 9],12,-1958414417);c=ff(c,d,a,b,x[i+10],17,     -42063);b=ff(b,c,d,a,x[i+11],22,-1990404162);
-      a=ff(a,b,c,d,x[i+12], 7, 1804603682);d=ff(d,a,b,c,x[i+13],12,  -40341101);c=ff(c,d,a,b,x[i+14],17,-1502002290);
-      b=ff(b,c,d,a,x[i+15],22, 1236535329);a=gg(a,b,c,d,x[i+ 1], 5, -165796510);d=gg(d,a,b,c,x[i+ 6], 9,-1069501632);
-      c=gg(c,d,a,b,x[i+11],14,  643717713);b=gg(b,c,d,a,x[i+ 0],20, -373897302);a=gg(a,b,c,d,x[i+ 5], 5, -701558691);
-      d=gg(d,a,b,c,x[i+10], 9,   38016083);c=gg(c,d,a,b,x[i+15],14, -660478335);b=gg(b,c,d,a,x[i+ 4],20, -405537848);
-      a=gg(a,b,c,d,x[i+ 9], 5,  568446438);d=gg(d,a,b,c,x[i+14], 9,-1019803690);c=gg(c,d,a,b,x[i+ 3],14, -187363961);
-      b=gg(b,c,d,a,x[i+ 8],20, 1163531501);a=gg(a,b,c,d,x[i+13], 5,-1444681467);d=gg(d,a,b,c,x[i+ 2], 9,  -51403784);
-      c=gg(c,d,a,b,x[i+ 7],14, 1735328473);b=gg(b,c,d,a,x[i+12],20,-1926607734);a=hh(a,b,c,d,x[i+ 5], 4,    -378558);
-      d=hh(d,a,b,c,x[i+ 8],11,-2022574463);c=hh(c,d,a,b,x[i+11],16, 1839030562);b=hh(b,c,d,a,x[i+14],23,  -35309556);
-      a=hh(a,b,c,d,x[i+ 1], 4,-1530992060);d=hh(d,a,b,c,x[i+ 4],11, 1272893353);c=hh(c,d,a,b,x[i+ 7],16, -155497632);
-      b=hh(b,c,d,a,x[i+10],23,-1094730640);a=hh(a,b,c,d,x[i+13], 4,  681279174);d=hh(d,a,b,c,x[i+ 0],11, -358537222);
-      c=hh(c,d,a,b,x[i+ 3],16, -722521979);b=hh(b,c,d,a,x[i+ 6],23,   76029189);a=hh(a,b,c,d,x[i+ 9], 4, -640364487);
-      d=hh(d,a,b,c,x[i+12],11, -421815835);c=hh(c,d,a,b,x[i+15],16,  530742520);b=hh(b,c,d,a,x[i+ 2],23, -995338651);
-      a=ii(a,b,c,d,x[i+ 0], 6, -198630844);d=ii(d,a,b,c,x[i+ 7],10, 1126891415);c=ii(c,d,a,b,x[i+14],15,-1416354905);
-      b=ii(b,c,d,a,x[i+ 5],21,  -57434055);a=ii(a,b,c,d,x[i+12], 6, 1700485571);d=ii(d,a,b,c,x[i+ 3],10,-1894986606);
-      c=ii(c,d,a,b,x[i+10],15,   -1051523);b=ii(b,c,d,a,x[i+ 1],21,-2054922799);a=ii(a,b,c,d,x[i+ 8], 6, 1873313359);
-      d=ii(d,a,b,c,x[i+15],10,  -30611744);c=ii(c,d,a,b,x[i+ 6],15,-1560198380);b=ii(b,c,d,a,x[i+13],21, 1309151649);
-      a=ii(a,b,c,d,x[i+ 4], 6, -145523070);d=ii(d,a,b,c,x[i+11],10,-1120210379);c=ii(c,d,a,b,x[i+ 2],15,  718787259);
-      b=ii(b,c,d,a,x[i+ 9],21, -343485551);a=ad(a,olda);b=ad(b,oldb);c=ad(c,oldc);d=ad(d,oldd);
-  }
-  return rh(a)+rh(b)+rh(c)+rh(d);
+
+  const hash = new Uint8Array(16);
+  const hashv = new DataView(hash.buffer);
+  hashv.setUint32(0, a0, true);
+  hashv.setUint32(4, b0, true);
+  hashv.setUint32(8, c0, true);
+  hashv.setUint32(12, d0, true);
+  return hash;
 }
