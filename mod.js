@@ -9,27 +9,6 @@
  * }} PGConnectOptions
  * */
 
-export const _networking = {
-  async connect(options) {
-    return Deno.connect(options);
-  },
-  isReconnectableError(err) {
-    return (
-      err instanceof Deno.errors.ConnectionRefused ||
-      err instanceof Deno.errors.ConnectionReset
-    );
-  },
-  close(socket) {
-    try {
-      socket.close();
-    } catch (err) {
-      if (!(err instanceof Deno.errors.BadResource)) {
-        throw err;
-      }
-    }
-  },
-};
-
 /** @param  {...(string|URL|PGConnectOptions)} options */
 export async function pgconnect(...options) {
   let { '.connectRetry': connectRetry, ...connOptions } = computeConnectionOptions(options);
@@ -43,7 +22,7 @@ export async function pgconnect(...options) {
     } catch (err) {
       const elapsedTime = Date.now() - startTime;
       if (elapsedTime < connectRetry && (
-        _networking.isReconnectableError(err) ||
+        _networking.canReconnect(err) ||
         pgerrcode(err) == '57P03' // cannot_connect_now
       )) {
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -210,10 +189,10 @@ class Pool {
   _onConnectionEnded(conn) {
     this._connections.delete(conn);
   }
-  /** exports kErrorPgcode for cases when Pool is injected as dependency
+  /** exports pgwire.pgerrcode for cases when Pool is injected as dependency
    * and we dont want to import pgwire directly for error handling code */
-  get kErrorPgcode() {
-    return kErrorPgcode;
+  pgerrcode(...args) {
+    return pgerrcode(...args);
   }
 }
 
@@ -225,7 +204,7 @@ class Connection {
     this._debug = ['true', 'on', '1', 1, true].includes(debug);
     this._socket = null;
     this._backendKeyData = null;
-    this._parameters = Object.create(null);
+    this._parameters = Object.create(null); // TODO retry init
     this._lastErrorResponse = null;
     this._responseRxs = /** @type {Channel[]} */ [];
     this._notificationSubscriptions = /** @type {Set<Channel>} */ new Set();
@@ -233,13 +212,13 @@ class Connection {
     this._copyingOut = false;
     this._tx = new Channel();
     this._txReadable = this._tx; // _tx can be nulled after _tx.end(), but _txReadable will be available
-    this._startTx = new Channel();
+    this._startTx = new Channel(); // TODO retry init
     this._resolveReady = null;
     this._rejectReady = null;
     this._whenReady = new Promise(this._whenReadyExecutor.bind(this));
-    this._whenReady.connection = this;
+    // this._whenReady.connection = this;
     this._whenReady.catch(warnError);
-    this._saslScramSha256 = new SaslScramSha256();
+    this._saslScramSha256 = null;
     this._whenDestroyed = this._startup(startupOptions); // run background message processing
   }
   _whenReadyExecutor(resolve, reject) {
@@ -388,7 +367,8 @@ class Connection {
       this._tx.end();
       this._tx = null;
       // keep destroyReason only if .destroy() called before .end()
-      // so new queries will be rejected with stable error.
+      // so new queries will be rejected with the same error before
+      // and after ready resolved/rejected
       this._destroyReason = destroyReason;
     }
     if (this._notificationSubscriptions) {
@@ -427,7 +407,7 @@ class Connection {
     }
     const socket = await this._createSocket();
     try {
-      await writeAll(socket, serializeFrontendMessage(
+      await _networking.write(socket, serializeFrontendMessage(
         new CancelRequest(this._backendKeyData),
       ));
     } finally {
@@ -438,7 +418,7 @@ class Connection {
     let socket = await _networking.connect(this._connectOptions);
     if (this._tls) {
       try {
-        await writeAll(socket, serializeFrontendMessage(new SSLRequest()));
+        await _networking.write(socket, serializeFrontendMessage(new SSLRequest()));
         const sslResp = await readByte(socket);
         if (sslResp == 'S') {
           socket = await Deno.startTls(socket, { });
@@ -499,7 +479,7 @@ class Connection {
       // And should send all messages of query in single writeAll call
       // (except copy from stdin)
       // TODO zero copy for stdin
-      await writeAll(this._socket, serializeFrontendMessage(m));
+      await _networking.write(this._socket, serializeFrontendMessage(m));
     }
   }
   async _recvMessages() {
@@ -565,24 +545,24 @@ class Connection {
     await responseRx.push(Object.assign(new Uint8Array(0), { rows }));
   }
   async _recvCopyData(_, /** @type {Array<Uint8Array>} */ datas) {
-    // postgres can send CopyData when not in copy out mode
-    // steps to reproduce:
-    //
-    // StartupMessage({ database: 'postgres', user: 'postgres', replication: 'database' })
-    //
-    // Query('CREATE_REPLICATION_SLOT a LOGICAL test_decoding')
-    // wait for ReadyForQuery
-    //
-    // Query('START_REPLICATION SLOT a LOGICAL 0/0');
-    //
-    // CopyDone() // before wal_sender_timeout expires
-    // copydata-keepalive message can be received here after CopyDone
-    // but before ReadyForQuery
-    //
-    // Query('CREATE_REPLICATION_SLOT b LOGICAL test_decoding')
-    // sometimes copydata-keepalive message can be received here
-    // before RowDescription message
     if (!this._copyingOut) {
+      // postgres can send CopyData when not in copy out mode
+      // steps to reproduce:
+      //
+      // StartupMessage({ database: 'postgres', user: 'postgres', replication: 'database' })
+      //
+      // Query('CREATE_REPLICATION_SLOT a LOGICAL test_decoding')
+      // wait for ReadyForQuery
+      //
+      // Query('START_REPLICATION SLOT a LOGICAL 0/0');
+      //
+      // CopyDone() // before wal_sender_timeout expires
+      // copydata-keepalive message can be received here after CopyDone
+      // but before ReadyForQuery
+      //
+      // Query('CREATE_REPLICATION_SLOT b LOGICAL test_decoding')
+      // sometimes copydata-keepalive message can be received here
+      // before RowDescription message
       return;
     }
 
@@ -637,32 +617,37 @@ class Connection {
   }
   async _recvAuthenticationSASL(_, { mechanism }) {
     if (mechanism != 'SCRAM-SHA-256') {
-      // TODO gracefull terminate (send Terminate before socket close)
+      // TODO gracefull terminate (send Terminate before socket close) ?
       throw Error(`unsupported SASL mechanism ${mechanism}`);
     }
+    this._saslScramSha256 = new SaslScramSha256();
+    const firstmsg = await this._saslScramSha256.start();
     const utf8enc = new TextEncoder();
     this._startTx.push(new SASLInitialResponse({
       mechanism: 'SCRAM-SHA-256',
-      data: utf8enc.encode(await this._saslScramSha256.start()),
+      data: utf8enc.encode(firstmsg),
     }));
   }
   async _recvAuthenticationSASLContinue(_, data) {
     const utf8enc = new TextEncoder();
     const utf8dec = new TextDecoder();
-    this._startTx.push(new SASLResponse(utf8enc.encode(
-      await this._saslScramSha256.continue(
-        utf8dec.decode(data),
-        this._password,
-      ),
-    )));
+    const finmsg = await this._saslScramSha256.continue(
+      utf8dec.decode(data),
+      this._password,
+    );
+    this._startTx.push(new SASLResponse(utf8enc.encode(finmsg)));
   }
   async _recvAuthenticationSASLFinal(_, data) {
-    this._saslScramSha256.finish(utf8decode(data));
+    const utf8dec = new TextDecoder();
+    this._saslScramSha256.finish(utf8dec.decode(data));
     this._saslScramSha256 = null;
   }
   async _recvAuthenticationOk() {
     // we dont need password anymore, its more secure to forget it
     this._password = null;
+    // TODO we can receive ErrorResponse after AuthenticationOk
+    // and if we going to implement connectRetry in Connection
+    // then we still need _password here
   }
 
   _recvErrorResponse(_, payload) {
@@ -856,18 +841,18 @@ class Response {
     return this._iter[Symbol.asyncIterator]();
   }
   then(...args) {
-    return this._load().then(...args);
+    return this._loadOnce().then(...args);
   }
   catch(...args) {
-    return this._load().catch(...args);
+    return this._loadOnce().catch(...args);
   }
   finally(...args) {
-    return this._load().finally(...args);
+    return this._loadOnce().finally(...args);
   }
-  async _load(noCache) {
-    if (!noCache) {
-      return this._loadPromise || (this._loadPromise = this._load(true));
-    }
+  async _loadOnce() {
+    return this._loadPromise || (this._loadPromise = this._load());
+  }
+  async _load() {
     // let inTransaction = false;
     let lastResult;
     const results = [];
@@ -924,7 +909,7 @@ class Response {
   }
 }
 
-async function * iterBackendMessages(reader) {
+async function * iterBackendMessages(socket) {
   let buf = new Uint8Array(16_640);
   let nacc = 0;
   for (;;) {
@@ -933,7 +918,7 @@ async function * iterBackendMessages(reader) {
       buf = new Uint8Array(oldbuf.length * 2); // TODO prevent uncontrolled grow
       buf.set(oldbuf);
     }
-    const nread = await reader.read(buf.subarray(nacc));
+    const nread = await _networking.read(socket, buf.subarray(nacc));
     if (nread == null) break;
     nacc += nread;
 
@@ -1867,8 +1852,6 @@ function warnError(err) {
   // console.trace('warning', err);
 }
 
-
-
 class SaslScramSha256 {
   _clientFirstMessageBare;
   _serverSignatureB64;
@@ -1879,34 +1862,36 @@ class SaslScramSha256 {
     return 'n,,' + this._clientFirstMessageBare;
   }
   async continue(serverFirstMessage, password) {
-    const { i: iterations, s: saltB64, r: nonceB64 } = (
-      serverFirstMessage
-      .split(',')
-      .map(it => /^([^=]*)=(.*)$/.exec(it))
-      .reduce((acc, [, key, val]) => ({ ...acc, [key]: val }), {})
-    );
+    const utf8enc = new TextEncoder();
+    const { 'i': iterations, 's': saltB64, 'r': nonceB64 } = this._parseMsg(serverFirstMessage);
     const finalMessageWithoutProof = 'c=biws,r=' + nonceB64;
     const salt = this._b64decode(saltB64);
-    const passwordUtf8 = this._utf8encode(password.normalize());
+    const passwordUtf8 = utf8enc.encode(password.normalize());
     const saltedPassword = await this._pbkdf2(passwordUtf8, salt, +iterations, 32 * 8);
-    const clientKey = await this._hmac(saltedPassword, this._utf8encode('Client Key'));
+    const clientKey = await this._hmac(saltedPassword, utf8enc.encode('Client Key'));
     const storedKey = await this._sha256(clientKey);
-    const authMessage = this._utf8encode(
+    const authMessage = utf8enc.encode(
       this._clientFirstMessageBare + ',' +
       serverFirstMessage + ',' +
       finalMessageWithoutProof
     );
     const clientSignature = await this._hmac(storedKey, authMessage);
     const clientProof = this._xor(clientKey, clientSignature);
-    const serverKey = await this._hmac(saltedPassword, this._utf8encode('Server Key'));
+    const serverKey = await this._hmac(saltedPassword, utf8enc.encode('Server Key'));
     this._serverSignatureB64 = this._b64encode(await this._hmac(serverKey, authMessage));
     return finalMessageWithoutProof + ',p=' + this._b64encode(clientProof);
   }
-  async finish(response) {
-    const receivedServerSignatureB64 = /(?<=^v=)[^,]*/.exec(response);
-    if (this._serverSignatureB64 != receivedServerSignatureB64) {
-      throw Error('Invalid server SCRAM signature');
+  finish(response) {
+    if (!this._serverSignatureB64) {
+      throw Error('unexpected auth finish');
     }
+    const { 'v': receivedServerSignatureB64 } = this._parseMsg(response);
+    if (this._serverSignatureB64 != receivedServerSignatureB64) {
+      throw Error('invalid server SCRAM signature');
+    }
+  }
+  _parseMsg(msg) { // parses `key1=val,key2=val` into object
+    return Object.fromEntries(msg.split(',').map(it => /^(.*?)=(.*)$/.exec(it).slice(1)));
   }
   async _sha256(val) {
     return new Uint8Array(await crypto.subtle.digest('SHA-256', val));
@@ -1914,11 +1899,14 @@ class SaslScramSha256 {
   async _pbkdf2(pwd, salt, iterations, len) {
     const cryptoKey = await crypto.subtle.importKey('raw', pwd, 'PBKDF2', false, ['deriveBits']);
     const pbkdf2params = { name: 'PBKDF2', hash: 'SHA-256', salt, iterations };
-    return new Uint8Array(await crypto.subtle.deriveBits(pbkdf2params, cryptoKey, len));
+    const buf = await crypto.subtle.deriveBits(pbkdf2params, cryptoKey, len);
+    return new Uint8Array(buf);
   }
   async _hmac(key, inp) {
-    const importedKey = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-    return new Uint8Array(await crypto.subtle.sign('HMAC', importedKey, inp));
+    const hmacParams = { name: 'HMAC', hash: 'SHA-256' };
+    const importedKey = await crypto.subtle.importKey('raw', key, hmacParams, false, ['sign']);
+    const buf = await crypto.subtle.sign('HMAC', importedKey, inp);
+    return new Uint8Array(buf);
   }
   _xor(a, b) {
     return Uint8Array.from(a, (x, i) => x ^ b[i]);
@@ -1929,21 +1917,49 @@ class SaslScramSha256 {
   _b64decode(b64) {
     return Uint8Array.from(atob(b64), x => x.charCodeAt());
   }
-  _utf8encode(str) {
-    return new TextEncoder().encode(str);
-  }
-  _utf8decode(bytes) {
-    return new TextDecoder().decode(bytes);
-  }
 }
 
+const _networking = {
+  async connect(options) {
+    return Deno.connect(options);
+  },
+  canReconnect(err) {
+    return (
+      err instanceof Deno.errors.ConnectionRefused ||
+      err instanceof Deno.errors.ConnectionReset
+    );
+  },
+  async startTls(socket) {
+    return Deno.startTls(socket);
+  },
+  async write(socket, arr) {
+    let nwritten = 0;
+    while (nwritten < arr.length) {
+      nwritten += await socket.write(arr.subarray(nwritten));
+    }
+  },
+  async read(socket, buf) {
+    return socket.read(buf);
+  },
+  close(socket) {
+    try {
+      socket.close();
+    } catch (err) {
+      if (!(err instanceof Deno.errors.BadResource)) {
+        throw err;
+      }
+    }
+  },
+};
 
 // We will not use Deno std to make this module compatible with Node
 
 
+// FIXME expected to be slow
 function hexEncode(/** @type {Uint8Array} */ bytes) {
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 }
+// FIXME expected to be slow
 function hexDecode(hex) {
   return Uint8Array.from(
     { length: hex.length / 2 },
@@ -1951,118 +1967,96 @@ function hexDecode(hex) {
   );
 }
 
-async function writeAll(w, arr) {
-  let nwritten = 0;
-  while (nwritten < arr.length) {
-    nwritten += await w.write(arr.subarray(nwritten));
-  }
-}
-
 function md5(/** @type {Uint8Array} */ input) {
   const padded = new Uint8Array(Math.ceil((input.byteLength + 1 + 8) / 64) * 64);
-  padded.set(input);
   const paddedv = new DataView(padded.buffer);
+  padded.set(input);
   paddedv.setUint8(input.byteLength, 0b10000000);
   paddedv.setBigUint64(paddedv.byteLength - 8, BigInt(input.byteLength) * 8n, true);
-
-  const rol32 = (x, n) => (x << n) | (x >>> (32 - n));
 
   let a0 = 0x67452301;
   let b0 = 0xefcdab89;
   let c0 = 0x98badcfe;
   let d0 = 0x10325476;
+  const m = Array(16);
 
   for (let i = 0; i < paddedv.byteLength; i += 64) {
     let a = a0, b = b0, c = c0, d = d0;
-
-    const x0 = paddedv.getUint32(i + 0x0 * 4, true);
-    const x1 = paddedv.getUint32(i + 0x1 * 4, true);
-    const x2 = paddedv.getUint32(i + 0x2 * 4, true);
-    const x3 = paddedv.getUint32(i + 0x3 * 4, true);
-    const x4 = paddedv.getUint32(i + 0x4 * 4, true);
-    const x5 = paddedv.getUint32(i + 0x5 * 4, true);
-    const x6 = paddedv.getUint32(i + 0x6 * 4, true);
-    const x7 = paddedv.getUint32(i + 0x7 * 4, true);
-    const x8 = paddedv.getUint32(i + 0x8 * 4, true);
-    const x9 = paddedv.getUint32(i + 0x9 * 4, true);
-    const xa = paddedv.getUint32(i + 0xa * 4, true);
-    const xb = paddedv.getUint32(i + 0xb * 4, true);
-    const xc = paddedv.getUint32(i + 0xc * 4, true);
-    const xd = paddedv.getUint32(i + 0xd * 4, true);
-    const xe = paddedv.getUint32(i + 0xe * 4, true);
-    const xf = paddedv.getUint32(i + 0xf * 4, true);
+    for (let j = 0; j < 16; j++) {
+      m[j] = paddedv.getUint32(i + j * 4, true);
+    }
 
     // round 1
-    a = b + rol32((((c ^ d) & b) ^ d) + a + x0 + 0xd76aa478, 7);
-    d = a + rol32((((b ^ c) & a) ^ c) + d + x1 + 0xe8c7b756, 12);
-    c = d + rol32((((a ^ b) & d) ^ b) + c + x2 + 0x242070db, 17);
-    b = c + rol32((((d ^ a) & c) ^ a) + b + x3 + 0xc1bdceee, 22);
-    a = b + rol32((((c ^ d) & b) ^ d) + a + x4 + 0xf57c0faf, 7);
-    d = a + rol32((((b ^ c) & a) ^ c) + d + x5 + 0x4787c62a, 12);
-    c = d + rol32((((a ^ b) & d) ^ b) + c + x6 + 0xa8304613, 17);
-    b = c + rol32((((d ^ a) & c) ^ a) + b + x7 + 0xfd469501, 22);
-    a = b + rol32((((c ^ d) & b) ^ d) + a + x8 + 0x698098d8, 7);
-    d = a + rol32((((b ^ c) & a) ^ c) + d + x9 + 0x8b44f7af, 12);
-    c = d + rol32((((a ^ b) & d) ^ b) + c + xa + 0xffff5bb1, 17);
-    b = c + rol32((((d ^ a) & c) ^ a) + b + xb + 0x895cd7be, 22);
-    a = b + rol32((((c ^ d) & b) ^ d) + a + xc + 0x6b901122, 7);
-    d = a + rol32((((b ^ c) & a) ^ c) + d + xd + 0xfd987193, 12);
-    c = d + rol32((((a ^ b) & d) ^ b) + c + xe + 0xa679438e, 17);
-    b = c + rol32((((d ^ a) & c) ^ a) + b + xf + 0x49b40821, 22);
+    a = b + rol32((((c ^ d) & b) ^ d) + a + m[0x0] + 0xd76aa478, 7);
+    d = a + rol32((((b ^ c) & a) ^ c) + d + m[0x1] + 0xe8c7b756, 12);
+    c = d + rol32((((a ^ b) & d) ^ b) + c + m[0x2] + 0x242070db, 17);
+    b = c + rol32((((d ^ a) & c) ^ a) + b + m[0x3] + 0xc1bdceee, 22);
+    a = b + rol32((((c ^ d) & b) ^ d) + a + m[0x4] + 0xf57c0faf, 7);
+    d = a + rol32((((b ^ c) & a) ^ c) + d + m[0x5] + 0x4787c62a, 12);
+    c = d + rol32((((a ^ b) & d) ^ b) + c + m[0x6] + 0xa8304613, 17);
+    b = c + rol32((((d ^ a) & c) ^ a) + b + m[0x7] + 0xfd469501, 22);
+    a = b + rol32((((c ^ d) & b) ^ d) + a + m[0x8] + 0x698098d8, 7);
+    d = a + rol32((((b ^ c) & a) ^ c) + d + m[0x9] + 0x8b44f7af, 12);
+    c = d + rol32((((a ^ b) & d) ^ b) + c + m[0xa] + 0xffff5bb1, 17);
+    b = c + rol32((((d ^ a) & c) ^ a) + b + m[0xb] + 0x895cd7be, 22);
+    a = b + rol32((((c ^ d) & b) ^ d) + a + m[0xc] + 0x6b901122, 7);
+    d = a + rol32((((b ^ c) & a) ^ c) + d + m[0xd] + 0xfd987193, 12);
+    c = d + rol32((((a ^ b) & d) ^ b) + c + m[0xe] + 0xa679438e, 17);
+    b = c + rol32((((d ^ a) & c) ^ a) + b + m[0xf] + 0x49b40821, 22);
 
     // round 2
-    a = b + rol32((((b ^ c) & d) ^ c) + a + x1 + 0xf61e2562, 5);
-    d = a + rol32((((a ^ b) & c) ^ b) + d + x6 + 0xc040b340, 9);
-    c = d + rol32((((d ^ a) & b) ^ a) + c + xb + 0x265e5a51, 14);
-    b = c + rol32((((c ^ d) & a) ^ d) + b + x0 + 0xe9b6c7aa, 20);
-    a = b + rol32((((b ^ c) & d) ^ c) + a + x5 + 0xd62f105d, 5);
-    d = a + rol32((((a ^ b) & c) ^ b) + d + xa + 0x02441453, 9);
-    c = d + rol32((((d ^ a) & b) ^ a) + c + xf + 0xd8a1e681, 14);
-    b = c + rol32((((c ^ d) & a) ^ d) + b + x4 + 0xe7d3fbc8, 20);
-    a = b + rol32((((b ^ c) & d) ^ c) + a + x9 + 0x21e1cde6, 5);
-    d = a + rol32((((a ^ b) & c) ^ b) + d + xe + 0xc33707d6, 9);
-    c = d + rol32((((d ^ a) & b) ^ a) + c + x3 + 0xf4d50d87, 14);
-    b = c + rol32((((c ^ d) & a) ^ d) + b + x8 + 0x455a14ed, 20);
-    a = b + rol32((((b ^ c) & d) ^ c) + a + xd + 0xa9e3e905, 5);
-    d = a + rol32((((a ^ b) & c) ^ b) + d + x2 + 0xfcefa3f8, 9);
-    c = d + rol32((((d ^ a) & b) ^ a) + c + x7 + 0x676f02d9, 14);
-    b = c + rol32((((c ^ d) & a) ^ d) + b + xc + 0x8d2a4c8a, 20);
+    a = b + rol32((((b ^ c) & d) ^ c) + a + m[0x1] + 0xf61e2562, 5);
+    d = a + rol32((((a ^ b) & c) ^ b) + d + m[0x6] + 0xc040b340, 9);
+    c = d + rol32((((d ^ a) & b) ^ a) + c + m[0xb] + 0x265e5a51, 14);
+    b = c + rol32((((c ^ d) & a) ^ d) + b + m[0x0] + 0xe9b6c7aa, 20);
+    a = b + rol32((((b ^ c) & d) ^ c) + a + m[0x5] + 0xd62f105d, 5);
+    d = a + rol32((((a ^ b) & c) ^ b) + d + m[0xa] + 0x02441453, 9);
+    c = d + rol32((((d ^ a) & b) ^ a) + c + m[0xf] + 0xd8a1e681, 14);
+    b = c + rol32((((c ^ d) & a) ^ d) + b + m[0x4] + 0xe7d3fbc8, 20);
+    a = b + rol32((((b ^ c) & d) ^ c) + a + m[0x9] + 0x21e1cde6, 5);
+    d = a + rol32((((a ^ b) & c) ^ b) + d + m[0xe] + 0xc33707d6, 9);
+    c = d + rol32((((d ^ a) & b) ^ a) + c + m[0x3] + 0xf4d50d87, 14);
+    b = c + rol32((((c ^ d) & a) ^ d) + b + m[0x8] + 0x455a14ed, 20);
+    a = b + rol32((((b ^ c) & d) ^ c) + a + m[0xd] + 0xa9e3e905, 5);
+    d = a + rol32((((a ^ b) & c) ^ b) + d + m[0x2] + 0xfcefa3f8, 9);
+    c = d + rol32((((d ^ a) & b) ^ a) + c + m[0x7] + 0x676f02d9, 14);
+    b = c + rol32((((c ^ d) & a) ^ d) + b + m[0xc] + 0x8d2a4c8a, 20);
 
     // round 3
-    a = b + rol32((b ^ c ^ d) + a + x5 + 0xfffa3942, 4);
-    d = a + rol32((a ^ b ^ c) + d + x8 + 0x8771f681, 11);
-    c = d + rol32((d ^ a ^ b) + c + xb + 0x6d9d6122, 16);
-    b = c + rol32((c ^ d ^ a) + b + xe + 0xfde5380c, 23);
-    a = b + rol32((b ^ c ^ d) + a + x1 + 0xa4beea44, 4);
-    d = a + rol32((a ^ b ^ c) + d + x4 + 0x4bdecfa9, 11);
-    c = d + rol32((d ^ a ^ b) + c + x7 + 0xf6bb4b60, 16);
-    b = c + rol32((c ^ d ^ a) + b + xa + 0xbebfbc70, 23);
-    a = b + rol32((b ^ c ^ d) + a + xd + 0x289b7ec6, 4);
-    d = a + rol32((a ^ b ^ c) + d + x0 + 0xeaa127fa, 11);
-    c = d + rol32((d ^ a ^ b) + c + x3 + 0xd4ef3085, 16);
-    b = c + rol32((c ^ d ^ a) + b + x6 + 0x04881d05, 23);
-    a = b + rol32((b ^ c ^ d) + a + x9 + 0xd9d4d039, 4);
-    d = a + rol32((a ^ b ^ c) + d + xc + 0xe6db99e5, 11);
-    c = d + rol32((d ^ a ^ b) + c + xf + 0x1fa27cf8, 16);
-    b = c + rol32((c ^ d ^ a) + b + x2 + 0xc4ac5665, 23);
+    a = b + rol32((b ^ c ^ d) + a + m[0x5] + 0xfffa3942, 4);
+    d = a + rol32((a ^ b ^ c) + d + m[0x8] + 0x8771f681, 11);
+    c = d + rol32((d ^ a ^ b) + c + m[0xb] + 0x6d9d6122, 16);
+    b = c + rol32((c ^ d ^ a) + b + m[0xe] + 0xfde5380c, 23);
+    a = b + rol32((b ^ c ^ d) + a + m[0x1] + 0xa4beea44, 4);
+    d = a + rol32((a ^ b ^ c) + d + m[0x4] + 0x4bdecfa9, 11);
+    c = d + rol32((d ^ a ^ b) + c + m[0x7] + 0xf6bb4b60, 16);
+    b = c + rol32((c ^ d ^ a) + b + m[0xa] + 0xbebfbc70, 23);
+    a = b + rol32((b ^ c ^ d) + a + m[0xd] + 0x289b7ec6, 4);
+    d = a + rol32((a ^ b ^ c) + d + m[0x0] + 0xeaa127fa, 11);
+    c = d + rol32((d ^ a ^ b) + c + m[0x3] + 0xd4ef3085, 16);
+    b = c + rol32((c ^ d ^ a) + b + m[0x6] + 0x04881d05, 23);
+    a = b + rol32((b ^ c ^ d) + a + m[0x9] + 0xd9d4d039, 4);
+    d = a + rol32((a ^ b ^ c) + d + m[0xc] + 0xe6db99e5, 11);
+    c = d + rol32((d ^ a ^ b) + c + m[0xf] + 0x1fa27cf8, 16);
+    b = c + rol32((c ^ d ^ a) + b + m[0x2] + 0xc4ac5665, 23);
 
     // round 4
-    a = b + rol32((c ^ (b | ~d)) + a + x0 + 0xf4292244, 6);
-    d = a + rol32((b ^ (a | ~c)) + d + x7 + 0x432aff97, 10);
-    c = d + rol32((a ^ (d | ~b)) + c + xe + 0xab9423a7, 15);
-    b = c + rol32((d ^ (c | ~a)) + b + x5 + 0xfc93a039, 21);
-    a = b + rol32((c ^ (b | ~d)) + a + xc + 0x655b59c3, 6);
-    d = a + rol32((b ^ (a | ~c)) + d + x3 + 0x8f0ccc92, 10);
-    c = d + rol32((a ^ (d | ~b)) + c + xa + 0xffeff47d, 15);
-    b = c + rol32((d ^ (c | ~a)) + b + x1 + 0x85845dd1, 21);
-    a = b + rol32((c ^ (b | ~d)) + a + x8 + 0x6fa87e4f, 6);
-    d = a + rol32((b ^ (a | ~c)) + d + xf + 0xfe2ce6e0, 10);
-    c = d + rol32((a ^ (d | ~b)) + c + x6 + 0xa3014314, 15);
-    b = c + rol32((d ^ (c | ~a)) + b + xd + 0x4e0811a1, 21);
-    a = b + rol32((c ^ (b | ~d)) + a + x4 + 0xf7537e82, 6);
-    d = a + rol32((b ^ (a | ~c)) + d + xb + 0xbd3af235, 10);
-    c = d + rol32((a ^ (d | ~b)) + c + x2 + 0x2ad7d2bb, 15);
-    b = c + rol32((d ^ (c | ~a)) + b + x9 + 0xeb86d391, 21);
+    a = b + rol32((c ^ (b | ~d)) + a + m[0x0] + 0xf4292244, 6);
+    d = a + rol32((b ^ (a | ~c)) + d + m[0x7] + 0x432aff97, 10);
+    c = d + rol32((a ^ (d | ~b)) + c + m[0xe] + 0xab9423a7, 15);
+    b = c + rol32((d ^ (c | ~a)) + b + m[0x5] + 0xfc93a039, 21);
+    a = b + rol32((c ^ (b | ~d)) + a + m[0xc] + 0x655b59c3, 6);
+    d = a + rol32((b ^ (a | ~c)) + d + m[0x3] + 0x8f0ccc92, 10);
+    c = d + rol32((a ^ (d | ~b)) + c + m[0xa] + 0xffeff47d, 15);
+    b = c + rol32((d ^ (c | ~a)) + b + m[0x1] + 0x85845dd1, 21);
+    a = b + rol32((c ^ (b | ~d)) + a + m[0x8] + 0x6fa87e4f, 6);
+    d = a + rol32((b ^ (a | ~c)) + d + m[0xf] + 0xfe2ce6e0, 10);
+    c = d + rol32((a ^ (d | ~b)) + c + m[0x6] + 0xa3014314, 15);
+    b = c + rol32((d ^ (c | ~a)) + b + m[0xd] + 0x4e0811a1, 21);
+    a = b + rol32((c ^ (b | ~d)) + a + m[0x4] + 0xf7537e82, 6);
+    d = a + rol32((b ^ (a | ~c)) + d + m[0xb] + 0xbd3af235, 10);
+    c = d + rol32((a ^ (d | ~b)) + c + m[0x2] + 0x2ad7d2bb, 15);
+    b = c + rol32((d ^ (c | ~a)) + b + m[0x9] + 0xeb86d391, 21);
 
     a0 = (a0 + a) >>> 0;
     b0 = (b0 + b) >>> 0;
@@ -2077,4 +2071,8 @@ function md5(/** @type {Uint8Array} */ input) {
   hashv.setUint32(8, c0, true);
   hashv.setUint32(12, d0, true);
   return hash;
+
+  function rol32(x, n) {
+    return (x << n) | (x >>> (32 - n));
+  }
 }
