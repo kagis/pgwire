@@ -209,7 +209,11 @@ class Connection {
     this._responseRxs = /** @type {Channel[]} */ [];
     this._notificationSubscriptions = /** @type {Set<Channel>} */ new Set();
     this._transactionStatus = null;
+    this._rowDecoder = null;
     this._copyingOut = false;
+    this._copyBuf = new Uint8Array(1024);
+    this._copyBufPos = 0;
+    this._rowsChunk = [];
     this._tx = new Channel();
     this._txReadable = this._tx; // _tx can be nulled after _tx.end(), but _txReadable will be available
     this._startTx = new Channel(); // TODO retry init
@@ -375,6 +379,7 @@ class Connection {
       this._notificationSubscriptions.forEach(it => void it.end(destroyReason));
       this._notificationSubscriptions = null;
     }
+    // TODO await _flushDataRows
     const responseEndReason = destroyReason || Error('incomplete response');
     while (this._responseRxs.length) {
       this._responseRxs.shift().end(responseEndReason);
@@ -470,8 +475,8 @@ class Connection {
     } else {
       if (this._debug) {
         console.log(... m.payload === undefined
-          ? ['<--- %s', m.constructor.name]
-          : ['<--- %s %o', m.constructor.name, m.payload],
+          ? ['<--- %s', m.tag]
+          : ['<--- %s %o', m.tag, m.payload],
         );
       }
       // TODO serializeFrontendMessage creates new Uint8Array
@@ -483,17 +488,21 @@ class Connection {
     }
   }
   async _recvMessages() {
-    for await (const m of iterBackendMessages(this._socket)) {
-      if (this._debug) {
-        console.log(... m.payload === undefined
-          ? ['-> %s', m.tag]
-          : ['-> %s %o', m.tag, m.payload],
-        );
+    for await (const mchunk of iterBackendMessages(this._socket)) {
+      for (const m of mchunk) {
+        if (this._debug) {
+          console.log(... m.payload === undefined
+            ? ['-> %s', m.tag]
+            : ['-> %s %o', m.tag, m.payload],
+          );
+        }
+        // TODO check if connection is destroyed to prevent errors in _recvMessage?
+        const maybePromise = this._recvMessage(m);
+        if (maybePromise) {
+          await maybePromise;
+        }
       }
-      // TODO check if connection is destroyed to prevent errors in _recvMessage?
-      // iterBackendMessages can be in the middle of yield loop over buffered messages
-      // and will stopped only when socket.read reached
-      await this._recvMessage(m);
+      await this._flushDataRows();
     }
     if (this._lastErrorResponse) {
       throw new PgError(this._lastErrorResponse);
@@ -505,8 +514,8 @@ class Connection {
   }
   _recvMessage(m) {
     switch (m.tag) {
-      case 'DataRow': return this._recvDataRow(m, [m.payload]);
-      case 'CopyData': return this._recvCopyData(m, [m.payload]);
+      case 'DataRow': return this._recvDataRow(m, m.payload);
+      case 'CopyData': return this._recvCopyData(m, m.payload);
       case 'CopyInResponse': return this._recvCopyInResponse(m, m.payload);
       case 'CopyOutResponse': return this._recvCopyOutResponse(m, m.payload);
       case 'CopyBothResponse': return this._recvCopyBothResponse(m, m.payload);
@@ -532,19 +541,16 @@ class Connection {
       case 'NotificationResponse': return this._recvNotificationResponse(m.payload, m);
     }
   }
-  async _recvDataRow(_, /** @type {Array<Array<Uint8Array>>} */ rows) {
-    for (const row of rows) {
-      for (let i = 0; i < this._rowDecoder.length; i++) {
-        const val = row[i];
-        if (val != null) {
-          row[i] = this._rowDecoder[i](val);
-        }
+  _recvDataRow(_, /** @type {Array<Uint8Array>} */ row) {
+    for (let i = 0; i < this._rowDecoder.length; i++) {
+      const val = row[i];
+      if (val != null) {
+        row[i] = this._rowDecoder[i](val);
       }
     }
-    const [responseRx] = this._responseRxs;
-    await responseRx.push(Object.assign(new Uint8Array(0), { rows }));
+    this._rowsChunk.push(row);
   }
-  async _recvCopyData(_, /** @type {Array<Uint8Array>} */ datas) {
+  _recvCopyData(_, /** @type {Uint8Array} */ copyData) {
     if (!this._copyingOut) {
       // postgres can send CopyData when not in copy out mode
       // steps to reproduce:
@@ -566,43 +572,64 @@ class Connection {
       return;
     }
 
-    const [responseRx] = this._responseRxs;
-    // response.push(datas);
-    // TODO recieve bulk CopyData
-    for (const it of datas) {
-      await responseRx.push(Object.assign(it, { rows: [it] }));
+    if (this._copyBuf.length < this._copyBufPos + copyData.length) {
+      const oldbuf = this._copyBuf;
+      this._copyBuf = new Uint8Array(oldbuf.length * 2);
+      this._copyBuf.set(oldbuf);
     }
+    this._copyBuf.set(copyData, this._copyBufPos);
+    this._rowsChunk.push(this._copyBuf.subarray(
+      this._copyBufPos,
+      this._copyBufPos += copyData.length,
+    ));
   }
-  _recvCopyInResponse(m) {
-    this._fwdBackendMessage(m);
+  async _flushDataRows() {
+    if (!this._rowsChunk.length) {
+      return;
+    }
+    const m = this._copyBuf.subarray(0, this._copyBufPos);
+    m.rows = this._rowsChunk;
+    m.tag = null; // TODO m.message ? consistent with .query({ message: 'Parse' }, ...)
+    m.payload = undefined;
+    const [responseRx] = this._responseRxs;
+    await responseRx.push(m);
+    this._rowsChunk = [];
+    this._copyBufPos = 0;
+    // TODO bench reuse single _copyBuf vs new _copyBuf for each chunk
+    // Be carefull when commenting next line because awaiting responseRx.push
+    // does not awaits until _copyBuf is consumed and ready to resuse
+    this._copyBuf = new Uint8Array(this._copyBuf.length);
   }
-  _recvCopyOutResponse(m) {
+  async _recvCopyInResponse(m) {
+    await this._fwdBackendMessage(m);
+  }
+  async _recvCopyOutResponse(m) {
     this._copyingOut = true;
-    this._fwdBackendMessage(m);
+    await this._fwdBackendMessage(m);
   }
-  _recvCopyBothResponse(m) {
+  async _recvCopyBothResponse(m) {
     this._copyingOut = true;
-    this._fwdBackendMessage(m);
+    await this._fwdBackendMessage(m);
   }
-  _recvCopyDone(m) {
+  async _recvCopyDone(m) {
     this._copyingOut = false;
-    this._fwdBackendMessage(m);
+    await this._fwdBackendMessage(m);
   }
-  _recvCommandComplete(m) {
-    return this._fwdBackendMessage(m);
+  async _recvCommandComplete(m) {
+    await this._fwdBackendMessage(m);
   }
-  _recvEmptyQueryResponse(m) {
-    return this._fwdBackendMessage(m);
+  async _recvEmptyQueryResponse(m) {
+    await this._fwdBackendMessage(m);
   }
-  _recvPortalSuspended(m) {
-    return this._fwdBackendMessage(m);
+  async _recvPortalSuspended(m) {
+    await this._fwdBackendMessage(m);
   }
-  _recvNoData(m) {
-    return this._fwdBackendMessage(m);
+  async _recvNoData(m) {
+    await this._fwdBackendMessage(m);
   }
-  _recvRowDescription(m, fields) {
+  async _recvRowDescription(m, fields) {
     this._rowDecoder = fields.map(getFieldDecoder);
-    return this._fwdBackendMessage(m);
+    await this._fwdBackendMessage(m);
   }
   async _recvAuthenticationCleartextPassword() {
     this._startTx.push(new PasswordMessage(this._password));
@@ -653,6 +680,7 @@ class Connection {
   _recvErrorResponse(_, payload) {
     this._lastErrorResponse = payload;
     this._copyingOut = false;
+
     // TODO ErrorResponse is associated with query only when followed by ReadyForQuery
     // ErrorResonse can be received when socket closed by server, and .query can be
     // called just before socket closed
@@ -661,18 +689,18 @@ class Connection {
     //   // throw new PgError(m.payload);
     // }
   }
-  _recvReadyForQuery(m, { transactionStatus }) {
+  async _recvReadyForQuery(m, { transactionStatus }) {
     this._transactionStatus = transactionStatus;
-    if (this._fwdBackendMessage(m)) {
-      this._responseRxs.shift().end(null, this._lastErrorResponse);
-      this._lastErrorResponse = null;
+    if (this._startTx) { // complete startup
+      this._startTx.push(this._txReadable);
+      this._startTx.end();
+      this._startTx = null;
+      this._resolveReady();
       return;
     }
-    // complete startup
-    this._startTx.push(this._txReadable);
-    this._startTx.end();
-    this._startTx = null;
-    this._resolveReady();
+    await this._fwdBackendMessage(m)
+    this._responseRxs.shift().end(null, this._lastErrorResponse);
+    this._lastErrorResponse = null;
   }
 
   async _recvNotificationResponse(_, payload) {
@@ -682,7 +710,7 @@ class Connection {
     ));
   }
   _recvNoticeResponse(m) {
-    // FIXME async NoticeResponse can be recevied after .query called
+    // TODO async NoticeResponse can be recevied after .query called
     // but before query messages actually received by postres.
     // Such NoticeResponse will be uncorrectly forwared to query response.
     // Seems that there is no way to check whether NoticeResponse
@@ -690,23 +718,29 @@ class Connection {
     // messages as connection level notices and do not forward NoticeResponses
     // to query responses at all.
 
-    if (!this._fwdBackendMessage(m)) {
-      // NoticeResponse is not associated with query
-      // TODO report nonquery NoticeResponse
-    }
+    // if (!this._fwdBackendMessage(m)) {
+    //   // NoticeResponse is not associated with query
+    //   // TODO report nonquery NoticeResponse
+    // }
   }
   _recvParameterStatus(_, { parameter, value }) {
     this._parameters[parameter] = value;
+    // TODO emit event ?
   }
   _recvBackendKeyData(_, backendKeyData) {
     this._backendKeyData = backendKeyData;
   }
-  _fwdBackendMessage(m) {
-    if (!this._startTx && this._responseRxs.length) {
-      const [responseRx] = this._responseRxs;
-      responseRx.push(Object.assign(new Uint8Array(0), { rows: [] }, m));
-      return true;
-    }
+  async _fwdBackendMessage({ tag, payload }) {
+    await this._flushDataRows();
+    // if (!this._startTx && this._responseRxs.length) { // TODO only need for _recvReadyForQuery
+    const m = new Uint8Array(0);
+    m.rows = [];
+    m.tag = tag;
+    m.payload = payload;
+    const [responseRx] = this._responseRxs;
+    await responseRx.push(m); // TODO await ?
+      // return true;
+    // }
   }
 
   // // TODO replace with { connection, then, catch, finally } object, less magic
@@ -911,38 +945,40 @@ class Response {
 
 async function * iterBackendMessages(socket) {
   let buf = new Uint8Array(16_640);
-  let nacc = 0;
+  let nbuf = 0;
   for (;;) {
-    if (nacc >= buf.length) { // grow buffer
+    if (nbuf >= buf.length) { // grow buffer
       const oldbuf = buf;
       buf = new Uint8Array(oldbuf.length * 2); // TODO prevent uncontrolled grow
       buf.set(oldbuf);
     }
-    const nread = await _networking.read(socket, buf.subarray(nacc));
+    const nread = await _networking.read(socket, buf.subarray(nbuf));
     if (nread == null) break;
-    nacc += nread;
+    nbuf += nread;
 
     let nparsed = 0;
+    const messages = [];
     for (;;) {
       const itag = nparsed;
       const isize = itag + 1;
       const ipayload = isize + 4;
-      if (nacc < ipayload) break; // incomplete message
+      if (nbuf < ipayload) break; // incomplete message
       // const size = (buf[isize] << 24) | (buf[isize + 1] << 16) | (buf[isize + 2] << 8) | buf[isize + 3];
       const size = new DataView(buf.buffer, isize).getInt32();
       if (size < 4) {
         throw Error('invalid backend message size');
       }
       const inext = isize + size;
-      if (nacc < inext) break; // incomplete message
+      if (nbuf < inext) break; // incomplete message
       const message = parseBackendMessage(buf[itag], buf.subarray(ipayload, inext));
+      messages.push(message);
       nparsed = inext;
-      yield message; // TODO batch DataRow and CopyData
     }
+    yield messages;
 
     if (nparsed) { // TODO check if copyWithin(0, 0) is noop
-      buf.copyWithin(0, nparsed, nacc); // move unconsumed bytes to begining of buffer
-      nacc -= nparsed;
+      buf.copyWithin(0, nparsed, nbuf); // move unconsumed bytes to begining of buffer
+      nbuf -= nparsed;
     }
   }
 }
@@ -950,10 +986,10 @@ async function * iterBackendMessages(socket) {
 function parseBackendMessage(/** @type {number} */ asciiTag, /** @type {Uint8Array} */ buf) {
   let pos = 0;
 
-  function readInt32BE() {
+  function readInt32BE() {  // TODO check negative
     return (buf[pos++] << 24) | (buf[pos++] << 16) | (buf[pos++] << 8) | buf[pos++]
   }
-  function readInt16BE() {
+  function readInt16BE() { // TODO check negative
     return (buf[pos++] << 8) | buf[pos++]
   }
   function readUint8() {
@@ -1195,6 +1231,9 @@ function serializeFrontendMessage(message) {
 class FrontendMessage {
   constructor(payload) {
     this.payload = payload;
+  }
+  get tag() {
+    return this.constructor.name; // we will use it only for debug logging
   }
 }
 
