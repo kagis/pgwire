@@ -220,7 +220,6 @@ class Connection {
     this._resolveReady = null;
     this._rejectReady = null;
     this._whenReady = new Promise(this._whenReadyExecutor.bind(this));
-    // this._whenReady.connection = this;
     this._whenReady.catch(warnError);
     this._saslScramSha256 = null;
     this._whenDestroyed = this._startup(startupOptions); // run background message processing
@@ -360,7 +359,7 @@ class Connection {
   destroy(destroyReason) {
     this._rejectReady(destroyReason || Error('connection destroyed'));
     if (this._socket) {
-      _networking.close(this._socket);
+      _networking.close(this._socket); // TODO can throw
       this._socket = null;
     }
     if (this._startTx) {
@@ -458,12 +457,10 @@ class Connection {
     this.destroy(caughtError);
   }
   async _sendMessage(m) {
-    if (m[Symbol.asyncIterator]) {
+    if (m[Symbol.asyncIterator]) { // pipe messages
       const iter = m[Symbol.asyncIterator]();
-      // pipe messages
-      let value, done;
       try {
-        while (!done) {
+        for (let value, done = false; !done; ) {
           [{ value, done }] = await Promise.all([
             iter.next(),
             value && this._sendMessage(value),
@@ -572,7 +569,7 @@ class Connection {
       return;
     }
 
-    if (this._copyBuf.length < this._copyBufPos + copyData.length) {
+    if (this._copyBuf.length < this._copyBufPos + copyData.length) { // grow _copyBuf
       const oldbuf = this._copyBuf;
       this._copyBuf = new Uint8Array(oldbuf.length * 2);
       this._copyBuf.set(oldbuf);
@@ -631,10 +628,10 @@ class Connection {
     this._rowDecoder = fields.map(getFieldDecoder);
     await this._fwdBackendMessage(m);
   }
-  async _recvAuthenticationCleartextPassword() {
+  _recvAuthenticationCleartextPassword() {
     this._startTx.push(new PasswordMessage(this._password));
   }
-  async _recvAuthenticationMD5Password(_, { salt }) {
+  _recvAuthenticationMD5Password(_, { salt }) {
     // TODO stop if no password
     // if (!password) return this._startuptx.end(Error('no password));
     const utf8enc = new TextEncoder();
@@ -664,12 +661,12 @@ class Connection {
     );
     this._startTx.push(new SASLResponse(utf8enc.encode(finmsg)));
   }
-  async _recvAuthenticationSASLFinal(_, data) {
+  _recvAuthenticationSASLFinal(_, data) {
     const utf8dec = new TextDecoder();
     this._saslScramSha256.finish(utf8dec.decode(data));
     this._saslScramSha256 = null;
   }
-  async _recvAuthenticationOk() {
+  _recvAuthenticationOk() {
     // we dont need password anymore, its more secure to forget it
     this._password = null;
     // TODO we can receive ErrorResponse after AuthenticationOk
@@ -732,15 +729,12 @@ class Connection {
   }
   async _fwdBackendMessage({ tag, payload }) {
     await this._flushDataRows();
-    // if (!this._startTx && this._responseRxs.length) { // TODO only need for _recvReadyForQuery
     const m = new Uint8Array(0);
     m.rows = [];
     m.tag = tag;
     m.payload = payload;
     const [responseRx] = this._responseRxs;
-    await responseRx.push(m); // TODO await ?
-      // return true;
-    // }
+    await responseRx.push(m);
   }
 
   // // TODO replace with { connection, then, catch, finally } object, less magic
@@ -972,6 +966,7 @@ async function * iterBackendMessages(socket) {
       if (nbuf < inext) break; // incomplete message
       const message = parseBackendMessage(buf[itag], buf.subarray(ipayload, inext));
       messages.push(message);
+      // TODO batch DataRow here
       nparsed = inext;
     }
     yield messages;
@@ -1592,7 +1587,7 @@ function getFieldDecoder({ typeid, binary }) {
  *   encode
  * }>}
  */
- const pgtypes = [{
+const pgtypes = [{
   name: 'bool',
   id: 16,
   arrayid: 1000,
@@ -1738,11 +1733,7 @@ function decodeBinArray(bytes, decodeElem) {
   for (let pos = 12 + ndim * 8, i = 0; pos < bytes.byteLength; i++) {
     const len = readInt32BE(pos);
     pos += 4;
-    if (len < 0) {
-      result[i] = null;
-    } else {
-      result[i] = decodeElem(bytes.subarray(pos, pos += len));
-    }
+    result[i] = len < 0 ? null : decodeElem(bytes.subarray(pos, pos += len));
   }
   for (let di = ndim - 1; di > 0; di--) {
     const dimlen = readInt32BE(12 + di * 8);
