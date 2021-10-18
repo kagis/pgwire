@@ -2,10 +2,10 @@
  * @typedef {{
  *  hostname: string,
  *  port: number,
- *  user: string,
- *  password: string,
- *  database: string,
- *  application_name: string,
+ *  user: string|Uint8Array,
+ *  password: string|Uint8Array,
+ *  database: string|Uint8Array,
+ *  application_name: string|Uint8Array,
  * }} PGConnectOptions
  * */
 
@@ -61,9 +61,9 @@ function computeConnectionOptions([uriOrObj, ...rest]) {
       withoutUndefinedProps({
         hostname: uri.hostname || undefined,
         port: Number(uri.port) || undefined,
-        password: uri.password || undefined,
-        'user': uri.username || undefined,
-        'database': uri.pathname.replace(/^\//, '') || undefined,
+        password: decodeURIComponent(uri.password) || undefined,
+        'user': decodeURIComponent(uri.username) || undefined,
+        'database': decodeURIComponent(uri.pathname).replace(/^[/]/, '') || undefined,
       }),
     );
   }
@@ -100,7 +100,7 @@ class Pool {
     // (but Connection is not yet deleted from pool)
     // then query will be rejected with error.
     // We should be ready to repeat query in this case
-    // and this is more complex than client side timeout
+    // and this is more difficult to implement than client side timeout
     this._poolIdleTimeout = Math.max(poolIdleTimeout, 0);
   }
   query(...args) {
@@ -122,7 +122,8 @@ class Pool {
   destroy(destroyReason) {
     this._ended = true;
     this._connections.forEach(it => void it.destroy(destroyReason))
-    return destroyReason; // should keep and throw destroyReason when querying ?
+    return destroyReason;
+    // TODO should keep and throw destroyReason when querying ?
   }
   _getConnection() {
     if (this._ended) {
@@ -157,17 +158,17 @@ class Pool {
     }
 
     if (conn.inTransaction) {
-      // - discard all
-      // people say that it is slow as creating new connection.
-      // it will cause error when connection is idle in transaction
+      // discard all
+      // - people say that it is slow as creating new connection.
+      // + it will cause error when connection is idle in transaction
 
-      // - rollback
-      // generates noisy notices in server log
+      // rollback
+      // - generates noisy notices in server log
 
-      // - begin; rollback;
-      // no notices when no active transactions. (good)
-      // 'begin' causes notice warning when in transaction. (good)
-      // will be not executed as single query when connection is errored in transaction
+      // begin; rollback;
+      // + no notices when no active transactions.
+      // + 'begin' causes notice warning when in transaction.
+      // - will be not executed as single query when connection is errored in transaction
 
       // TODO check if query pipelining actually improves perfomance
 
@@ -191,7 +192,7 @@ class Pool {
   }
   /** exports pgwire.pgerrcode for cases when Pool is injected as dependency
    * and we dont want to import pgwire directly for error handling code */
-  pgerrcode(...args) {
+  errcode(...args) {
     return pgerrcode(...args);
   }
 }
@@ -209,7 +210,8 @@ class Connection {
     this._responseRxs = /** @type {Channel[]} */ [];
     this._notificationSubscriptions = /** @type {Set<Channel>} */ new Set();
     this._transactionStatus = null;
-    this._rowDecoder = null;
+    this._fields = null;
+    this._clientTextDecoder = new TextDecoder('utf-8', { fatal: true });
     this._copyingOut = false;
     this._copyBuf = new Uint8Array(1024);
     this._copyBufPos = 0;
@@ -258,7 +260,7 @@ class Connection {
     return this._socket && ( // if not destroyed
       this._transactionStatus == 0x45 || // E
       this._transactionStatus == 0x54 // T
-    );
+    ) && this._transactionStatus; // avoid T|E value erasure
   }
   // TODO accept abortSignal
   query(...args) {
@@ -294,8 +296,8 @@ class Connection {
       // Если делать через AbortSignal то тогда висячий .next() придется reject'ить
       // а пользовательский код должен обрабатывать ошибку - неудобно
       const errorResponse = yield * responseRx;
-      // но ведь ошибки бывают еще и сетевые, у них свой call stack
       if (errorResponse) {
+        // TODO also save callstack for network errors
         throw new PgError(errorResponse);
       }
     } finally {
@@ -438,7 +440,11 @@ class Connection {
     let caughtError;
     try {
       this._socket = await this._createSocket();
-      this._startTx.push(new StartupMessage(startupOptions));
+      this._startTx.push(new StartupMessage({
+        ...startupOptions,
+        'client_encoding': 'UTF8', // TextEncoder supports UTF8 only, so hardcode and force UTF8
+        // client_encoding: 'win1251',
+      }));
       await Promise.all([ // allSettled ?
         // TODO при досрочном завершении одной из функций как будем завершать вторую ?
         // _sendMessages надо завершать потому что она может пайпить stdin,
@@ -467,7 +473,18 @@ class Connection {
           ]);
         }
       } finally {
-        await iter.return();
+        // TODO iter.return resolved on recvMessages side,
+        // but recvMessages will not accept messages if sendMessage
+        // failed with error before emit frontent message,
+        // which causes deadlock here
+        // await iter.return();
+        // need a way to abort iter.next() here
+        // or get rid of parallel piping
+
+        iter.return().catch(warnError); // TODO is this ok to not await ?
+        // there are limmited types of iterators passed in _sendMessage
+        // - startTx Channel, queryTx Channel and copyWrap iterator
+        // no one of them will throw error
       }
     } else {
       if (this._debug) {
@@ -486,6 +503,12 @@ class Connection {
   }
   async _recvMessages() {
     for await (const mchunk of iterBackendMessages(this._socket)) {
+      // TODO we can ? alloc _copyBuf here with size of undelying chunk buffer
+      // so we can avoid buffer grow algorithm.
+      // Also we can use copyBuf to store binary "decoded" values
+      // instead of alloc Uint8Array for each binary value.
+      // May be its better to alloc new Uint8Array for each chunk in iterBackendMessages
+      // when do many COPY TO STDOUT (will not get countinious chunk) or selecting byteas
       for (const m of mchunk) {
         if (this._debug) {
           console.log(... m.payload === undefined
@@ -539,11 +562,18 @@ class Connection {
     }
   }
   _recvDataRow(_, /** @type {Array<Uint8Array>} */ row) {
-    for (let i = 0; i < this._rowDecoder.length; i++) {
-      const val = row[i];
-      if (val != null) {
-        row[i] = this._rowDecoder[i](val);
-      }
+    for (let i = 0; i < this._fields.length; i++) {
+      const valbuf = row[i];
+      if (valbuf == null) continue;
+      const { binary, typeid } = this._fields[i];
+      // TODO avoid this._clientTextDecoder.decode for bytea
+      row[i] = (
+        binary
+          // do not valbuf.slice() because nodejs Buffer .slice does not copy
+          // TOFO but we not going to reveice Buffer here ?
+          ? Uint8Array.prototype.slice.call(valbuf)
+          : typeDecode(this._clientTextDecoder.decode(valbuf), typeid)
+      );
     }
     this._rowsChunk.push(row);
   }
@@ -625,19 +655,29 @@ class Connection {
     await this._fwdBackendMessage(m);
   }
   async _recvRowDescription(m, fields) {
-    this._rowDecoder = fields.map(getFieldDecoder);
+    this._fields = fields;
     await this._fwdBackendMessage(m);
   }
   _recvAuthenticationCleartextPassword() {
+    // should be always encoded as utf8 even when server_encoding is win1251
     this._startTx.push(new PasswordMessage(this._password));
   }
   _recvAuthenticationMD5Password(_, { salt }) {
     // TODO stop if no password
     // if (!password) return this._startuptx.end(Error('no password));
+
+    // should use server_encoding, but there is
+    // no way to know server_encoding before authentication.
+    // So it should be possible to provide password as byte-string
     const utf8enc = new TextEncoder();
-    const a = utf8enc.encode(hexEncode(md5(utf8enc.encode(this._password + this._user))));
-    const b = 'md5' + hexEncode(md5(new Uint8Array([...a, ...salt])));
+    const passwordb = this._password instanceof Uint8Array ? this._password : utf8enc.encode(this._password);
+    const userb = this._user instanceof Uint8Array ? this._user : utf8enc.encode(this._user);
+    const a = utf8enc.encode(hexEncode(md5(Uint8Array.of(...passwordb, ...userb))));
+    const b = 'md5' + hexEncode(md5(Uint8Array.of(...a, ...salt)));
     this._startTx.push(new PasswordMessage(b));
+    function hexEncode(/** @type {Uint8Array} */ bytes) {
+      return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    }
   }
   async _recvAuthenticationSASL(_, { mechanism }) {
     if (mechanism != 'SCRAM-SHA-256') {
@@ -786,22 +826,23 @@ function extendedQueryBlock(m, stdinAbortSignal) {
     default: throw Error('unknown extended message ' + JSON.stringify(m.message));
   }
 }
-function * extendedQueryStatement({ statement, params, limit, stdin, noBuffer }, stdinAbortSignal) {
-  const paramTypes = params?.map(({ type }) => type);
+function * extendedQueryStatement({ statement, params = [], limit, binary, stdin, noBuffer }, stdinAbortSignal) {
+  const paramTypes = params.map(({ type }) => type);
   const flush = []; // [new Flush()];
   yield * extendedQueryParse({ statement, paramTypes });
   yield * flush;
-  yield * extendedQueryBind({ params });
+  yield * extendedQueryBind({ params, binary });
   yield * flush;
   yield * extendedQueryExecute({ limit, stdin }, stdinAbortSignal);
   yield * flush;
 }
-function * extendedQueryParse({ statement, statementName, paramTypes }) {
-  yield new Parse({ statement, statementName, paramTypes: paramTypes?.map(normalizeTypeid) });
+function * extendedQueryParse({ statement, statementName, paramTypes = [] }) {
+  paramTypes = paramTypes.map(typeResolve);
+  yield new Parse({ statement, statementName, paramTypes });
 }
-// FIXME rename ugly outFormats0t1b
-function * extendedQueryBind({ portal, statementName, outFormats0t1b = [1], params }) {
-  yield new Bind({ portal, statementName, outFormats0t1b, params: params?.map(encodeParam) });
+function * extendedQueryBind({ portal, statementName, binary, params = [] }) {
+  params = params.map(({ value, type }) => typeEncode(value, typeResolve(type)));
+  yield new Bind({ portal, statementName, binary, params });
 }
 function * extendedQueryExecute({ portal, stdin, limit }, stdinAbortSignal) {
   // TODO write test to explain why
@@ -981,10 +1022,10 @@ async function * iterBackendMessages(socket) {
 function parseBackendMessage(/** @type {number} */ asciiTag, /** @type {Uint8Array} */ buf) {
   let pos = 0;
 
-  function readInt32BE() {  // TODO check negative
+  function readInt32BE() {
     return (buf[pos++] << 24) | (buf[pos++] << 16) | (buf[pos++] << 8) | buf[pos++]
   }
-  function readInt16BE() { // TODO check negative
+  function readInt16BE() {
     return (buf[pos++] << 8) | buf[pos++]
   }
   function readUint8() {
@@ -1238,7 +1279,7 @@ class StartupMessage extends FrontendMessage {
     w.writeInt32BE(0x00030000);
     for (const [key, val] of Object.entries(options)) {
       w.writeString(key);
-      w.writeString(String(val));
+      w.writeString(val);
     }
     w.writeUint8(0);
   }
@@ -1312,7 +1353,7 @@ class Parse extends FrontendMessage {
 }
 
 class Bind extends FrontendMessage {
-  write(w, size, { portal = '', statementName = '', params = [], outFormats0t1b = [] }) {
+  write(w, size, { portal = '', statementName = '', params = [], binary = [] }) {
     w.writeUint8(0x42); // B
     w.writeInt32BE(size - 1);
     w.writeString(portal);
@@ -1336,8 +1377,8 @@ class Bind extends FrontendMessage {
       // TODO zero copy param encode
       w.write(encoded);
     }
-    w.writeInt16BE(outFormats0t1b.length);
-    for (const fmt of outFormats0t1b) {
+    w.writeInt16BE(binary.length);
+    for (const fmt of binary) {
       w.writeInt16BE(fmt);
     }
   }
@@ -1498,8 +1539,21 @@ class BufferWriter {
     this._pos += 4
   }
   writeString(val) {
-    const { written } = utf8encoder.encodeInto(val, new Uint8Array(this._buf, this._pos));
-    this._pos += written;
+    if (val instanceof Uint8Array) {
+      if (val.indexOf(0x00) > 0) {
+        // TODO malformed query will destroy connection and affect other queries.
+        // Should do this check before enqueue invalid messages
+        throw Error('zero char is not allowed');
+      }
+      this.write(val);
+    } else {
+      val = String(val);
+      if (val.indexOf('\0') > 0) {
+        throw Error('zero char is not allowed');
+      }
+      const { written } = utf8encoder.encodeInto(val, new Uint8Array(this._buf, this._pos));
+      this._pos += written;
+    }
     this.writeUint8(0);
   }
   write(val) {
@@ -1526,8 +1580,11 @@ class CounterWriter {
     this.result += 4;
   }
   writeString(val) {
-    // FIXME mem inefficient
-    this.write(utf8encoder.encode(val));
+    if (val instanceof Uint8Array) {
+      this.write(val);
+    } else {
+      this.write(utf8encoder.encode(val)); // TODO mem inefficient
+    }
     this.writeUint8(0);
   }
   write(val) {
@@ -1539,276 +1596,147 @@ class CounterWriter {
 }
 
 
-function normalizeTypeid(typeidOrName) {
-  if (typeof typeidOrName == 'number') {
-    return typeidOrName;
+
+
+///////// begin type codec
+
+function typeResolve(idOrName) {
+  if (typeof idOrName == 'number') {
+    return idOrName;
   }
-  const typeid = pgtypes.get(typeidOrName)?.id;
-  if (!typeid) {
-    throw Error('unknown builtin type name ' + JSON.stringify(typeidOrName));
+  switch (idOrName) { // add line here when register new type
+    case 'text'    : return   25; case 'text[]'    : return 1009;
+    case 'uuid'    : return 2950; case 'uuid[]'    : return 2951;
+    case 'varchar' : return 1043; case 'varchar[]' : return 1015;
+    case 'bool'    : return   16; case 'bool[]'    : return 1000;
+    case 'bytea'   : return   17; case 'bytea[]'   : return 1001;
+    case 'int2'    : return   21; case 'int2[]'    : return 1005;
+    case 'int4'    : return   23; case 'int4[]'    : return 1007;
+    case 'float4'  : return  700; case 'float4[]'  : return 1021;
+    case 'float8'  : return  701; case 'float8[]'  : return 1022;
+    case 'int8'    : return   20; case 'int8[]'    : return 1016;
+    case 'json'    : return  114; case 'json[]'    : return  199;
+    case 'jsonb'   : return 3802; case 'jsonb[]'   : return 3807;
+    case 'pg_lsn'  : return 3220; case 'pg_lsn[]'  : return 3221;
   }
-  return typeid;
+  throw Error('unknown builtin type name ' + JSON.stringify(idOrName));
 }
-function encodeParam({ type, value }) {
-  const pgtypeProvider = pgtypes.get(type);
-  return pgtypeProvider ? pgtypeProvider.encode(value) : value;
+
+// TODO bytea[]
+function typeEncode(value, typeid) {
+  if (value instanceof Uint8Array) {
+    // treat Uint8Array values as already encoded,
+    // so user can receive value with unknown type as Uint8Array
+    // from extended .query and pass it back as parameter
+    return value;
+    // it also handles bytea
+  }
+  switch (typeid) { // add line here when register new type (optional)
+    case  114 /* json    */:
+    case 3802 /* jsonb   */:
+      return JSON.stringify(value);
+  }
+  let elemTypeid = typeOfElem(typeid);
+  if (elemTypeid) {
+    // check if pgencode(value[0]) instanceof uint8Array then do encodeArrayBin otherwise do encodeArrayText
+    return typeEncodeArray(value, elemTypeid);
+  }
+  return String(value);
 }
-function getFieldDecoder({ typeid, binary }) {
-  const { decodeBin = arrcopy, decodeText = utf8decode } = pgtypes.get(typeid) || {};
-  return binary ? decodeBin : decodeText;
-  function arrcopy(arr) {
-    return arr.slice();
+
+function typeDecode(text, typeid) {
+  switch (typeid) { // add line here when register new type
+    case   25 /* text    */:
+    case 2950 /* uuid    */:
+    case 1043 /* varchar */: return text;
+    case   16 /* bool    */: return text == 't';
+    case   17 /* bytea   */: return typeDecodeBytea(text);
+    case   21 /* int2    */:
+    case   23 /* int4    */:
+    case  700 /* float4  */:
+    case  701 /* float8  */: return Number(text);
+    case   20 /* int8    */: return BigInt(text);
+    case  114 /* json    */:
+    case 3802 /* jsonb   */: return JSON.parse(text);
+    case 3220 /* pg_lsn  */: return typeDecodePgLsn(text);
+  }
+  let elemTypeid = typeOfElem(typeid);
+  if (elemTypeid) {
+    return typeDecodeArray(text, elemTypeid);
+  }
+  return text; // unknown type
+}
+
+function typeOfElem(arrayTypeid) {
+  switch (arrayTypeid) { // add line here when register new type
+    case 1009: return   25; // text
+    case 1000: return   16; // bool
+    case 1001: return   17; // bytea
+    case 1005: return   21; // int2
+    case 1007: return   23; // int4
+    case 1016: return   20; // int8
+    case 1021: return  700; // float4
+    case 1022: return  701; // float8
+    case  199: return  114; // json
+    case 3807: return 3802; // jsonb
+    case 3221: return 3220; // pg_lsn
+    case 2951: return 2950; // uuid
+    case 1015: return 1043; // varchar
   }
 }
 
-/**
- * @callback decodeBin
- * @param {Uint8Array} bytes
- */
-
-/**
- * @callback decodeText
- * @param {Uint8Array} bytes
- */
-
-/**
- * @callback encodeBin
- * @param {Uint8Array} bytes
- * @returns {Uint8Array}
- */
-
-// TODO avoid metaprogramming ?
-
-/**
- * @type {Map<(string|number), {
- *   id: number,
- *   decodeBin: decodeBin,
- *   decodeText: decodeText,
- *   encode
- * }>}
- */
-const pgtypes = [{
-  name: 'bool',
-  id: 16,
-  arrayid: 1000,
-  decodeBin: b => b[0] == 1,
-  decodeText: b => b[0] == 0x74, // t
-  encode: val => val ? 't' : 'f',
-}, {
-  // TODO bytea_output escape
-  // https://www.postgresql.org/docs/9.6/datatype-binary.html#AEN5830
-  name: 'bytea',
-  id: 17,
-  arrayid: 1001,
-  decodeBin: b => b.slice(),
-  // FIXME the only reason not to decode utf8
-  decodeText: s => hexDecode(s.subarray(2 /* skip \x */)),
-  encode: val => val,
-  encodeBin: true,
-}, {
-  name: 'int8',
-  id: 20,
-  arrayid: 1016,
-  decodeBin: b => new DataView(b.buffer, b.byteOffset, b.byteLength).getBigInt64(),
-  decodeText: s => BigInt(utf8decode(s)),
-  encode: String,
-}, {
-  name: 'int2',
-  id: 21,
-  arrayid: 1005,
-  decodeBin: b => new DataView(b.buffer, b.byteOffset, b.byteLength).getInt16(),
-  decodeText: s => Number(utf8decode(s)),
-  encode: String,
-}, {
-  name: 'int4',
-  id: 23,
-  arrayid: 1007,
-  decodeBin: b => new DataView(b.buffer, b.byteOffset, b.byteLength).getInt32(),
-  decodeText: s => Number(utf8decode(s)),
-  encode: String,
-}, {
-  name: 'float4',
-  id: 700,
-  arrayid: 1021,
-  decodeBin: b => new DataView(b.buffer, b.byteOffset, b.byteLength).getFloat32(),
-  decodeText: s => Number(utf8decode(s)),
-  encode: String,
-}, {
-  name: 'float8',
-  id: 701,
-  arrayid: 1022,
-  decodeBin: b => new DataView(b.buffer, b.byteOffset, b.byteLength).getFloat64(),
-  decodeText: s => Number(utf8decode(s)),
-  encode: String,
-}, {
-  name: 'text',
-  id: 25,
-  arrayid: 1009,
-  decodeBin: utf8decode,
-  decodeText: utf8decode,
-  encode: String,
-}, {
-  name: 'json',
-  id: 114,
-  arrayid: 199,
-  decodeBin: b => JSON.parse(utf8decode(b)),
-  decodeText: s => JSON.parse(utf8decode(s)),
-  encode: JSON.stringify,
-}, {
-  name: 'jsonb',
-  id: 3802,
-  arrayid: 3807,
-  decodeBin: b => JSON.parse(utf8decode(b.subarray(1/* skip version byte */))),
-  decodeText: s => JSON.parse(utf8decode(s)),
-  encode: JSON.stringify,
-}, {
-  name: 'pg_lsn',
-  id: 3220,
-  arrayid: 3221,
-  decodeBin: bytes => hexEncode(bytes).toUpperCase().replace(/.{8}/, '$&/'),
-  decodeText: bytes => utf8decode(bytes).split('/').map(it => it.padStart(8, '0')).join('/'),
-  encode: String,
-}, {
-  name: 'uuid',
-  id: 2950,
-  arrayid: 2951,
-  decodeBin: bytes => hexEncode(bytes).replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5'),
-  decodeText: utf8decode,
-  encode: String,
-}, {
-  name: 'varchar',
-  id: 1043,
-  arrayid: 1015,
-  decodeBin: utf8decode,
-  decodeText: utf8decode,
-  encode: String,
-}]
-
-.reduce((map, { name, id, arrayid, decodeBin, decodeText, encode, encodeBin }) => {
-  const pgtype = { id, decodeBin, decodeText, encode };
-  const pgtypearr = {
-    id: arrayid,
-    decodeBin: buf => decodeBinArray(buf, decodeBin),
-    // FIXME decode -> encode perfomance
-    decodeText: bytes => decodeTextArray(utf8decode(bytes), str => decodeText(utf8encoder.encode(str))),
-    encode: encodeBin
-      ? arr => encodeBinArray(arr, encode, id)
-      : arr => encodeTextArray(arr, encode),
-  };
-  return (
-    map
-    .set(id, pgtype)
-    .set(name, pgtype)
-    .set(arrayid, pgtypearr)
-    .set(name + '[]', pgtypearr)
-  );
-}, new Map());
-
-function decodeTextArray(inp, decodeElem) {
-  inp = inp.replace(/^\[.+=/, ''); // skip dimensions
-  const jsonArray = inp.replace(/{|}|,|"(?:[^"\\]|\\.)*"|[^,}]+/gy, token => (
+function typeDecodeArray(text, elemTypeid) {
+  text = text.replace(/^\[.+=/, ''); // skip dimensions
+  const jsonArray = text.replace(/{|}|,|"(?:[^"\\]|\\.)*"|[^,}]+/gy, token => (
     token == '{' ? '[' :
     token == '}' ? ']' :
     token == 'NULL' ? 'null' :
     token == ',' || token[0] == '"' ? token :
     JSON.stringify(token)
   ));
-  return JSON.parse(
-    jsonArray,
-    (_, elem) => typeof elem == 'string' ? decodeElem(elem) : elem,
-  );
+  return JSON.parse(jsonArray, (_, elem) => (
+    typeof elem == 'string' ? typeDecode(elem, elemTypeid) : elem
+  ));
 }
 
-/**
- * @param {Uint8Array} bytes
- * @param {decodeBin} decodeElem
- * */
-function decodeBinArray(bytes, decodeElem) {
-  const ndim = readInt32BE(0);
-  let cardinality = 0;
-  for (let di = ndim - 1; di >= 0; di--) {
-    cardinality += readInt32BE(12 + di * 8);
-  }
-  let result = Array(cardinality);
-  for (let pos = 12 + ndim * 8, i = 0; pos < bytes.byteLength; i++) {
-    const len = readInt32BE(pos);
-    pos += 4;
-    result[i] = len < 0 ? null : decodeElem(bytes.subarray(pos, pos += len));
-  }
-  for (let di = ndim - 1; di > 0; di--) {
-    const dimlen = readInt32BE(12 + di * 8);
-    const reshaped = Array(result.length / dimlen);
-    for (let i = 0; i < reshaped.length; i++) {
-      reshaped[i] = result.slice(i * dimlen, (i + 1) * dimlen);
-    }
-    result = reshaped;
-  }
-  return result;
-
-  function readInt32BE(p) {
-    return (bytes[p] << 24) | (bytes[p + 1] << 16) | (bytes[p + 2] << 8) | bytes[p + 3]
-  }
-}
-
-// FIXME: one dimension only
-function encodeTextArray(arr, encodeElem) {
+// TODO multi dimension
+function typeEncodeArray(arr, elemTypeid) {
   return JSON.stringify(arr, function (_, elem) {
-    return this == arr && elem != null ? encodeElem(elem) : elem;
+    return this == arr && elem != null ? encodeElem(elem, elemTypeid) : elem;
   }).replace(/^\[(.*)]$/, '{$1}');
 }
 
-// FIXME: one dimension only
-/**
- *
- * @param {Array} array
- * @param {encodeBin} encodeElem
- * @param {number} elemTypeid
- * @returns
- */
-function encodeBinArray(array, encodeElem, elemTypeid) {
-  const ndim = 1;
-  /** @type {Uint8Array[]} */
-  const encodedArray = Array(array.length);
-  let size = 4 + 4 + 4 + ndim * (4 + 4) + array.length * 4;
-  let hasNull = 0;
-  for (let i = 0; i < array.length; i++) {
-    if (array[i] == null) {
-      hasNull = 1;
-    } else {
-      const elbytes = encodeElem(array[i]);
-      size += elbytes.length;
-      encodedArray[i] = elbytes;
+function typeDecodeBytea(text) {
+  // https://www.postgresql.org/docs/9.6/datatype-binary.html#AEN5830
+  if (text.startsWith('\\x')) {
+    const hex = text.slice(2); // TODO check hex.length is even ?
+    const bytes = new Uint8Array(hex.length >> 1);
+    for (let i = 0, m = 4; i < hex.length; i++, m ^= 4) {
+      let d = hex.charCodeAt(i);
+      if (0x30 <= d && d <= 0x39) d -= 0x30; // 0-9
+      else if (0x41 <= d && d <= 0x46) d -= 0x41 - 0xa; // A-F
+      else if (0x61 <= d && d <= 0x66) d -= 0x61 - 0xa; // a-f
+      else throw Error(`invalid hex digit 0x${d}`);
+      bytes[i >> 1] |= d << m; // m==4 on even iter, m==0 on odd iter
     }
+    return bytes;
   }
-  const result = new Uint8Array(size);
-  const dv = new DataView(result.buffer);
-  let pos = 0;
-  dv.setInt32(pos, 1), pos += 4;
-  dv.setInt32(pos, hasNull), pos += 4;
-  dv.setInt32(pos, elemTypeid), pos += 4;
-  dv.setInt32(pos, array.length), pos += 4;
-  const lb = 1;
-  dv.setInt32(pos, lb), pos += 4;
-  for (const elbytes of encodedArray) {
-    if (elbytes) {
-      dv.setInt32(pos, elbytes.byteLength), pos += 4;
-      result.set(elbytes, pos), pos += elbytes.byteLength; // FIXME copy
-    } else {
-      dv.setInt32(pos, -1), pos += 4;
-    }
-  }
-  return result;
+  return Uint8Array.from( // legacy escape format TODO no eval
+    Function(text.replace('"', '\\"').replace(/.*/, 'return "$&"')).call(),
+    x => x.charCodeAt(),
+  );
 }
 
-const utf8decoder = new TextDecoder('utf-8', { fatal: true });
+function typeDecodePgLsn(text) { // reformat pg_lsn as fixed length string to make values comparable
+  const [h, l] = text.split('/');
+  return h.padStart(8, '0') + '/' + l.padStart(8, '0');
+}
+
+///////////// end type codec
+
+
+const utf8decoder = new TextDecoder('utf-8'); // , { fatal: true }); cannot read ErrorResponse in non utf8 cases
 const utf8encoder = new TextEncoder();
-
-function utf8decode(b) {
-  return utf8decoder.decode(b);
-}
-function utf8encode(t) {
-  return utf8encoder.encode(t);
-}
 
 
 class Channel {
@@ -1983,20 +1911,6 @@ const _networking = {
 };
 
 // We will not use Deno std to make this module compatible with Node
-
-
-// FIXME expected to be slow
-function hexEncode(/** @type {Uint8Array} */ bytes) {
-  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-}
-// FIXME expected to be slow
-function hexDecode(hex) {
-  return Uint8Array.from(
-    { length: hex.length / 2 },
-    (_, i) => Number('0x' + hex.substr(i * 2, 2)),
-  );
-}
-
 function md5(/** @type {Uint8Array} */ input) {
   const padded = new Uint8Array(Math.ceil((input.byteLength + 1 + 8) / 64) * 64);
   const paddedv = new DataView(padded.buffer);
