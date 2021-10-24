@@ -1,0 +1,59 @@
+FROM denoland/deno:alpine-1.15.2
+
+RUN set -x \
+ && cd /tmp \
+ && wget -qO- https://github.com/postgres/postgres/archive/REL_14_0.tar.gz | tar xz \
+ && apk add --no-cache --virtual .build-deps \
+  build-base \
+  linux-headers \
+  bison \
+  flex \
+  libxml2-dev \
+  libxslt-dev \
+  icu-dev \
+  openssl-dev \
+  autoconf \
+  automake \
+  libtool \
+  clang-dev \
+  llvm10-dev \
+ \
+ && cd /tmp/postgres-* \
+ && ./configure \
+  --prefix=/usr/local \
+  --without-readline \
+  --with-libxml \
+  --with-libxslt \
+  --with-icu \
+  --with-openssl \
+  --with-llvm LLVM_CONFIG=/usr/lib/llvm10/bin/llvm-config \
+ && make \
+ && make install \
+ && cd contrib \
+ && make \
+ && make install \
+ && apk del .build-deps \
+ && rm -r /tmp/* \
+ && apk add --no-cache \
+  libxml2 \
+  libxslt \
+  json-c \
+  icu \
+  openssl \
+  llvm10
+
+ENV PGDATA=/var/lib/postgresql/data
+# VOLUME $PGDATA
+
+RUN set -x \
+ && adduser --uid 70 --disabled-password --home /var/lib/postgresql --no-create-home postgres \
+ && install -o postgres -g postgres -m 700 -d /var/lib/postgresql/data \
+ && su postgres -c initdb \
+ && echo "listen_addresses = '*'"  > $PGDATA/postgresql.conf \
+ && echo "wal_level = logical"    >> $PGDATA/postgresql.conf \
+ #             db     user addr method
+ && echo "host all    all  all  trust" > $PGDATA/pg_hba.conf
+
+WORKDIR /app
+CMD su postgres -c "pg_ctl --wait start" \
+ && deno test --allow-net --filter "$TEST_FILTER"

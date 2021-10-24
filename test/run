@@ -1,0 +1,5 @@
+#!/bin/sh
+set -xe
+
+docker build -t pgwire-test test
+docker run -it --rm -v "$PWD:/app:ro" -e "TEST_FILTER=$1" pgwire-test

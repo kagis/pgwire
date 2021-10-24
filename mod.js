@@ -47,6 +47,24 @@ export function pgpool(...options) {
   return new Pool(computeConnectionOptions(options));
 }
 
+
+export function pgliteral(s) {
+  if (s == null) {
+    return 'NULL';
+  }
+  // TODO array
+  return `'` + String(s).replace(/'/g, `''`) + `'`;
+}
+
+export function pgident(...segments) {
+  return (
+    segments
+    .map(it => '"' + it.replace(/"/g, '""') + '"')
+    .join('.')
+  );
+}
+
+
 function computeConnectionOptions([uriOrObj, ...rest]) {
   if (!uriOrObj) {
     return { hostname: '127.0.0.1', port: 5432 };
@@ -75,16 +93,17 @@ function computeConnectionOptions([uriOrObj, ...rest]) {
 }
 
 export function pgerrcode(err) {
-  return err?.[kErrorPgcode];
+  return err?.[kErrorCode];
 }
 
-const kErrorPgcode = Symbol('kErrorPgcode');
+const kErrorCode = Symbol('kErrorCode');
 
 class PgError extends Error {
   constructor({ message, ...props }) {
-    super(message);
+    const code = props.code;
+    super(`[PGERR_${code}] ${message}`);
     this.name = 'PgError';
-    this[kErrorPgcode] = props.code;
+    this[kErrorCode] = code;
     Object.assign(this, props);
   }
 }
@@ -110,6 +129,14 @@ class Pool {
     const conn = this._getConnection();
     try {
       yield * conn.query(...args);
+      // const response = activateIterator(conn.query(...args));
+      // const discard = Promise.resolve(conn.query(`discard all`));
+      // discard.catch(Boolean);
+      // try {
+      //   yield * response;
+      // } finally {
+      //   await discard;
+      // }
     } finally {
       // TODO AggregateError
       await this._recycleConnection(conn);
@@ -122,7 +149,7 @@ class Pool {
   destroy(destroyReason) {
     this._ended = true;
     this._connections.forEach(it => void it.destroy(destroyReason))
-    return destroyReason;
+    // return destroyReason;
     // TODO should keep and throw destroyReason when querying ?
   }
   _getConnection() {
@@ -177,7 +204,8 @@ class Pool {
       // But next query will be executed in explicit transaction
       // so modifications of next query will not be commited automaticaly.
       // Rather then next query does explicit COMMIT
-      throw conn.destroy(Error('pooled connection left in transaction'));
+      conn.destroy(Error('pooled connection left in transaction'));
+      throw Error('this query lefts pooled connection in transaction');
     }
 
     if (this._poolIdleTimeout && !conn.pending /* is idle */) {
@@ -196,6 +224,25 @@ class Pool {
     return pgerrcode(...args);
   }
 }
+
+
+// function activateIterator(iterable) {
+//   const iterator = iterable[Symbol.asyncIterator]();
+//   const first = iterator.next();
+//   first.catch(Boolean);
+//   return wrapper();
+
+//   async function * wrapper() {
+//     try {
+//       const { done, value } = await first;
+//       if (done) return;
+//       yield value;
+//       yield * iterator;
+//     } finally {
+//       await iterator.return();
+//     }
+//   }
+// }
 
 class Connection {
   constructor({ hostname, port, password, '.debug': debug, ...startupOptions }) {
@@ -386,7 +433,7 @@ class Connection {
       this._responseRxs.shift().end(responseEndReason);
     }
     // TODO do CancelRequest to wake stuck connection which can continue executing ?
-    return destroyReason; // user code can call .destroy and throw destroyReason in one line
+    // return destroyReason; // user code can call .destroy and throw destroyReason in one line
   }
   async * notifications() {
     if (!this._notificationSubscriptions) {
@@ -402,9 +449,33 @@ class Connection {
       subscriptions.delete(nsub);
     }
   }
-  logicalReplication () {
-    // TODO implement
-    // Promise<AsyncIterator> ? wait for CopyBothResponse
+  /** starts logical replication
+   * @param {{
+   *  slot: string,
+   *  startLsn: string,
+   *  options: object,
+   *  ackIntervalMillis: number,
+   * }}
+   * @returns {AsyncIterable}
+   */
+  logicalReplication({ slot, startLsn = '0/0', options = {}, ackIntervalMillis = 10e3 }) {
+    const optionsSql = (
+      Object.entries(options)
+      // TODO fix option key is injectable
+      .map(([k, v]) => k + ' ' + pgliteral(v))
+      .join(',')
+      .replace(/.+/, '($&)')
+    );
+    // TODO get wal_sender_timeout
+    const startReplSql = `START_REPLICATION SLOT ${pgident(slot)} LOGICAL ${startLsn} ${optionsSql}`;
+    const tx = new Channel();
+    const q = this.query(startReplSql, { stdins: [tx] });
+    const rx = q[Symbol.asyncIterator]();
+    const stream = new ReplicationStream(rx, tx, ackIntervalMillis);
+    stream.ack(startLsn); // set initial lsn and also validate lsn
+    return stream;
+
+    // TODO how to wait for CopyBothResponse ?
   }
   async _cancelRequest() {
     // await this._whenReady; // wait for backendkey
@@ -489,8 +560,8 @@ class Connection {
     } else {
       if (this._debug) {
         console.log(... m.payload === undefined
-          ? ['<--- %s', m.tag]
-          : ['<--- %s %o', m.tag, m.payload],
+          ? ['<- %c%s%c', 'font-weight: bold; color: magenta', m.tag, '']
+          : ['<- %c%s%c %o', 'font-weight: bold; color: magenta', m.tag, '', m.payload],
         );
       }
       // TODO serializeFrontendMessage creates new Uint8Array
@@ -590,11 +661,11 @@ class Connection {
       // Query('START_REPLICATION SLOT a LOGICAL 0/0');
       //
       // CopyDone() // before wal_sender_timeout expires
-      // copydata-keepalive message can be received here after CopyDone
+      // CopyData-keepalive message can be received here after CopyDone
       // but before ReadyForQuery
       //
       // Query('CREATE_REPLICATION_SLOT b LOGICAL test_decoding')
-      // sometimes copydata-keepalive message can be received here
+      // sometimes CopyData-keepalive message can be received here
       // before RowDescription message
       return;
     }
@@ -643,6 +714,13 @@ class Connection {
     await this._fwdBackendMessage(m);
   }
   async _recvCommandComplete(m) {
+    // when call START_REPLICATION second time then replication is not started,
+    // but CommandComplete received right after CopyBothResponse without CopyDone.
+    // I cannot find any documentation about this postgres behavior.
+    // Seems that this line is responsible for this
+    // https://github.com/postgres/postgres/blob/0266e98c6b865246c3031bbf55cb15f330134e30/src/backend/replication/walsender.c#L2307
+    // streamingDoneReceiving and streamingDoneSending not reset to false before replication start
+    this._copyingOut = false;
     await this._fwdBackendMessage(m);
   }
   async _recvEmptyQueryResponse(m) {
@@ -659,13 +737,16 @@ class Connection {
     await this._fwdBackendMessage(m);
   }
   _recvAuthenticationCleartextPassword() {
+    if (this._password == null) {
+      throw Error('password required (clear)');
+    }
     // should be always encoded as utf8 even when server_encoding is win1251
     this._startTx.push(new PasswordMessage(this._password));
   }
   _recvAuthenticationMD5Password(_, { salt }) {
-    // TODO stop if no password
-    // if (!password) return this._startuptx.end(Error('no password));
-
+    if (this._password == null) {
+      throw Error('password required (md5)');
+    }
     // should use server_encoding, but there is
     // no way to know server_encoding before authentication.
     // So it should be possible to provide password as byte-string
@@ -693,6 +774,9 @@ class Connection {
     }));
   }
   async _recvAuthenticationSASLContinue(_, data) {
+    if (this._password == null) {
+      throw Error('password required (scram-sha-256)');
+    }
     const utf8enc = new TextEncoder();
     const utf8dec = new TextDecoder();
     const finmsg = await this._saslScramSha256.continue(
@@ -785,6 +869,10 @@ class Connection {
   // finally(...args) { return this._whenReady.finally(...args); }
   // _createReadyConn() { return new Proxy(this, { get: this._getPropExceptThen }); }
   // _getPropExceptThen(target, prop) { return prop == 'then' ? undefined : target[prop]; }
+}
+
+function warnError(err) {
+  // console.trace('warning', err);
 }
 
 // there is no strong need to use generators to create message sequence,
@@ -907,6 +995,8 @@ class Response {
   }
   [Symbol.asyncIterator]() {
     // TODO activate iterator ? emit query
+    // it can be handy when we need to enqueue .end after .query immediatly
+    // or if need to enqueue .query('discard all') after user .query in pool
     return this._iter[Symbol.asyncIterator]();
   }
   then(...args) {
@@ -922,14 +1012,14 @@ class Response {
     return this._loadPromise || (this._loadPromise = this._load());
   }
   async _load() {
-    // let inTransaction = false;
+    let inTransaction = false;
     let lastResult;
     const results = [];
     for await (const chunk of this) {
       lastResult = lastResult || {
         rows: [],
         // TODO copied: [],
-        notices: [],
+        // notices: [],
         scalar: undefined,
         command: undefined,
         suspended: false,
@@ -943,9 +1033,9 @@ class Response {
         case 'NoticeResponse':
           lastResult.notices.push(chunk.payload);
           continue;
-        // case 'ReadyForQuery':
-        //   inTransaction = chunk.payload.transactionStatus != 0x49 /*I*/;
-        //   continue;
+        case 'ReadyForQuery':
+          inTransaction = chunk.payload.transactionStatus != 0x49 /*I*/;
+          continue;
         default:
           continue;
         case 'CommandComplete':
@@ -968,13 +1058,94 @@ class Response {
     }
     return {
       ...results[results.length - 1],
-      // inTransaction,
+      inTransaction,
       results,
       // TODO root `rows` concat ?
-      get notices() {
-        return results.flatMap(({ notices }) => notices);
-      },
+      // get notices() {
+      //   return results.flatMap(({ notices }) => notices);
+      // },
     };
+  }
+}
+
+class ReplicationStream {
+  constructor(rx, tx, ackIntervalMillis) {
+    this._rx = rx;
+    this._tx = tx;
+    this._ackIntervalMillis = ackIntervalMillis;
+    this._ackingLsn = '00000000/00000000';
+    this._iter = this._iterate(); // TODO can use `this` before all props inited? (hidden class optimization)
+  }
+  [Symbol.asyncIterator]() {
+    return this._iter[Symbol.asyncIterator]();
+  }
+  async * pgoutput() {
+    const relationCache = Object.create(null);
+    const typeCache = Object.create(null);
+    for await (const chunk of this) {
+      yield chunk.map(decodePgoutputMessage);
+    }
+    function decodePgoutputMessage(xlogData) {
+      const pgoreader = new PgoutputMessageReader(xlogData, relationCache, typeCache);
+      return pgoreader.readPgoutputMessage()
+    }
+  }
+  async * _iterate() {
+    // TODO start timer after successfull replication start.
+    // CopyBothResponse is not best option because replication
+    // can be aborted immediatly after CopyBothResponse when
+    // replication is started second time on connection.
+    // So after first PrimaryKeepaliveMessage?
+    const ackTimer = setInterval(this._ackImmediate.bind(this), this._ackIntervalMillis);
+    try {
+      for (let chunk, done;;) {
+        ({ value: chunk, done } = await this._rx.next());
+        if (done) break;
+        const xlogMessages = [];
+        for (const copyData of chunk.rows) {
+          const replmsgReader = new ReplicationMessageReader(copyData);
+          const replmsg = replmsgReader.readReplicationMessage();
+          if (replmsg.tag == 'XLogData') {
+            xlogMessages.push(replmsg);
+            continue;
+          }
+          if (replmsg.tag == 'PrimaryKeepaliveMessage' && replmsg.shouldReply) {
+            this._ackImmediate();
+          }
+        }
+        // TODO we can emit empty replication message (fwd PrimaryKeepAlive?) every 1sec
+        // so user have a chance to `break` loop
+        yield xlogMessages;
+      }
+    } finally {
+      clearInterval(ackTimer);
+      this._ackImmediate();
+      this._tx.end();
+      // TODO handle errors?
+      for await (const _ of this._rx); // drain rx until end
+    }
+  }
+  ack(lsn) {
+    if (!/^[0-9a-f]{1,8}[/][0-9a-f]{1,8}$/i.test(lsn)) {
+      throw TypeError('invalid lsn');
+    }
+    lsn = lsnMakeComparable(lsn);
+    if (lsn > this._ackingLsn) {
+      this._ackingLsn = lsn;
+    }
+  }
+  _ackImmediate() {
+    // if (!this._tx) return;
+    const msg = new Uint8Array(1 + 8 + 8 + 8 + 8 + 1);
+    const msgv = new DataView(msg.buffer);
+    let nlsn = BigInt('0x' + this._ackingLsn.replace('/', ''));
+    nlsn += 1n;
+    msgv.setUint8(0, 0x72); // r
+    msgv.setBigUint64(1, nlsn);
+    msgv.setBigUint64(9, nlsn);
+    msgv.setBigUint64(17, nlsn);
+    // TODO push the same buf every time, update msg in .ack
+    this._tx.push(msg); // TODO backpreassure
   }
 }
 
@@ -998,14 +1169,14 @@ async function * iterBackendMessages(socket) {
       const isize = itag + 1;
       const ipayload = isize + 4;
       if (nbuf < ipayload) break; // incomplete message
-      // const size = (buf[isize] << 24) | (buf[isize + 1] << 16) | (buf[isize + 2] << 8) | buf[isize + 3];
-      const size = new DataView(buf.buffer, isize).getInt32();
+      const size = buf[isize] << 24 | buf[isize + 1] << 16 | buf[isize + 2] << 8 | buf[isize + 3];
       if (size < 4) {
         throw Error('invalid backend message size');
       }
       const inext = isize + size;
       if (nbuf < inext) break; // incomplete message
-      const message = parseBackendMessage(buf[itag], buf.subarray(ipayload, inext));
+      const msgreader = new BackendMessageReader(buf.subarray(ipayload, inext))
+      const message = msgreader.readBackendMessage(buf[itag]);
       messages.push(message);
       // TODO batch DataRow here
       nparsed = inext;
@@ -1019,208 +1190,388 @@ async function * iterBackendMessages(socket) {
   }
 }
 
-function parseBackendMessage(/** @type {number} */ asciiTag, /** @type {Uint8Array} */ buf) {
-  let pos = 0;
+function serializeFrontendMessage(message) {
+  // FIXME reuse buffer
+  const bytes = new Uint8Array(message.size);
+  message.writeTo(new MessageWriter(bytes.buffer));
+  return bytes;
+}
 
-  function readInt32BE() {
-    return (buf[pos++] << 24) | (buf[pos++] << 16) | (buf[pos++] << 8) | buf[pos++]
+class FrontendMessage {
+  constructor(payload) {
+    this.payload = payload;
+    this.size = 0;
+    const sizeCounter = new MessageSizeCounter();
+    this._write(sizeCounter, null, payload);
+    this.size = sizeCounter.result;
   }
-  function readInt16BE() {
-    return (buf[pos++] << 8) | buf[pos++]
+  get tag() {
+    return this.constructor.name; // we will use it only for debug logging
   }
-  function readUint8() {
-    return buf[pos++]
+  writeTo(messageWriter) {
+    this._write(messageWriter, this.size, this.payload);
   }
-  function readBytes(n) {
-    return buf.subarray(pos, pos += n);
+}
+
+class StartupMessage extends FrontendMessage {
+  _write(w, size, options) {
+    w.writeInt32BE(size);
+    w.writeInt32BE(0x00030000);
+    for (const [key, val] of Object.entries(options)) {
+      w.writeString(key);
+      w.writeString(val);
+    }
+    w.writeUint8(0);
   }
-  function readToEnd() {
-    return buf.subarray(pos);
-    // TODO pos += ?
+}
+
+class CancelRequest extends FrontendMessage {
+  _write(w, _size, { pid, secretKey }) {
+    w.writeInt32BE(16);
+    w.writeInt32BE(80877102); // (1234 << 16) | 5678
+    w.writeInt32BE(pid);
+    w.writeInt32BE(secretKey);
   }
-  function readString() {
-    const endIdx = buf.indexOf(0x00, pos);
+}
+
+class SSLRequest extends FrontendMessage {
+  _write(w) {
+    w.writeInt32BE(8);
+    w.writeInt32BE(80877102); // (1234 << 16) | 5678
+  }
+}
+
+class PasswordMessage extends FrontendMessage {
+  _write(w, size, payload) {
+    w.writeUint8(0x70); // p
+    w.writeInt32BE(size - 1);
+    w.writeString(payload);
+  }
+}
+
+class SASLInitialResponse extends FrontendMessage {
+  _write(w, size, { mechanism, data }) {
+    w.writeUint8(0x70); // p
+    w.writeInt32BE(size - 1);
+    w.writeString(mechanism);
+    if (data) {
+      w.writeInt32BE(data.byteLength);
+      w.write(data);
+    } else {
+      w.writeInt32BE(-1);
+    }
+  }
+}
+
+class SASLResponse extends FrontendMessage {
+  _write(w, size, data) {
+    w.writeUint8(0x70); // p
+    w.writeInt32BE(size - 1);
+    w.write(data);
+  }
+}
+
+class Query extends FrontendMessage {
+  _write(w, size) {
+    w.writeUint8(0x51); // Q
+    w.writeInt32BE(size - 1);
+    w.writeString(this.payload);
+  }
+}
+
+class Parse extends FrontendMessage {
+  _write(w, size, { statement, statementName = '', paramTypes = [] }) {
+    w.writeUint8(0x50); // P
+    w.writeInt32BE(size - 1);
+    w.writeString(statementName);
+    w.writeString(statement);
+    w.writeInt16BE(paramTypes.length);
+    for (const typeid of paramTypes) {
+      w.writeUint32BE(typeid || 0);
+    }
+  }
+}
+
+class Bind extends FrontendMessage {
+  _write(w, size, { portal = '', statementName = '', params = [], binary = [] }) {
+    w.writeUint8(0x42); // B
+    w.writeInt32BE(size - 1);
+    w.writeString(portal);
+    w.writeString(statementName);
+    w.writeInt16BE(params.length);
+    for (const p of params) {
+      w.writeInt16BE(Number(p instanceof Uint8Array));
+    }
+    w.writeInt16BE(params.length);
+    for (const p of params) {
+      if (p == null) {
+        w.writeInt32BE(-1);
+        continue;
+      }
+      let encoded = p;
+      // TODO avoid twice encoding
+      if (!(p instanceof Uint8Array)) {
+        encoded = utf8encoder.encode(p);
+      }
+      w.writeInt32BE(encoded.length);
+      // TODO zero copy param encode
+      w.write(encoded);
+    }
+    w.writeInt16BE(binary.length);
+    for (const fmt of binary) {
+      w.writeInt16BE(fmt);
+    }
+  }
+}
+
+class Execute extends FrontendMessage {
+  _write(w, size, { portal = '', limit = 0 }) {
+    w.writeUint8(0x45); // E
+    w.writeInt32BE(size - 1);
+    w.writeString(portal);
+    w.writeUint32BE(limit);
+  }
+}
+
+class DescribeStatement extends FrontendMessage {
+  _write(w, size, statementName = '') {
+    w.writeUint8(0x44); // D
+    w.writeInt32BE(size - 1);
+    w.writeUint8(0x53); // S
+    w.writeString(statementName);
+  }
+}
+
+class DescribePortal extends FrontendMessage {
+  _write(w, size, portal = '') {
+    w.writeUint8(0x44); // D
+    w.writeInt32BE(size - 1);
+    w.writeUint8(0x50); // P
+    w.writeString(portal);
+  }
+}
+
+class ClosePortal extends FrontendMessage {
+  _write(w, size, portal = '') {
+    w.writeUint8(2); // C
+    w.writeInt32BE(size - 1);
+    w.writeUint8(0x50); // P
+    w.writeString(portal);
+  }
+}
+
+class CloseStatement extends FrontendMessage {
+  _write(w, size, statementName = '') {
+    w.writeUint8(2); // C
+    w.writeInt32BE(size - 1);
+    w.writeUint8(0x53); // S
+    w.writeString(statementName);
+  }
+}
+
+class Sync extends FrontendMessage {
+  _write(w) {
+    w.writeUint8(0x53); // S
+    w.writeInt32BE(4);
+  }
+}
+
+// unused
+class Flush extends FrontendMessage {
+  _write(w) {
+    w.writeUint8(0x48); // H
+    w.writeInt32BE(4);
+  }
+}
+
+class CopyData extends FrontendMessage {
+  _write(w, size, data) {
+    w.writeUint8(0x64); // d
+    w.writeInt32BE(size - 1);
+    w.write(data);
+  }
+}
+
+class CopyDone extends FrontendMessage {
+  _write(w) {
+    w.writeUint8(0x63); // c
+    w.writeInt32BE(4);
+  }
+}
+
+class CopyFail extends FrontendMessage {
+  _write(w, size, cause) {
+    w.writeUint8(0x66); // f
+    w.writeInt32BE(size - 1);
+    w.writeString(cause);
+  }
+}
+
+class Terminate extends FrontendMessage {
+  _write(w) {
+    w.writeUint8(0x58); // X
+    w.writeInt32BE(4);
+  }
+}
+
+// https://www.postgresql.org/docs/14/protocol-message-types.html
+class MessageReader {
+  constructor (b) {
+    this._b = b;
+    this._p = 0;
+    this._textDecoder = MessageReader.defaultTextDecoder;
+  }
+  readUint8() {
+    this._checkSize(1);
+    return this._b[this._p++];
+  }
+  readInt16() {
+    this._checkSize(2);
+    return this._b[this._p++] << 8 | this._b[this._p++];
+  }
+  readInt32() {
+    this._checkSize(4);
+    return this._b[this._p++] << 24 | this._b[this._p++] << 16 | this._b[this._p++] << 8 | this._b[this._p++];
+  }
+  readString() {
+    const endIdx = this._b.indexOf(0x00, this._p);
     if (endIdx < 0) {
       throw Error('unexpected end of message');
     }
-    const strbuf = buf.subarray(pos, endIdx);
-    pos = endIdx + 1;
-    return utf8decoder.decode(strbuf);
+    const strbuf = this._b.subarray(this._p, endIdx);
+    this._p = endIdx + 1;
+    return this._textDecoder.decode(strbuf);
   }
-
-  switch (asciiTag) {
-    case 0x64 /* d */: return {
-      tag: 'CopyData',
-      payload: buf, // FIXME create buf copy ?
-    };
-    case 0x44 /* D */: {
-      const nfields = readInt16BE()
-      const row = Array(nfields);
-      for (let i = 0; i < nfields; i++) {
-        const len = readInt32BE();
-        row[i] = len < 0 ? null : readBytes(len);
-      }
-      return {
-        tag: 'DataRow',
-        payload: row,
-      };
+  read(n) {
+    this._checkSize(n);
+    return this._b.subarray(this._p, this._p += n);
+  }
+  readToEnd() {
+    const p = this._p;
+    this._p = this._b.length;
+    return this._b.subarray(p);
+  }
+  _checkSize(n) {
+    if (this._b.length < this._p + n) {
+      throw Error('unexpected end of message');
     }
-    case 0x52 /* R */:
-      switch (readInt32BE()) {
-        case 0: return {
-          tag: 'AuthenticationOk',
-        };
-        case 2: return {
-          tag: 'AuthenticationKerberosV5',
-        };
-        case 3: return {
-          tag: 'AuthenticationCleartextPassword',
-        };
-        case 5: return {
-          tag: 'AuthenticationMD5Password',
-          payload: { salt: readBytes(4) },
-        };
-        case 6: return {
-          tag: 'AuthenticationSCMCredential',
-        };
-        case 7: return {
-          tag: 'AuthenticationGSS',
-        };
-        case 8: return {
-          tag: 'AuthenticationGSSContinue',
-          payload: readToEnd(),
-        };
-        case 9: return {
-          tag: 'AuthenticationSSPI',
-        };
-        case 10: return {
-          tag: 'AuthenticationSASL',
-          payload: { mechanism: readString() },
-        };
-        case 11: return {
-          tag: 'AuthenticationSASLContinue',
-          payload: readToEnd(),
-        };
-        case 12: return {
-          tag: 'AuthenticationSASLFinal',
-          payload: readToEnd(),
-        };
-        default: throw Error('unknown auth message');
-      }
-    case 0x76 /* v */: return {
-      tag: 'NegotiateProtocolVersion',
-      payload: {
-        version: readInt32BE(),
-        unrecognizedOptions: Array.from(
-          { length: readInt32BE() },
-          readString,
-        ),
-      },
-    };
-    case 0x53 /* S */: return {
-      tag: 'ParameterStatus',
-      payload: {
-        parameter: readString(),
-        value: readString(),
-      },
-    };
-    case 0x4b /* K */: return {
-      tag: 'BackendKeyData',
-      payload: {
-        pid: readInt32BE(),
-        secretKey: readInt32BE(),
-      },
-    };
-    case 0x5a /* Z */: return {
-      tag: 'ReadyForQuery',
-      payload: {
-        transactionStatus: readUint8(),
-      },
-    };
-    case 0x48 /* H */: return {
-      tag: 'CopyOutResponse',
-      payload: readCopyResp(),
-    };
-    case 0x47 /* G */: return {
-      tag: 'CopyInResponse',
-      payload: readCopyResp(),
-    };
-    case 0x57 /* W */: return {
-      tag: 'CopyBothResponse',
-      payload: readCopyResp(),
-    };
-    case 0x63 /* c */: return {
-      tag: 'CopyDone',
-    };
-    case 0x54 /* T */: return {
-      tag: 'RowDescription',
-      payload: Array.from({ length: readInt16BE() }, _ => ({
-        name: readString(),
-        tableid: readInt32BE(),
-        column: readInt16BE(),
-        typeid: readInt32BE(),
-        typelen: readInt16BE(),
-        typemod: readInt32BE(),
-        binary: readInt16BE(),
-      })),
-    };
-    case 0x74 /* t */: return {
-      tag: 'ParameterDescription',
-      payload: Array.from(
-        { length: readInt16BE() },
-        _ => readInt32BE(),
+  }
+  // should not use { fatal: true } because ErrorResponse can use invalid utf8 chars
+  static defaultTextDecoder = new TextDecoder();
+}
+
+// https://www.postgresql.org/docs/14/protocol-message-formats.html
+class BackendMessageReader extends MessageReader {
+  readBackendMessage(asciiTag) {
+    switch (asciiTag) {
+      case 0x64 /* d */: return { tag: 'CopyData', payload: this._b };
+      case 0x44 /* D */: return { tag: 'DataRow', payload: this.readDataRow() };
+      case 0x76 /* v */: return { tag: 'NegotiateProtocolVersion', payload: this.readNegotiateProtocolVersion() };
+      case 0x53 /* S */: return { tag: 'ParameterStatus', payload: this.readParameterStatus() };
+      case 0x4b /* K */: return { tag: 'BackendKeyData', payload: this.readBackendKeyData() };
+      case 0x5a /* Z */: return { tag: 'ReadyForQuery', payload: this.readReadyForQuery() };
+      case 0x48 /* H */: return { tag: 'CopyOutResponse', payload: this.readCopyResponse() };
+      case 0x47 /* G */: return { tag: 'CopyInResponse', payload: this.readCopyResponse() };
+      case 0x57 /* W */: return { tag: 'CopyBothResponse', payload: this.readCopyResponse() };
+      case 0x63 /* c */: return { tag: 'CopyDone' };
+      case 0x54 /* T */: return { tag: 'RowDescription', payload: this.readRowDescription() };
+      case 0x74 /* t */: return { tag: 'ParameterDescription', payload: this.readParameterDescription() };
+      case 0x43 /* C */: return { tag: 'CommandComplete', payload: this.readString() };
+      case 0x31 /* 1 */: return { tag: 'ParseComplete' };
+      case 0x32 /* 2 */: return { tag: 'BindComplete' };
+      case 0x33 /* 3 */: return { tag: 'CloseComplete' };
+      case 0x73 /* s */: return { tag: 'PortalSuspended' };
+      case 0x49 /* I */: return { tag: 'EmptyQueryResponse' };
+      case 0x4e /* N */: return { tag: 'NoticeResponse', payload: this.readErrorOrNotice() };
+      case 0x45 /* E */: return { tag: 'ErrorResponse', payload: this.readErrorOrNotice() };
+      case 0x6e /* n */: return { tag: 'NoData' };
+      case 0x41 /* A */: return { tag: 'NotificationResponse', payload: this.readNotificationResponse() };
+      case 0x52 /* R */:
+        switch (this.readInt32()) {
+          case 0x0: return { tag: 'AuthenticationOk' };
+          case 0x2: return { tag: 'AuthenticationKerberosV5' };
+          case 0x3: return { tag: 'AuthenticationCleartextPassword' };
+          case 0x5: return { tag: 'AuthenticationMD5Password', payload: { salt: this.read(4) } };
+          case 0x6: return { tag: 'AuthenticationSCMCredential' };
+          case 0x7: return { tag: 'AuthenticationGSS' };
+          case 0x8: return { tag: 'AuthenticationGSSContinue', payload: this.readToEnd() };
+          case 0x9: return { tag: 'AuthenticationSSPI' };
+          case 0xa: return { tag: 'AuthenticationSASL', payload: { mechanism: this.readString() } };
+          case 0xb: return { tag: 'AuthenticationSASLContinue', payload: this.readToEnd() };
+          case 0xc: return { tag: 'AuthenticationSASLFinal', payload: this.readToEnd() };
+          default: throw Error('unknown auth message');
+        }
+      default: return { tag: asciiTag, payload: this._b }; // TODO warn unknown message
+    }
+  }
+  readDataRow() {
+    const nfields = this.readInt16()
+    const row = Array(nfields);
+    for (let i = 0; i < nfields; i++) {
+      const valsize = this.readInt32();
+      row[i] = valsize < 0 ? null : this.read(valsize);
+    }
+    return row;
+  }
+  readNegotiateProtocolVersion() {
+    return {
+      version: this.readInt32(),
+      unrecognizedOptions: Array.from(
+        { length: this.readInt32() },
+        this.readString,
+        this,
       ),
     };
-    case 0x43 /* C */: return {
-      tag: 'CommandComplete',
-      payload: readString(),
-    };
-    case 0x31 /* 1 */: return {
-      tag: 'ParseComplete',
-    };
-    case 0x32 /* 2 */: return {
-      tag: 'BindComplete',
-    };
-    case 0x33 /* 3 */: return {
-      tag: 'CloseComplete',
-    };
-    case 0x73 /* s */: return {
-      tag: 'PortalSuspended',
-    };
-    case 0x49 /* I */: return {
-      tag: 'EmptyQueryResponse',
-    };
-    case 0x4e /* N */: return {
-      tag: 'NoticeResponse',
-      payload: readErrorOrNotice(),
-    };
-    case 0x45 /* E */: return {
-      tag: 'ErrorResponse',
-      payload: readErrorOrNotice(),
-    };
-    case 0x6e /* n */: return {
-      tag: 'NoData',
-    };
-    case 0x41 /* A */: return {
-      tag: 'NotificationResponse',
-      payload: {
-        pid: readInt32BE(),
-        channel: readString(),
-        payload: readString(),
-      },
-    };
-    default: return {
-      tag,
-      payload,
+  }
+  readParameterDescription() {
+    return Array.from(
+      { length: this.readInt16() },
+      this.readInt32,
+      this,
+    );
+  }
+  readBackendKeyData() {
+    return {
+      pid: this.readInt32(),
+      secretKey: this.readInt32(),
     };
   }
-
-  function readErrorOrNotice() {
+  readReadyForQuery() {
+    return { transactionStatus: this.readUint8() };
+  }
+  readCopyResponse() {
+    return {
+      binary: this.readUint8(),
+      binaryPerAttr: Array.from(
+        { length: this.readInt16() },
+        this.readInt16,
+        this,
+      ),
+    };
+  }
+  readRowDescription() {
+    return Array.from({ length: this.readInt16() }, _ => ({
+      name: this.readString(),
+      tableid: this.readInt32(),
+      column: this.readInt16(),
+      typeid: this.readInt32(),
+      typelen: this.readInt16(),
+      typemod: this.readInt32(),
+      binary: this.readInt16(),
+    }));
+  }
+  readParameterStatus() {
+    return {
+      parameter: this.readString(),
+      value: this.readString(),
+    };
+  }
+  readErrorOrNotice() {
     const fields = Array(256);
     for (;;) {
-      const fieldCode = readUint8();
+      const fieldCode = this.readUint8();
       if (!fieldCode) break;
-      fields[fieldCode] = readString();
+      fields[fieldCode] = this.readString();
     }
     return {
       severity: fields[0x53], // S
@@ -1242,281 +1593,248 @@ function parseBackendMessage(/** @type {number} */ asciiTag, /** @type {Uint8Arr
       constraint: fields[0x6e], // n
     };
   }
-
-  function readCopyResp() {
+  readNotificationResponse() {
     return {
-      binary: readUint8(),
-      binaryPerAttr: Array.from(
-        { length: readInt16BE() },
-        readInt16BE,
-      ),
+      pid: this.readInt32(),
+      channel: this.readString(),
+      payload: this.readString(),
     };
   }
 }
 
-
-function serializeFrontendMessage(message) {
-  const counter = new CounterWriter();
-  message.write(counter, NaN, message.payload);
-  // FIXME reuse buffer
-  const bytes = new Uint8Array(counter.result);
-  message.write(new BufferWriter(bytes.buffer), counter.result, message.payload);
-  return bytes;
-}
-
-class FrontendMessage {
-  constructor(payload) {
-    this.payload = payload;
-  }
-  get tag() {
-    return this.constructor.name; // we will use it only for debug logging
-  }
-}
-
-class StartupMessage extends FrontendMessage {
-  write(w, size, options) {
-    w.writeInt32BE(size);
-    w.writeInt32BE(0x00030000);
-    for (const [key, val] of Object.entries(options)) {
-      w.writeString(key);
-      w.writeString(val);
-    }
-    w.writeUint8(0);
-  }
-}
-
-class CancelRequest extends FrontendMessage {
-  write(w, _size, { pid, secretKey }) {
-    w.writeInt32BE(16);
-    w.writeInt32BE(80877102); // (1234 << 16) | 5678
-    w.writeInt32BE(pid);
-    w.writeInt32BE(secretKey);
-  }
-}
-
-class SSLRequest extends FrontendMessage {
-  write(w) {
-    w.writeInt32BE(8);
-    w.writeInt32BE(80877102); // (1234 << 16) | 5678
-  }
-}
-
-class PasswordMessage extends FrontendMessage {
-  write(w, size, payload) {
-    w.writeUint8(0x70); // p
-    w.writeInt32BE(size - 1);
-    w.writeString(payload);
-  }
-}
-
-class SASLInitialResponse extends FrontendMessage {
-  write(w, size, { mechanism, data }) {
-    w.writeUint8(0x70); // p
-    w.writeInt32BE(size - 1);
-    w.writeString(mechanism);
-    if (data) {
-      w.writeInt32BE(data.byteLength);
-      w.write(data);
-    } else {
-      w.writeInt32BE(-1);
+// https://www.postgresql.org/docs/14/protocol-replication.html#id-1.10.5.9.7.1.5.1.8
+class ReplicationMessageReader extends MessageReader {
+  readReplicationMessage() {
+    const tag = this.readUint8();
+    switch (tag) {
+      case 0x77 /*w*/: return {
+        tag: 'XLogData',
+        lsn: this.readLsn(),
+        endLsn: this.readLsn(),
+        time: this.readTime(),
+        data: this.readToEnd(),
+      };
+      case 0x6b /*k*/: return {
+        tag: 'PrimaryKeepaliveMessage',
+        endLsn: this.readLsn(),
+        time: this.readTime(),
+        shouldReply: this.readUint8(),
+      };
+      default: throw Error('unknown replication message');
     }
   }
-}
-
-class SASLResponse extends FrontendMessage {
-  write(w, size, data) {
-    w.writeUint8(0x70); // p
-    w.writeInt32BE(size - 1);
-    w.write(data);
+  readLsn() {
+    return (
+      this.readUint32().toString(16).padStart(8, '0') + '/' +
+      this.readUint32().toString(16).padStart(8, '0')
+    ).toUpperCase();
+  }
+  readTime() {
+    // (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY == 946684800000000
+    return this.readUint64() + 946684800000000n;
+  }
+  readUint64() {
+    return BigInt(this.readUint32()) << 32n | BigInt(this.readUint32());
+  }
+  readUint32() {
+    return this.readInt32() >>> 0;
   }
 }
 
-class Query extends FrontendMessage {
-  write(w, size) {
-    w.writeUint8(0x51); // Q
-    w.writeInt32BE(size - 1);
-    w.writeString(this.payload);
+// https://www.postgresql.org/docs/14/protocol-logicalrep-message-formats.html
+class PgoutputMessageReader extends ReplicationMessageReader  {
+  constructor({ data, lsn, endLsn, time }, relationCache, typeCache) {
+    super(data);
+    this._relationCache = relationCache;
+    this._typeCache = typeCache;
+    this._lsn = lsn;
+    this._endLsn = endLsn;
+    this._time = time;
   }
-}
-
-class Parse extends FrontendMessage {
-  write(w, size, { statement, statementName = '', paramTypes = [] }) {
-    w.writeUint8(0x50); // P
-    w.writeInt32BE(size - 1);
-    w.writeString(statementName);
-    w.writeString(statement);
-    w.writeInt16BE(paramTypes.length);
-    for (const typeid of paramTypes) {
-      w.writeUint32BE(typeid || 0);
+  readPgoutputMessage() {
+    const tag = this.readUint8();
+    switch (tag) {
+      case 0x42 /*B*/: return this.readBegin();
+      case 0x4d /*M*/: return this.readLogicalMessage();
+      case 0x43 /*C*/: return this.readCommit();
+      case 0x4f /*O*/: return this.readOrigin();
+      case 0x52 /*R*/: return this.readRelation();
+      case 0x59 /*Y*/: return this.readType();
+      case 0x49 /*I*/: return this.readInsert();
+      case 0x55 /*U*/: return this.readUpdate();
+      case 0x44 /*D*/: return this.readDelete();
+      case 0x54 /*T*/: return this.readTruncate();
+      default: throw Error('unknown pgoutput message');
     }
   }
-}
-
-class Bind extends FrontendMessage {
-  write(w, size, { portal = '', statementName = '', params = [], binary = [] }) {
-    w.writeUint8(0x42); // B
-    w.writeInt32BE(size - 1);
-    w.writeString(portal);
-    w.writeString(statementName);
-    w.writeInt16BE(params.length);
-    for (const p of params) {
-      w.writeInt16BE(Number(p instanceof Uint8Array));
+  readBegin() {
+    return {
+      tag: 'begin',
+      lsn: this._lsn,
+      endLsn: this._endLsn,
+      time: this._time,
+      finalLsn: this.readLsn(),
+      commitTime: this.readTime(),
+      xid: this.readInt32(),
+    };
+  }
+  readLogicalMessage() {
+    return {
+      tag: 'message',
+      lsn: this._lsn,
+      endLsn: this._endLsn,
+      time: this._time,
+      transactional: this.readUint8(),
+      _lsn: this.readLsn(),
+      prefix: this.readString(),
+      content: this.read(this.readInt32()),
+    };
+  }
+  readCommit() {
+    return {
+      tag: 'commit',
+      lsn: this._lsn,
+      endLsn: this._endLsn,
+      time: this._time,
+      flags: this.readUint8(),
+      commitLsn: this.readLsn(),
+      _endLsn: this.readLsn(), // TODO fix dup
+      commitTime: this.readTime(),
+    };
+  }
+  readOrigin() {
+    return {
+      tag: 'origin',
+      lsn: this.readLsn(),
+      origin: this.readString(),
+    };
+  }
+  readRelation() {
+    const rel = {
+      tag: 'relation',
+      // lsn: this._lsn,
+      // endLsn: this._endLsn,
+      // time,
+      relationid: this.readInt32(),
+      schema: this.readString(),
+      name: this.readString(),
+      replicaIdentity: String.fromCharCode(this.readUint8()),
+      attrs: Array.from({ length: this.readInt16() }, _ => ({
+        flags: this.readUint8(), // TODO bool accessors
+        name: this.readString(),
+        typeid: this.readInt32(),
+        typemod: this.readInt32(),
+        // TODO lookup typeSchema and typeName
+      })),
+    };
+    // mem leak not likely to happen because number of relations is usually small
+    this._relationCache[rel.relationid] = rel;
+    return rel;
+  }
+  readType() {
+    const type = {
+      tag: 'type',
+      typeid: this.readInt32(),
+      schema: this.readString(),
+      name: this.readString(),
+    };
+    this._typeCache[type.typeid] = type;
+    return type;
+  }
+  readInsert() {
+    const relid = this.readInt32();
+    const relation = this._relationCache[relid];
+    const _kind = this.readUint8();
+    const after = this.readTuple(relation);
+    return {
+      tag: 'insert',
+      lsn: this._lsn,
+      endLsn: this._endLsn,
+      time: this._time,
+      relation,
+      before: null,
+      after,
+    };
+  }
+  readUpdate() {
+    const relid = this.readInt32();
+    const relation = this._relationCache[relid];
+    let kind = this.readUint8();
+    let before = null;
+    if (kind == 0x4b /*K*/ || kind == 0x4f /*O*/) {
+      before = this.readTuple(relation);
+      kind = this.readUint8();
     }
-    w.writeInt16BE(params.length);
-    for (const p of params) {
-      if (p == null) {
-        w.writeInt32BE(-1);
-        continue;
+    const after = this.readTuple(relation);
+    return {
+      tag: 'update',
+      lsn: this._lsn,
+      endLsn: this._endLsn,
+      time: this._time,
+      relation: relation,
+      before,
+      after,
+      // TODO keyOnly ?
+    };
+  }
+  readDelete() {
+    const relid = this.readInt32();
+    const relation = this._relationCache[relid];
+    const kind = this.readUint8();
+    const before = this.readTuple(relation);
+    return {
+      tag: 'delete',
+      lsn: this._lsn,
+      endLsn: this._endLsn,
+      time: this._time,
+      relation,
+      before,
+      after: null,
+      keyOnly: kind == 0x4b /*K*/,
+    };
+  }
+  readTruncate() {
+    const nrels = this.readInt32();
+    const flags = this.readUint8();
+    return {
+      tag: 'truncate',
+      lsn: this._lsn,
+      endLsn: this._endLsn,
+      time: this._time,
+      cascade: Boolean(flags & 0b1),
+      restartSeqs: Boolean(flags & 0b10),
+      relations: Array.from(
+        { length: nrels },
+        _ => this._relationCache[this.readInt32()],
+      ),
+    };
+  }
+  readTuple(relation) {
+    const nfields = this.readInt16();
+    const tuple = Object.create(null);
+    for (let i = 0; i < nfields; i++) {
+      const { name, typeid } = relation.attrs[i];
+      switch (this.readUint8()) {
+        case 0x74 /*t*/:
+          const valsize = this.readInt32();
+          const valbuf = this.read(valsize);
+          const valtext = this._textDecoder.decode(valbuf);
+          tuple[name] = typeDecode(valtext, typeid);
+          break;
+        case 0x6e /*n*/:
+          tuple[name] = null;
+          break;
+        default /*u*/:
+          tuple[name] = undefined;
       }
-      let encoded = p;
-      // fixme avoid twice encoding
-      if (!(p instanceof Uint8Array)) {
-        encoded = new TextEncoder().encode(p);
-      }
-      w.writeInt32BE(encoded.length);
-      // TODO zero copy param encode
-      w.write(encoded);
     }
-    w.writeInt16BE(binary.length);
-    for (const fmt of binary) {
-      w.writeInt16BE(fmt);
-    }
+    return tuple;
   }
 }
 
-class Execute extends FrontendMessage {
-  write(w, size, { portal = '', limit = 0 }) {
-    w.writeUint8(0x45); // E
-    w.writeInt32BE(size - 1);
-    w.writeString(portal);
-    w.writeUint32BE(limit);
-  }
-}
 
-class DescribeStatement extends FrontendMessage {
-  write(w, size, statementName = '') {
-    w.writeUint8(0x44); // D
-    w.writeInt32BE(size - 1);
-    w.writeUint8(0x53); // S
-    w.writeString(statementName);
-  }
-}
-
-class DescribePortal extends FrontendMessage {
-  write(w, size, portal = '') {
-    w.writeUint8(0x44); // D
-    w.writeInt32BE(size - 1);
-    w.writeUint8(0x50); // P
-    w.writeString(portal);
-  }
-}
-
-class ClosePortal extends FrontendMessage {
-  write(w, size, portal = '') {
-    w.writeUint8(2); // C
-    w.writeInt32BE(size - 1);
-    w.writeUint8(0x50); // P
-    w.writeString(portal);
-  }
-}
-
-class CloseStatement extends FrontendMessage {
-  write(w, size, statementName = '') {
-    w.writeUint8(2); // C
-    w.writeInt32BE(size - 1);
-    w.writeUint8(0x53); // S
-    w.writeString(statementName);
-  }
-}
-
-class Sync extends FrontendMessage {
-  write(w) {
-    w.writeUint8(0x53); // S
-    w.writeInt32BE(4);
-  }
-}
-
-// unused
-class Flush extends FrontendMessage {
-  write(w) {
-    w.writeUint8(0x48); // H
-    w.writeInt32BE(4);
-  }
-}
-
-class CopyData extends FrontendMessage {
-  write(w, size, data) {
-    w.writeUint8(0x64); // d
-    w.writeInt32BE(size - 1);
-    w.write(data);
-  }
-}
-
-class CopyDone extends FrontendMessage {
-  write(w) {
-    w.writeUint8(0x63); // c
-    w.writeInt32BE(4);
-  }
-}
-
-class CopyFail extends FrontendMessage {
-  write(w, size, cause) {
-    w.writeUint8(0x66); // f
-    w.writeInt32BE(size - 1);
-    w.writeString(cause);
-  }
-}
-
-class Terminate extends FrontendMessage {
-  write(w) {
-    w.writeUint8(0x58); // X
-    w.writeInt32BE(4);
-  }
-}
-
-// class DataReader {
-//   _view
-//   _pos = 0
-//   constructor(/** @type {DataView} */ view) {
-//     this._view = view;
-//   }
-//   readUint8() {
-//     return this._view.getUint8(this._move(1));
-//   }
-//   readInt16BE() {
-//     return this._view.getUint16(this._move(2));
-//   }
-//   readInt32BE() {
-//     return this._view.getInt32(this._move(4));
-//   }
-//   readExact(size) {
-//     return new Uint8Array(
-//       this._view.buffer,
-//       this._view.byteOffset + this._move(this._pos, size),
-//       size,
-//     );
-//   }
-//   readString() {
-//     const arr = new Uint8Array(
-//       this._view.buffer,
-//       this._view.byteOffset + this._move(this._pos, size),
-//     );
-//     const endIdx = arr.indexOf(0);
-//     if (endIdx < 0) {
-//       throw Error('unexpected EOF');
-//     }
-//     this._pos += endIdx + 1;
-//     return utf8decoder.decode(arr.subarray(0, endIdx));
-//   }
-//   _move(size) {
-//     const pos = this._pos;
-//     this._pos += size;
-//     return pos;
-//   }
-// }
-
-
-class BufferWriter {
+// TODO no DataView
+class MessageWriter {
   _buf
   _pos = 0
   constructor(buf) {
@@ -1540,18 +1858,12 @@ class BufferWriter {
   }
   writeString(val) {
     if (val instanceof Uint8Array) {
-      if (val.indexOf(0x00) > 0) {
-        // TODO malformed query will destroy connection and affect other queries.
-        // Should do this check before enqueue invalid messages
-        throw Error('zero char is not allowed');
-      }
       this.write(val);
     } else {
-      val = String(val);
-      if (val.indexOf('\0') > 0) {
-        throw Error('zero char is not allowed');
+      const { read, written } = utf8encoder.encodeInto(val, new Uint8Array(this._buf, this._pos));
+      if (read < val.length) {
+        throw Error('too small buffer');
       }
-      const { written } = utf8encoder.encodeInto(val, new Uint8Array(this._buf, this._pos));
       this._pos += written;
     }
     this.writeUint8(0);
@@ -1565,7 +1877,7 @@ class BufferWriter {
   }
 }
 
-class CounterWriter {
+class MessageSizeCounter {
   result = 0
   writeUint8() {
     this.result += 1;
@@ -1581,22 +1893,36 @@ class CounterWriter {
   }
   writeString(val) {
     if (val instanceof Uint8Array) {
-      this.write(val);
+      if (val.indexOf(0x00) > 0) {
+        throw TypeError('zero char is not allowed');
+      }
+      this.result += val.length + 1;
+    } else if (typeof val == 'string') {
+      if (val.indexOf('\0') > 0) {
+        throw TypeError('zero char is not allowed');
+      }
+      this.result += utf8length(val) + 1;
     } else {
-      this.write(utf8encoder.encode(val)); // TODO mem inefficient
+      throw TypeError('string or Uint8Array expected');
     }
-    this.writeUint8(0);
   }
   write(val) {
     if (!(val instanceof Uint8Array)) {
       throw TypeError('Uint8Array expected');
     }
-    this.result += val.byteLength;
+    this.result += val.length;
   }
 }
 
-
-
+// https://stackoverflow.com/a/25994411
+function utf8length(s) {
+  let result = 0;
+  for (let i = 0; i < s.length; i++) {
+    let c = s.charCodeAt(i);
+    result += c >> 11 ? 3 : c >> 7 ? 2 : 1;
+  }
+  return result;
+}
 
 ///////// begin type codec
 
@@ -1658,7 +1984,7 @@ function typeDecode(text, typeid) {
     case   20 /* int8    */: return BigInt(text);
     case  114 /* json    */:
     case 3802 /* jsonb   */: return JSON.parse(text);
-    case 3220 /* pg_lsn  */: return typeDecodePgLsn(text);
+    case 3220 /* pg_lsn  */: return lsnMakeComparable(text);
   }
   let elemTypeid = typeOfElem(typeid);
   if (elemTypeid) {
@@ -1700,6 +2026,7 @@ function typeDecodeArray(text, elemTypeid) {
 }
 
 // TODO multi dimension
+// TODO array_nulls https://www.postgresql.org/docs/14/runtime-config-compatible.html#id-1.6.7.16.2.2.1.1.3
 function typeEncodeArray(arr, elemTypeid) {
   return JSON.stringify(arr, function (_, elem) {
     return this == arr && elem != null ? encodeElem(elem, elemTypeid) : elem;
@@ -1727,7 +2054,7 @@ function typeDecodeBytea(text) {
   );
 }
 
-function typeDecodePgLsn(text) { // reformat pg_lsn as fixed length string to make values comparable
+function lsnMakeComparable(text) {
   const [h, l] = text.split('/');
   return h.padStart(8, '0') + '/' + l.padStart(8, '0');
 }
@@ -1735,7 +2062,6 @@ function typeDecodePgLsn(text) { // reformat pg_lsn as fixed length string to ma
 ///////////// end type codec
 
 
-const utf8decoder = new TextDecoder('utf-8'); // , { fatal: true }); cannot read ErrorResponse in non utf8 cases
 const utf8encoder = new TextEncoder();
 
 
@@ -1804,10 +2130,6 @@ class Channel {
   [Symbol.asyncIterator]() {
     return this._iter[Symbol.asyncIterator]();
   }
-}
-
-function warnError(err) {
-  // console.trace('warning', err);
 }
 
 class SaslScramSha256 {
