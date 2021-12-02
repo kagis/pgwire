@@ -148,7 +148,7 @@ class Pool {
   }
   destroy(destroyReason) {
     this._ended = true;
-    this._connections.forEach(it => void it.destroy(destroyReason))
+    this._connections.forEach(it => it.destroy(destroyReason));
     // return destroyReason;
     // TODO should keep and throw destroyReason when querying ?
   }
@@ -204,8 +204,7 @@ class Pool {
       // But next query will be executed in explicit transaction
       // so modifications of next query will not be commited automaticaly.
       // Rather then next query does explicit COMMIT
-      conn.destroy(Error('pooled connection left in transaction'));
-      throw Error('this query lefts pooled connection in transaction');
+      throw conn.destroy(Error('pooled connection left in transaction'));
     }
 
     if (this._poolIdleTimeout && !conn.pending /* is idle */) {
@@ -271,6 +270,7 @@ class Connection {
     this._whenReady = new Promise(this._whenReadyExecutor.bind(this));
     this._whenReady.catch(warnError);
     this._saslScramSha256 = null;
+    this._destroyReason = null;
     this._whenDestroyed = this._startup(startupOptions); // run background message processing
   }
   _whenReadyExecutor(resolve, reject) {
@@ -315,8 +315,7 @@ class Connection {
   }
   async * _queryIter(...args) {
     if (!this._tx) {
-      // TODO call stack
-      throw this._destroyReason || Error('cannot query on ended connection');
+      throw Error('connection destroyed', { cause: this._destroyReason });
     }
     // TODO ordered queue .query() and .end() calls
     // .query after .end should throw stable error ? what if auth failed after .end
@@ -342,10 +341,13 @@ class Connection {
       // при простое со стороны постгреса.
       // Если делать через AbortSignal то тогда висячий .next() придется reject'ить
       // а пользовательский код должен обрабатывать ошибку - неудобно
-      const errorResponse = yield * responseRx;
-      if (errorResponse) {
-        // TODO also save callstack for network errors
-        throw new PgError(errorResponse);
+      const error = yield * responseRx;
+      // TODO also save callstack for network errors
+      if (error instanceof Error) {
+        throw Error('postgres query failed', { cause: error });
+      }
+      if (error) {
+        throw new PgError(error);
       }
     } finally {
       // if query completed successfully then all stdins are drained,
@@ -359,7 +361,7 @@ class Connection {
 
       // https://github.com/kagis/pgwire/issues/17
       // going to do CancelRequest if response is not ended and there are no other pending responses
-      if (this._responseRxs[0] == responseRx && this._responseRxs.length == 1) {
+      if (this._responseRxs.length == 1 && this._responseRxs[0] == responseRx) {
         // new queries should not be emitted during CancelRequest if _tx is not ended
         this._tx?.push(readyForQueryLock);
         // TODO check if frontend messages reached postgres and query is actually executing,
@@ -418,13 +420,13 @@ class Connection {
     if (this._tx) {
       this._tx.end();
       this._tx = null;
-      // keep destroyReason only if .destroy() called before .end()
+      // accept destroyReason only if .destroy() called before .end()
       // so new queries will be rejected with the same error before
       // and after ready resolved/rejected
       this._destroyReason = destroyReason;
     }
     if (this._notificationSubscriptions) {
-      this._notificationSubscriptions.forEach(it => void it.end(destroyReason));
+      this._notificationSubscriptions.forEach(it => it.end(destroyReason));
       this._notificationSubscriptions = null;
     }
     // TODO await _flushDataRows
@@ -433,18 +435,20 @@ class Connection {
       this._responseRxs.shift().end(responseEndReason);
     }
     // TODO do CancelRequest to wake stuck connection which can continue executing ?
-    // return destroyReason; // user code can call .destroy and throw destroyReason in one line
+    return destroyReason; // user code can call .destroy and throw destroyReason in one line
   }
   async * notifications() {
-    if (!this._notificationSubscriptions) {
-      // TODO call stack
-      throw this._destroyReason || Error('cannot receive notifications on destroyed connection');
+    if (!this._tx) {
+      throw Error('connection destroyed', { cause: this._destroyReason });
     }
     const subscriptions = this._notificationSubscriptions;
     const nsub = new Channel();
     subscriptions.add(nsub);
     try {
-      yield * nsub;
+      const error = yield * nsub;
+      if (error) {
+        throw Error('postgres notification stream broken', { cause: error });
+      }
     } finally {
       subscriptions.delete(nsub);
     }
@@ -820,7 +824,7 @@ class Connection {
       return;
     }
     await this._fwdBackendMessage(m)
-    this._responseRxs.shift().end(null, this._lastErrorResponse);
+    this._responseRxs.shift().end(this._lastErrorResponse);
     this._lastErrorResponse = null;
   }
 
@@ -1642,7 +1646,7 @@ class ReplicationMessageReader extends MessageReader {
 }
 
 // https://www.postgresql.org/docs/14/protocol-logicalrep-message-formats.html
-class PgoutputMessageReader extends ReplicationMessageReader  {
+class PgoutputMessageReader extends ReplicationMessageReader {
   constructor({ data, lsn, endLsn, time }, relationCache, typeCache) {
     super(data);
     this._relationCache = relationCache;
@@ -2069,7 +2073,6 @@ class Channel {
   constructor() {
     this._buf = [];
     this._result = undefined;
-    this._error = null;
     this._ended = false;
     this._resolveDrained = _ => _;
     this._resolvePushed = _ => _;
@@ -2095,11 +2098,10 @@ class Channel {
     this._resolvePushed();
     return this._whenDrained;
   }
-  end(error, result) {
+  end(result) {
     if (this._ended) {
       throw Error('already ended');
     }
-    this._error = error;
     this._result = result;
     this._ended = true;
     this._resolvePushed();
@@ -2114,9 +2116,6 @@ class Channel {
         yield * this._buf; // FIXME can stuck for a long time when push/next phase are not in sync
         this._buf = [];
         this._resolveDrained();
-        if (this._error) {
-          throw this._error; // TODO rethrow nested to save callstack ?
-        }
         if (this._ended) {
           return this._result;
         }

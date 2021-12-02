@@ -1060,8 +1060,9 @@ Deno.test('pool should prevent idle in trasaction', async _ => {
     const q2 = Promise.resolve(pool.query(/*sql*/ `select 1;`));
     q2.catch(Boolean);
 
-    await assertRejects(_ => q1, Error, 'this query lefts pooled connection in transaction');
-    await assertRejects(_ => q2, Error, 'pooled connection left in transaction');
+
+    await assertRejects(_ => q1, Error, 'pooled connection left in transaction');
+    await assertRejects(_ => q2, Error, 'postgres query failed');
 
     // poisoned connection should be destroyed and forgotten in this event loop iteration
     // so fresh connection should be created and no errors expected
