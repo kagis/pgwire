@@ -1,6 +1,6 @@
-import { assertEquals, assertNotEquals, assertMatch, assertRejects } from 'https://deno.land/std@0.112.0/testing/asserts.ts';
-import { delay } from 'https://deno.land/std@0.112.0/async/delay.ts';
-// import { readAll, readerFromIterable, copy } from 'https://deno.land/std@0.106.0/io/mod.ts';
+import { assertEquals, assertNotEquals, assertMatch, assertRejects } from 'https://deno.land/std@0.116.0/testing/asserts.ts';
+import { delay } from 'https://deno.land/std@0.116.0/async/delay.ts';
+import { readAll, readerFromIterable, copy } from 'https://deno.land/std@0.116.0/io/mod.ts';
 import { pgconnect, pgpool } from './mod.js';
 
 Deno.test('hello', async _ => {
@@ -217,20 +217,6 @@ Deno.test('empty query', async _ => {
 //   await conn.end();
 // });
 
-Deno.test('copy', async _ => {
-  const conn = await pgconnect('postgres://postgres:qwerty@127.0.0.1:5432/postgres');
-  try {
-    const copyUpstream = conn.query({
-      statement: /*sql*/ `copy (select 'hello' from generate_series(1, 2)) to stdout`,
-    });
-    const copyDump = await readAll(readerFromIterable(copyUpstream));
-    const copyDumpS = new TextDecoder().decode(copyDump);
-    assertEquals(copyDumpS, 'hello\nhello\n');
-  } finally {
-    await conn.end();
-  }
-});
-
 
 
 
@@ -290,30 +276,20 @@ Deno.test('copy', async _ => {
 // });
 
 
-Deno.test('connection with unexisting user', async _ => {
-  const { scalar: userExists } = await (
-    pgpool('postgres://postgres:secret@127.0.0.1:5432/postgres')
-    .query(/*sql*/ `select exists(select 1 from pg_user where usename = 'unknown')`)
-  );
-  assertEquals(userExists, false);
+Deno.test('connect with unexisting user', async _ => {
+  // const { scalar: userExists } = await (
+  //   pgpool('postgres://postgres:secret@127.0.0.1:5432/postgres')
+  //   .query(/*sql*/ `select exists(select from pg_user where usename = 'unknown')`)
+  // );
+  // assertEquals(userExists, false);
   await assertRejects(
-    _ => pgconnect('postgres://unknown:invalid@127.0.0.1:5432/postgres'),
+    _ => pgconnect('postgres://unknown@127.0.0.1:5432/postgres'),
     Error,
     '[PGERR_28000]',
   );
 });
 
-Deno.test('new connection per request when poolMaxConnection is unset', async () => {
-  const pg = pgpool('postgres://postgres:secret@127.0.0.1:5432/postgres');
-  const { scalar: pid } = await pg.query(/*sql*/ `select pg_backend_pid()::text`);
-  assertMatch(pid, /^\d+$/);
-  const { scalar: terminated } = await pg.query(/*sql*/ `select pg_terminate_backend(${pid})::text`);
-  assertEquals(terminated, 'false');
-});
-
-
-
-Deno.test('parallel queries', async _ => {
+Deno.test('concurent queries', async _ => {
   const conn = await pgconnect('postgres://postgres@127.0.0.1:5432/postgres');
   try {
     const [{ scalar: r1 }, { scalar: r2 }] = await Promise.all([
@@ -351,9 +327,9 @@ Deno.test('extended copy from stdin', async _ => {
 Deno.test('simple copy in', async () => {
   const pg = pgpool('postgres://postgres:secret@127.0.0.1:5432/postgres');
   const { rows } = await pg.query(/*sql*/ `
-    CREATE TEMP TABLE test(foo TEXT, bar TEXT);
-    COPY test FROM STDIN;
-    SELECT * FROM test;
+    create temp table test(foo text, bar text);
+    copy test from stdin;
+    select * from test;
   `, {
     stdin: ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode),
   });
@@ -429,12 +405,12 @@ Deno.test('simple copy in missing', async () => {
 
 Deno.test('row decode simple', async () => {
   const pg = pgpool('postgres://postgres:secret@127.0.0.1:5432/postgres');
-  const { rows } = await pg.query(/*sql*/ `
+  const { rows } = await pg.query(String.raw /*sql*/ `
     SELECT null,
       true, false,
       'hello'::text,
       'hello'::varchar(100),
-      '\\xcafebabe'::bytea,
+      '\xcafebabe'::bytea,
       42::int2, -42::int2,
       42::int4, -42::int4,
       42::int8, -42::int8,
@@ -478,15 +454,15 @@ Deno.test('row decode simple', async () => {
 Deno.test('row decode extended', async () => {
   const pg = pgpool('postgres://postgres:secret@127.0.0.1:5432/postgres');
   const { rows } = await pg.query({
-    statement: /*sql*/ `
+    statement: String.raw /*sql*/ `
       SELECT null, true, false,
         'hello'::text,
         'hello'::varchar(100),
-        '\\xcafebabe'::bytea,
+        '\xcafebabe'::bytea,
         42::int2, -42::int2,
         42::int4, -42::int4,
         42::int8, -42::int8,
-        36.599998474121094::float4, -36.599998474121094::float4,
+        36.6::float4, -36.6::float4,
         36.6::float8, -36.6::float8,
         jsonb_build_object('hello', 'world', 'num', 1),
         json_build_object('hello', 'world', 'num', 1),
@@ -508,7 +484,7 @@ Deno.test('row decode extended', async () => {
     42, -42,
     42, -42,
     42n, -42n,
-    36.599998474121094, -36.599998474121094,
+    36.6, -36.6,
     36.6, -36.6,
     { hello: 'world', num: 1 },
     { hello: 'world', num: 1 },
@@ -861,17 +837,17 @@ Deno.test('logical replication', async _ => {
 Deno.test('parse bind execute', async () => {
   const pg = pgpool('postgres://postgres:secret@127.0.0.1:5432/postgres');
   const { scalar } = await pg.query({
-    op: 'parse',
+    message: 'Parse',
     statement: /*sql*/ `SELECT $1`,
     paramTypes: ['int4'],
   }, {
-    op: 'bind',
+    message: 'Bind',
     params: [{
       type: 'int4',
       value: 1,
     }],
   }, {
-    op: 'execute',
+    message: 'Execute',
   });
   assertEquals(scalar, 1);
 });
@@ -1050,6 +1026,14 @@ Deno.test('pool should reuse connection', async _ => {
 //   }
 // });
 
+Deno.test('pool should do connection per query when poolSize is unset', async () => {
+  const pg = pgpool('postgres://postgres:secret@127.0.0.1:5432/postgres');
+  const { scalar: pid } = await pg.query(/*sql*/ `select pg_backend_pid()`);
+  assertEquals(typeof pid, 'number');
+  const { scalar: terminated } = await pg.query(/*sql*/ `select pg_terminate_backend(${pid})`);
+  assertEquals(terminated, false);
+});
+
 Deno.test('pool should prevent idle in trasaction', async _ => {
   const pool = pgpool('postgres://postgres@127.0.0.1:5432/postgres?.poolSize=1');
   try {
@@ -1060,19 +1044,18 @@ Deno.test('pool should prevent idle in trasaction', async _ => {
     const q2 = Promise.resolve(pool.query(/*sql*/ `select 1;`));
     q2.catch(Boolean);
 
-
     await assertRejects(_ => q1, Error, 'pooled connection left in transaction');
     await assertRejects(_ => q2, Error, 'postgres query failed');
 
-    // poisoned connection should be destroyed and forgotten in this event loop iteration
-    // so fresh connection should be created and no errors expected
+    // poisoned connection should be already destroyed and forgotten
+    // in this event loop iteration and fresh connection should be created
+    // so no errors expected
     const { scalar } = await pool.query(/*sql*/ `select 'hello'`);
     assertEquals(scalar, 'hello');
   } finally {
     await pool.end();
   }
 });
-
 
 // TODO it fails
 Deno.test('pool should auto rollback', async _ => {
@@ -1089,8 +1072,8 @@ Deno.test('pool should auto rollback', async _ => {
     const q2 = Promise.resolve(pool.query(/*sql*/ `commit;`));
     q2.catch(Boolean);
 
-    await assertRejects(_ => q1, Error, 'this query lefts pooled connection in transaction');
-    await assertRejects(_ => q2, Error, 'pooled connection left in transaction');
+    await assertRejects(_ => q1, Error, 'pooled connection left in transaction');
+    await assertRejects(_ => q2, Error, 'postgres query failed');
 
     // if first query was not rollbacked then next query will fail
     await pool.query(/*sql*/ `
@@ -1115,58 +1098,58 @@ Deno.test('pool should auto rollback', async _ => {
 //   }
 // });
 
-Deno.test('idle timeout', async () => {
-  const conn = await pgwire.connect(process.env.POSTGRES, {
-    idleTimeout: 200,
-  });
-  try {
-    await new Promise(resolve => conn.on('close', resolve));
-  } finally {
-    conn.end(); // close manually if fail
-  }
-});
+// Deno.test('idle timeout', async () => {
+//   const conn = await pgwire.connect(process.env.POSTGRES, {
+//     idleTimeout: 200,
+//   });
+//   try {
+//     await new Promise(resolve => conn.on('close', resolve));
+//   } finally {
+//     conn.end(); // close manually if fail
+//   }
+// });
 
-Deno.test('idle timeout 2', async () => {
-  const conn = await pgwire.connect(process.env.POSTGRES, {
-    idleTimeout: 200,
-  });
-  await Promise.all([
-    conn.query(/*sql*/ `SELECT`),
-    conn.query(/*sql*/ `SELECT`),
-    conn.query(/*sql*/ `SELECT`),
-  ]);
-  try {
-    await Promise.race([
-      new Promise(resolve => conn.on('close', resolve)),
-      new Promise((_, reject) => setTimeout(reject, 400, Error(
-        'Connection was not closed after idleTimeout',
-      ))),
-    ]);
-  } finally {
-    conn.end(); // close manually if fail
-  }
-});
+// Deno.test('idle timeout 2', async () => {
+//   const conn = await pgwire.connect(process.env.POSTGRES, {
+//     idleTimeout: 200,
+//   });
+//   await Promise.all([
+//     conn.query(/*sql*/ `SELECT`),
+//     conn.query(/*sql*/ `SELECT`),
+//     conn.query(/*sql*/ `SELECT`),
+//   ]);
+//   try {
+//     await Promise.race([
+//       new Promise(resolve => conn.on('close', resolve)),
+//       new Promise((_, reject) => setTimeout(reject, 400, Error(
+//         'Connection was not closed after idleTimeout',
+//       ))),
+//     ]);
+//   } finally {
+//     conn.end(); // close manually if fail
+//   }
+// });
 
-Deno.test('idle timeout 3', async () => {
-  const conn = await pgwire.connect(process.env.POSTGRES, {
-    idleTimeout: 200,
-  });
-  await conn.query(/*sql*/ `SELECT`);
-  await new Promise(resolve => setTimeout(resolve, 50));
-  await conn.query(/*sql*/ `SELECT`);
-  await new Promise(resolve => setTimeout(resolve, 50));
-  await conn.query(/*sql*/ `SELECT`);
-  try {
-    await Promise.race([
-      new Promise(resolve => conn.on('close', resolve)),
-      new Promise((_, reject) => setTimeout(reject, 400, Error(
-        'Connection was not closed after idleTimeout',
-      ))),
-    ]);
-  } finally {
-    conn.end();
-  }
-});
+// Deno.test('idle timeout 3', async () => {
+//   const conn = await pgwire.connect(process.env.POSTGRES, {
+//     idleTimeout: 200,
+//   });
+//   await conn.query(/*sql*/ `SELECT`);
+//   await new Promise(resolve => setTimeout(resolve, 50));
+//   await conn.query(/*sql*/ `SELECT`);
+//   await new Promise(resolve => setTimeout(resolve, 50));
+//   await conn.query(/*sql*/ `SELECT`);
+//   try {
+//     await Promise.race([
+//       new Promise(resolve => conn.on('close', resolve)),
+//       new Promise((_, reject) => setTimeout(reject, 400, Error(
+//         'Connection was not closed after idleTimeout',
+//       ))),
+//     ]);
+//   } finally {
+//     conn.end();
+//   }
+// });
 
 Deno.test('pool idle timeout', async () => {
   const pool = pgpool('postgres://postgres@127.0.0.1:5432/postgres?.poolSize=1&.poolIdleTimeout=1000');
@@ -1233,30 +1216,33 @@ Deno.test('unix socket', async () => {
   }
 });
 
-Deno.test('copy to file', async () => {
-  const client = pgwire.pool(process.env.POSTGRES);
-  const resp = client.query(/*sql*/ `COPY (VALUES (1, 2)) TO STDOUT`);
-  const fw = fs.createWriteStream('/tmp/test');
-  await pipeline(resp, fw);
-  const content = fs.readFileSync('/tmp/test', { encoding: 'utf-8' });
-  assert.deepStrictEqual(content, '1\t2\n');
+Deno.test('copy to stdout', async _ => {
+  const conn = await pgconnect('postgres://postgres:qwerty@127.0.0.1:5432/postgres');
+  try {
+    const stdout = conn.query(/*sql*/ `
+      copy (values (1, 'hello'), (2, 'world')) to stdout
+    `);
+    const dump = await readAll(readerFromIterable(stdout));
+    const dumps = new TextDecoder().decode(dump);
+    assertEquals(dumps, '1\thello\n2\tworld\n');
+  } finally {
+    await conn.end();
+  }
 });
 
-Deno.test('copy to stdout', async () => {
-  const client = pgwire.pool(process.env.POSTGRES);
-  const resp = client.query(/*sql*/ `COPY (VALUES (1, 2)) TO STDOUT`);
-  const chunks = await readAllChunks(resp);
-  assert.deepStrictEqual(String(Buffer.concat(chunks)), '1\t2\n');
-});
-
-Deno.test('copy to stdout 2', async () => {
-  const client = pgwire.pool(process.env.POSTGRES);
-  const resp = client.query(/*sql*/ `
-    COPY (VALUES (1, 2)) TO STDOUT;
-    COPY (VALUES (3, 4)) TO STDOUT;
-  `);
-  const chunks = await readAllChunks(resp);
-  assert.deepStrictEqual(String(Buffer.concat(chunks)), '1\t2\n3\t4\n');
+Deno.test('copy to stdout multi', async () => {
+  const conn = await pgconnect('postgres://postgres:qwerty@127.0.0.1:5432/postgres');
+  try {
+    const stdout = conn.query(/*sql*/ `
+      copy (values (1, 'hello'), (2, 'world')) to stdout;
+      copy (values (3, 'foo'), (4, 'bar')) to stdout;
+    `);
+    const dump = await readAll(readerFromIterable(stdout));
+    const dumps = new TextDecoder().decode(dump);
+    assertEquals(dumps, '1\thello\n2\tworld\n3\tfoo\n4\tbar\n');
+  } finally {
+    await conn.end();
+  }
 });
 
 Deno.test('stream', async () => {
@@ -1321,9 +1307,11 @@ Deno.test('cancel', async _ => {
     assertEquals(count, 1000);
     const cancelDuration = Date.now() - cancelStartTime;
     if (cancelDuration > 1000) {
-      throw Error(`cancel is too slow (${cancelDuration}ms) , seems that cancel has no effect`);
+      throw Error(`cancel is too slow (${cancelDuration}ms), seems that cancel has no effect`);
     }
-
+    // connection should be usable
+    const { scalar } = await conn.query(/*sql*/ `select 'hello'`);
+    assertEquals(scalar, 'hello');
   } finally {
     await conn.end();
   }

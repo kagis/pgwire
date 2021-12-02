@@ -181,7 +181,8 @@ class Pool {
       // TODO not wait
       // but pgbouncer does not allow async Terminate anyway.
       // May be other poolers do
-      return conn.end();
+      await conn.end();
+      return;
     }
 
     if (conn.inTransaction) {
@@ -215,6 +216,7 @@ class Pool {
     conn.end();
   }
   _onConnectionEnded(conn) {
+    clearTimeout(conn._poolTimeoutId);
     this._connections.delete(conn);
   }
   /** exports pgwire.pgerrcode for cases when Pool is injected as dependency
@@ -387,8 +389,8 @@ class Connection {
     // if (!this._closed) {
     //   this._closed = true;
     //   this._resolveClosed();
-    // TODO end() should immediatly prevent new queries
-    // FIXME delays whenEnded resolution
+    // TODO(test) end() should immediatly prevent new queries
+    // FIXME(test) delays whenEnded resolution
     // await this._whenReady;
     if (this._tx) {
       // TODO
@@ -403,7 +405,6 @@ class Connection {
     }
     this._rejectReady(Error('connection ended'));
 
-    // }
     // TODO destroy will cause error
     await this._whenDestroyed.catch(warnError); // TODO ignore error
   }
@@ -557,7 +558,7 @@ class Connection {
         // or get rid of parallel piping
 
         iter.return().catch(warnError); // TODO is this ok to not await ?
-        // there are limmited types of iterators passed in _sendMessage
+        // there are limited types of iterators passed in _sendMessage
         // - startTx Channel, queryTx Channel and copyWrap iterator
         // no one of them will throw error
       }
@@ -645,7 +646,7 @@ class Connection {
       row[i] = (
         binary
           // do not valbuf.slice() because nodejs Buffer .slice does not copy
-          // TOFO but we not going to reveice Buffer here ?
+          // TODO but we not going to receive Buffer here ?
           ? Uint8Array.prototype.slice.call(valbuf)
           : typeDecode(this._clientTextDecoder.decode(valbuf), typeid)
       );
@@ -881,8 +882,13 @@ function warnError(err) {
 
 // there is no strong need to use generators to create message sequence,
 // but generators help to generate conditional messages in more readable way
-function * simpleQuery(script, { stdins = [] } = {}, stdinAbortSignal, readyForQueryLock) {
+function * simpleQuery(script, { stdin, stdins = [] } = {}, stdinAbortSignal, readyForQueryLock) {
   yield new Query(script);
+  // TODO handle case when number of stdins is unknown
+  // should block tx and wait for CopyInResponse/CopyBothResponse
+  if (stdin) {
+    yield wrapCopyData(stdin, stdinAbortSignal);
+  }
   for (const stdin of stdins) {
     yield wrapCopyData(stdin, stdinAbortSignal);
   }
@@ -933,8 +939,19 @@ function * extendedQueryParse({ statement, statementName, paramTypes = [] }) {
   yield new Parse({ statement, statementName, paramTypes });
 }
 function * extendedQueryBind({ portal, statementName, binary, params = [] }) {
-  params = params.map(({ value, type }) => typeEncode(value, typeResolve(type)));
+  params = params.map(encodeParam);
   yield new Bind({ portal, statementName, binary, params });
+
+  function encodeParam({ value, type}) {
+    if (value instanceof Uint8Array) {
+      // treat Uint8Array values as already encoded,
+      // so user can receive value with unknown type as Uint8Array
+      // from extended .query and pass it back as parameter
+      return value;
+      // it also "encodes" bytea in efficient way instead of hex
+    }
+    return typeEncode(value, typeResolve(type));
+  }
 }
 function * extendedQueryExecute({ portal, stdin, limit }, stdinAbortSignal) {
   // TODO write test to explain why
@@ -1952,23 +1969,14 @@ function typeResolve(idOrName) {
   throw Error('unknown builtin type name ' + JSON.stringify(idOrName));
 }
 
-// TODO bytea[]
 function typeEncode(value, typeid) {
-  if (value instanceof Uint8Array) {
-    // treat Uint8Array values as already encoded,
-    // so user can receive value with unknown type as Uint8Array
-    // from extended .query and pass it back as parameter
-    return value;
-    // it also handles bytea
-  }
   switch (typeid) { // add line here when register new type (optional)
     case  114 /* json    */:
-    case 3802 /* jsonb   */:
-      return JSON.stringify(value);
+    case 3802 /* jsonb   */: return JSON.stringify(value);
+    case   17 /* bytea   */: return typeEncodeBytea(value); // bytea encoder is used only for array element encoding
   }
   let elemTypeid = typeOfElem(typeid);
   if (elemTypeid) {
-    // check if pgencode(value[0]) instanceof uint8Array then do encodeArrayBin otherwise do encodeArrayText
     return typeEncodeArray(value, elemTypeid);
   }
   return String(value);
@@ -2033,7 +2041,7 @@ function typeDecodeArray(text, elemTypeid) {
 // TODO array_nulls https://www.postgresql.org/docs/14/runtime-config-compatible.html#id-1.6.7.16.2.2.1.1.3
 function typeEncodeArray(arr, elemTypeid) {
   return JSON.stringify(arr, function (_, elem) {
-    return this == arr && elem != null ? encodeElem(elem, elemTypeid) : elem;
+    return this == arr && elem != null ? typeEncode(elem, elemTypeid) : elem;
   }).replace(/^\[(.*)]$/, '{$1}');
 }
 
@@ -2056,6 +2064,10 @@ function typeDecodeBytea(text) {
     Function(text.replace('"', '\\"').replace(/.*/, 'return "$&"')).call(),
     x => x.charCodeAt(),
   );
+}
+
+function typeEncodeBytea(bytes) {
+  return '\\x' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function lsnMakeComparable(text) {
