@@ -265,7 +265,11 @@ it('row decode simple', async () => {
       ARRAY['"quoted"', '{string}', '"{-,-}"'],
       ARRAY[[1, 2], [3, 4]],
       '[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}'::int[],
-      ARRAY[1, NULL, 2]
+      ARRAY[1, NULL, 2],
+      '2021-12-21 18:00:00.000 +0300'::timestamptz,
+      ARRAY['2021-12-21 18:00:00.000 +0300'::timestamptz],
+      '2021-12-21 18:00:00.000'::timestamp,
+      ARRAY['2021-12-21 18:00:00.000'::timestamp]
   `);
   assert.deepStrictEqual(rows, [[
     null,
@@ -288,6 +292,10 @@ it('row decode simple', async () => {
     [[1, 2], [3, 4]],
     [[[1, 2, 3], [4, 5, 6]]],
     [1, null, 2],
+    new Date('2021-12-21 15:00:00+00'),
+    [new Date('2021-12-21 15:00:00+00')],
+    new Date('2021-12-21 18:00:00+00'),
+    [new Date('2021-12-21 18:00:00+00')],
   ]]);
 });
 
