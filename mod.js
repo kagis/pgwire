@@ -15,8 +15,8 @@ export async function pgconnect(...options) {
   // const connectRetry = [1, '1', 'on', 'true', true].includes(connectRetryRaw);
   const startTime = Date.now();
   for (;;) {
+    const conn = new Connection(connOptions);
     try {
-      const conn = new Connection(connOptions);
       await conn.whenReady;
       return conn;
     } catch (err) {
@@ -28,7 +28,15 @@ export async function pgconnect(...options) {
         await new Promise(resolve => setTimeout(resolve, 1000));
         continue;
       }
-      throw err;
+
+      // const { stack } = Object.assign(Error(), { name: '\n    ...' });
+      // err.stack += stack;
+      // console.log({ stack });
+      // throw err;
+
+      // wrap error to keep stacktrace
+      // TODO fix PgError props
+      throw Error(err.message, { cause: err });
     }
   }
 }
@@ -93,7 +101,12 @@ function computeConnectionOptions([uriOrObj, ...rest]) {
 }
 
 export function pgerrcode(err) {
-  return err?.[kErrorCode];
+  while (!err) {
+    if (err[kErrorCode]) {
+      return err[kErrorCode];
+    }
+    err = err.cause;
+  }
 }
 
 const kErrorCode = Symbol('kErrorCode');
@@ -273,7 +286,13 @@ class Connection {
     this._whenReady.catch(warnError);
     this._saslScramSha256 = null;
     this._destroyReason = null;
-    this._whenDestroyed = this._startup(startupOptions); // run background message processing
+    // run background message processing
+    // create StartupMessage here to validate startupOptions in constructor call stack
+    this._whenDestroyed = this._startup(new StartupMessage({
+      ...startupOptions,
+      'client_encoding': 'UTF8', // TextEncoder supports UTF8 only, so hardcode and force UTF8
+      // client_encoding: 'win1251',
+    }));
   }
   _whenReadyExecutor(resolve, reject) {
     // If ready is resolved then it still can be rejected.
@@ -512,15 +531,11 @@ class Connection {
     }
     return socket;
   }
-  async _startup(startupOptions) {
+  async _startup(startupmsg) {
     let caughtError;
     try {
       this._socket = await this._createSocket();
-      this._startTx.push(new StartupMessage({
-        ...startupOptions,
-        'client_encoding': 'UTF8', // TextEncoder supports UTF8 only, so hardcode and force UTF8
-        // client_encoding: 'win1251',
-      }));
+      this._startTx.push(startupmsg);
       await Promise.all([ // allSettled ?
         // TODO при досрочном завершении одной из функций как будем завершать вторую ?
         // _sendMessages надо завершать потому что она может пайпить stdin,
@@ -1122,6 +1137,15 @@ class ReplicationStream {
       for (let chunk, done;;) {
         ({ value: chunk, done } = await this._rx.next());
         if (done) break;
+        // если при старте репликации случилась ошибка, то
+        // в поток будет сначала отдано ReadyForQuery,
+        // и только следующий .next вернет ошибку.
+        // Это неудобно когда надо выполнить какойто код после успешного старта репликации.
+        // Мы могли бы выполнять такой код в первой итерации цикла,
+        // но не можем изза ReadyForQuery
+        // TODO возможно для обычных стримовых запросов это тоже нужно
+        if (chunk.tag == 'ReadyForQuery') continue;
+
         const xlogMessages = [];
         for (const copyData of chunk.rows) {
           const replmsgReader = new ReplicationMessageReader(copyData);
