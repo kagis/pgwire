@@ -692,7 +692,7 @@ class Connection {
 
     if (this._copyBuf.length < this._copyBufPos + copyData.length) { // grow _copyBuf
       const oldbuf = this._copyBuf;
-      this._copyBuf = new Uint8Array(oldbuf.length * 2);
+      this._copyBuf = new Uint8Array(oldbuf.length * 2 + copyData.length);
       this._copyBuf.set(oldbuf);
     }
     this._copyBuf.set(copyData, this._copyBufPos);
@@ -1219,6 +1219,7 @@ async function * iterBackendMessages(socket) {
         throw Error('invalid backend message size');
       }
       const inext = isize + size;
+      // TODO use grow hint
       if (nbuf < inext) break; // incomplete message
       const msgreader = new BackendMessageReader(buf.subarray(ipayload, inext))
       const message = msgreader.readBackendMessage(buf[itag]);
