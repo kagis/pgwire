@@ -1,8 +1,15 @@
-FROM denoland/deno:alpine-1.16.3
+FROM denoland/deno:alpine-1.17.2
 
 RUN set -x \
  && cd /tmp \
- && wget -qO- https://github.com/postgres/postgres/archive/REL_14_0.tar.gz | tar xz \
+ && wget -O- https://github.com/postgres/postgres/archive/REL_14_1.tar.gz | tar xz \
+ && apk add --no-cache \
+  libxml2 \
+  libxslt \
+  json-c \
+  icu \
+  openssl \
+  llvm10 \
  && apk add --no-cache --virtual .build-deps \
   build-base \
   linux-headers \
@@ -33,14 +40,7 @@ RUN set -x \
  && make \
  && make install \
  && apk del .build-deps \
- && rm -r /tmp/* \
- && apk add --no-cache \
-  libxml2 \
-  libxslt \
-  json-c \
-  icu \
-  openssl \
-  llvm10
+ && rm -r /tmp/*
 
 ENV PGDATA=/var/lib/postgresql/data
 # VOLUME $PGDATA

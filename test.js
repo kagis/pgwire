@@ -1,119 +1,106 @@
-import { assertEquals, assertNotEquals, assertMatch, assertRejects } from 'https://deno.land/std@0.116.0/testing/asserts.ts';
-import { delay } from 'https://deno.land/std@0.116.0/async/delay.ts';
-import { readAll, readerFromIterable, copy } from 'https://deno.land/std@0.116.0/io/mod.ts';
+import { assertEquals, assertNotEquals, assertRejects } from 'https://deno.land/std@0.120.0/testing/asserts.ts';
+import { delay } from 'https://deno.land/std@0.120.0/async/delay.ts';
+import { readAll, readerFromIterable } from 'https://deno.land/std@0.120.0/streams/conversion.ts';
 import { pgconnect, pgpool } from './mod.js';
-
-Deno.test('hello', async _ => {
-  const conn = await pgconnect('postgres://postgres@127.0.0.1:5432/postgres');
-  try {
-    const { scalar } = await conn.query(/*sql*/ `select 'hello'`);
-    assertEquals(scalar, 'hello');
-  } finally {
-    await conn.end();
-  }
-});
 
 Deno.test('simple proto', async _ => {
   const conn = await pgconnect('postgres://postgres@127.0.0.1:5432/postgres');
   try {
-    const result = await conn.query(/*sql*/ `select 'hello'`);
-    assertEquals(result, {
-      inTransaction: false,
-      rows: [['hello']],
-      empty: false,
-      suspended: false,
-      scalar: 'hello',
-      command: 'SELECT 1',
-      // notices: [],
-      results: [{
-        rows: [['hello']],
-        scalar: 'hello',
-        command: 'SELECT 1',
-        // notices: [],
-        empty: false,
-        suspended: false,
-      }],
-    });
+    const res = await conn.query(/*sql*/ `select 'hello' a`);
+    console.log(JSON.stringify(res));
+    assertEquals(Array.from(res), ['hello']);
+    assertEquals(res.scalar, 'hello');
+    assertEquals(res.rows, [['hello']]);
+    assertEquals(res.command, 'SELECT 1');
+    assertEquals(res.empty, false);
+    assertEquals(res.suspended, false);
+    assertEquals(res.notices, []);
+    assertEquals(res.columns, [{
+      binary: 0,
+      name: 'a',
+      tableColumn: 0,
+      tableOid: 0,
+      typeMod: -1,
+      typeOid: 25,
+      typeSize: 65535,
+    }]);
   } finally {
     await conn.end();
   }
 });
+
+// Deno.test('scalar accessor', async _ => {
+//   const conn = await pgconnect('postgres://postgres@127.0.0.1:5432/postgres');
+//   try {
+//     const { scalar } = await conn.query(/*sql*/ `
+//       select 'a';
+//       select 'hello', 'b';
+//     `);
+//     assertEquals(scalar, 'hello');
+//   } finally {
+//     await conn.end();
+//   }
+// });
 
 Deno.test('simple proto multi statement', async _ => {
   const conn = await pgconnect('postgres://postgres@127.0.0.1:5432/postgres');
   try {
-    const result = await conn.query(/*sql*/ `
+    const resultset = await conn.query(/*sql*/ `
       values ('a'), ('b');
       values ('c', 'd');
     `);
-    assertEquals(result, {
-      inTransaction: false,
+    assertEquals(Array.from(resultset), [{
+      scalar: 'a',
+      first: ['a'],
+      rows: [['a'], ['b']],
+      command: 'SELECT 2',
       // notices: [],
-      rows: [['c', 'd']],
-      scalar: 'c',
-      command: 'SELECT 1',
       empty: false,
       suspended: false,
-      results: [{
-        rows: [['a'], ['b']],
-        command: 'SELECT 2',
-        // notices: [],
-        scalar: 'a',
-        empty: false,
-        suspended: false,
-      }, {
-        rows: [['c', 'd']],
-        command: 'SELECT 1',
-        // notices: [],
-        scalar: 'c',
-        empty: false,
-        suspended: false,
-      }],
-    });
+    }, {
+      scalar: 'c',
+      first: ['c', 'd'],
+      rows: [['c', 'd']],
+      command: 'SELECT 1',
+      // notices: [],
+      empty: false,
+      suspended: false,
+    }]);
   } finally {
     await conn.end();
   }
 });
 
-Deno.test('extended protocol', async _ => {
-  const conn = await pgconnect('postgres://postgres:qwerty@127.0.0.1:5432/postgres');
-  try {
-    const { scalar } = await conn.query({
-      statement: /*sql*/ `select 'hello'`
-    });
-    assertEquals(scalar, 'hello');
-  } finally {
-    await conn.end();
-  }
-});
+// Deno.test('extended protocol', async _ => {
+//   const conn = await pgconnect('postgres://postgres:qwerty@127.0.0.1:5432/postgres');
+//   try {
+//     const { scalar } = await conn.query({
+//       statement: /*sql*/ `select 'hello'`
+//     });
+//     assertEquals(scalar, 'hello');
+//   } finally {
+//     await conn.end();
+//   }
+// });
 
 Deno.test('extended proto', async _ => {
   const conn = await pgconnect('postgres://postgres@127.0.0.1:5432/postgres');
   try {
-    const result = await conn.query({
+    const resultset = await conn.query({
       statement: /*sql*/ `select $1`,
       params: [{
         type: 'text',
         value: 'hello',
       }],
     });
-    assertEquals(result, {
-      inTransaction: false,
+    assertEquals(Array.from(resultset), [{
       rows: [['hello']],
-      scalar: 'hello',
       command: 'SELECT 1',
+      scalar: 'hello',
+      notices: [],
       empty: false,
       suspended: false,
-      notices: [],
-      results: [{
-        rows: [['hello']],
-        command: 'SELECT 1',
-        scalar: 'hello',
-        notices: [],
-        empty: false,
-        suspended: false,
-      }],
-    });
+    }]);
   } finally {
     await conn.end();
   }
@@ -127,36 +114,27 @@ Deno.test('multi-statement extended query', async _ => {
     }, {
       statement: /*sql*/ `select 'b'`,
     });
-    assertEquals(result, {
-      inTransaction: false,
-      rows: [['b']],
-      scalar: 'b',
+    assertEquals(result, [{
+      rows: [['a']],
       command: 'SELECT 1',
+      scalar: 'a',
+      notices: [],
       empty: false,
       suspended: false,
+    }, {
+      rows: [['b']],
+      command: 'SELECT 1',
+      scalar: 'b',
       notices: [],
-      results: [{
-        rows: [['a']],
-        command: 'SELECT 1',
-        scalar: 'a',
-        notices: [],
-        empty: false,
-        suspended: false,
-      }, {
-        rows: [['b']],
-        command: 'SELECT 1',
-        scalar: 'b',
-        notices: [],
-        empty: false,
-        suspended: false,
-      }],
-    });
+      empty: false,
+      suspended: false,
+    }]);
   } finally {
     await conn.end();
   }
 });
 
-Deno.test('portal suspended', async _ => {
+Deno.test('suspended', async _ => {
   const conn = await pgconnect('postgres://postgres@127.0.0.1:5432/postgres');
   try {
     const { suspended } = await conn.query({
@@ -169,11 +147,13 @@ Deno.test('portal suspended', async _ => {
   }
 });
 
-Deno.test('empty query', async _ => {
+Deno.test('empty', async _ => {
   const conn = await pgconnect('postgres://postgres@127.0.0.1:5432/postgres');
   try {
-    const { empty } = await conn.query({ statement: /*sql*/ `` });
-    assertEquals(empty, true);
+    const { empty: emptySimple } = await conn.query(/*sql*/ ``);
+    assertEquals(emptySimple, true);
+    const { empty: emptyExtended } = await conn.query({ statement: /*sql*/ `` });
+    assertEquals(emptyExtended, true);
   } finally {
     await conn.end();
   }
@@ -211,11 +191,11 @@ Deno.test('empty query', async _ => {
 //   );
 // });
 
-// Deno.test('connection end idempotent', async _ => {
-//   const conn = pgconnect('postgres://postgres:qwerty@127.0.0.1:5432/postgres');
-//   await Promise.all([conn.end(), conn.end()]);
-//   await conn.end();
-// });
+Deno.test('connection end idempotent', async _ => {
+  const conn = await pgconnect('postgres://postgres:qwerty@127.0.0.1:5432/postgres');
+  await Promise.all([conn.end(), conn.end()]);
+  await conn.end();
+});
 
 
 
@@ -282,11 +262,8 @@ Deno.test('connect with unexisting user', async _ => {
   //   .query(/*sql*/ `select exists(select from pg_user where usename = 'unknown')`)
   // );
   // assertEquals(userExists, false);
-  await assertRejects(
-    _ => pgconnect('postgres://unknown@127.0.0.1:5432/postgres'),
-    Error,
-    '[PGERR_28000]',
-  );
+  const err = await pgconnect('postgres://unknown@127.0.0.1:5432/postgres').catch(Object);
+  assertEquals(err.name, 'PgError.28000');
 });
 
 Deno.test('concurent queries', async _ => {
@@ -500,52 +477,42 @@ Deno.test('row decode extended', async () => {
 });
 
 Deno.test('param explicit type', async () => {
-  const pg = pgpool('postgres://postgres:secret@127.0.0.1:5432/postgres');
-  const { rows: [row] } = await pg.query({
-    statement: /*sql*/ `
-      SELECT pg_typeof($1)::text, $1,
+  // const pg = pgpool('postgres://postgres:secret@127.0.0.1:5432/postgres');
+  const pg = await pgconnect('postgres://postgres:secret@127.0.0.1:5432/postgres?.debug=true');
+  try {
+    const [...row] = await pg.query({
+      statement: /*sql*/ `
+        select
+        pg_typeof($1)::text, $1,
         pg_typeof($2)::text, $2,
         pg_typeof($3)::text, $3->>'key',
-        pg_typeof($4)::text, $4::text,
+        pg_typeof($4)::text, encode($4, 'hex'),
         pg_typeof($5)::text, $5::text,
-        pg_typeof($6)::text, $6::varchar(100)
-    `,
-    params: [{
-      type: 'int4',
-      value: 1,
-    }, {
-      type: 'bool',
-      value: true,
-    }, {
-      type: 'jsonb',
-      value: {
-        key: 'hello',
-      },
-    }, {
-      type: 'text[]',
-      value: ['1', '2', '3', null],
-    }, {
-      type: 'bytea[]',
-      // value: ['x', 'y', 'z'], // FIXME handle non Uint8Arrays
-      value: [
-        new Uint8Array([0xca]),
-        new Uint8Array([0xfe]),
-        new Uint8Array([0xba]),
-        new Uint8Array([0xbe]),
+        pg_typeof($6)::text, $6::text,
+        pg_typeof($7)::text, $7::varchar(100)
+      `,
+      params: [
+        { type: 'int4', value: 1 },
+        { type: 'bool', value: true },
+        { type: 'jsonb', value: { key: 'hello' } },
+        { type: 'bytea', value: Uint8Array.of(0xca, 0xfe, 0xba, 0xbe) },
+        { type: 'text[]', value: ['1', '2', '3', null] },
+        { type: 'bytea[]', value: [0xca, 0xfe, 0xba, 0xbe].map(x => Uint8Array.of(x)) },
+        { type: 'varchar', value: 'hello' },
       ],
-    }, {
-      type: 'varchar',
-      value: 'hello',
-    }],
-  });
-  assertEquals(row, [
-    'integer', 1,
-    'boolean', true,
-    'jsonb', 'hello',
-    'text[]', '{1,2,3,NULL}',
-    'bytea[]', '{"\\\\xca","\\\\xfe","\\\\xba","\\\\xbe"}',
-    'character varying', 'hello',
-  ]);
+    });
+    assertEquals(row, [
+      'integer', 1,
+      'boolean', true,
+      'jsonb', 'hello',
+      'bytea', 'cafebabe',
+      'text[]', '{1,2,3,NULL}',
+      'bytea[]', '{"\\\\xca","\\\\xfe","\\\\xba","\\\\xbe"}',
+      'character varying', 'hello',
+    ]);
+  } finally {
+    await pg.end();
+  }
 });
 
 // Deno.test('listen/notify', async () => {
@@ -584,7 +551,7 @@ Deno.test('param explicit type', async () => {
 //   }
 // });
 
-Deno.test('logical replication', async _ => {
+Deno.test('logical_replication', async _ => {
   const conn = await pgconnect('postgres://postgres:secret@127.0.0.1:5432/postgres?replication=database');
   try {
     await conn.query(/*sql*/ `
@@ -617,6 +584,211 @@ Deno.test('logical replication', async _ => {
     await conn.end();
   }
 });
+
+Deno.test('logical_replication_pgoutput', async t => {
+  const conn = await pgconnect('postgres://postgres:secret@127.0.0.1:5432/postgres?replication=database&.debug=true');
+  try {
+    await Promise.all([
+      conn.query(/*sql*/ `create table pgo1rel(id int not null primary key, val text, note text)`),
+      conn.query(/*sql*/ `alter table pgo1rel alter column note set storage external`),
+      conn.query(/*sql*/ `create publication pgo1pub for table pgo1rel`),
+      conn.query(/*sql*/ `select pg_replication_origin_create('pgo1origin')`),
+      conn.query(`CREATE_REPLICATION_SLOT pgo1slot TEMPORARY LOGICAL pgoutput`),
+      // conn.query(/*sql*/ `select pg_replication_origin_session_setup('pgo1origin')`),
+      // generate changes
+      conn.query(/*sql*/ `begin`),
+      conn.query(/*sql*/ `insert into pgo1rel select 1, 'foo', repeat('_toasted_', 10000)`),
+      // toasted column unchanged, after.note == undefined expected
+      conn.query(/*sql*/ `update pgo1rel set val = 'bar'`),
+      // key changed
+      conn.query(/*sql*/ `update pgo1rel set id = 2`),
+      conn.query(/*sql*/ `delete from pgo1rel`),
+      conn.query(/*sql*/ `alter table pgo1rel replica identity full`),
+      conn.query(/*sql*/ `insert into pgo1rel select 1, 'foo', repeat('_toasted_', 10000)`),
+      // toasted column unchanged, but replica identity is full, so after.note == '_toasted_....' expected
+      conn.query(/*sql*/ `update pgo1rel set val = 'bar'`),
+      conn.query(/*sql*/ `delete from pgo1rel`),
+      conn.query(/*sql*/ `truncate pgo1rel`),
+      conn.query(/*sql*/ `select set_config('pgo1test.message_lsn', lsn::text, false) from pg_logical_emit_message(true, 'testmessage', 'hello world'::bytea) lsn`),
+      conn.query(/*sql*/ `commit`),
+    ]);
+    const { scalar: stopLsn } = await conn.query(/*sql*/ `select pg_current_wal_lsn()`);
+    const { scalar: messageLsn } = await conn.query(/*sql*/ `select current_setting('pgo1test.message_lsn')::pg_lsn`);
+
+    const replstream = conn.logicalReplication({
+      slot: 'pgo1slot',
+      options: {
+        proto_version: '1',
+        publication_names: 'pgo1pub',
+        // binary: 'true',
+        messages: 'true',
+      },
+    });
+    const actual = [];
+    for await (const chunk of replstream.pgoutputDecode()) {
+      console.log(chunk);
+      for (const pgomsg of chunk.messages) {
+        actual.push(pgomsg);
+      }
+      // console.log({ lastLsn: chunk.lastLsn, stopLsn });
+      if (chunk.lastLsn >= stopLsn) {
+        break;
+      }
+    }
+    // console.log(actual);
+
+    const mbegin = actual.shift();
+    assertEquals(typeof mbegin.lsn, 'string');
+    assertEquals(typeof mbegin.time, 'bigint');
+    assertEquals(mbegin.tag, 'begin');
+    assertEquals(typeof mbegin.commitLsn, 'string');
+    assertEquals(typeof mbegin.commitTime, 'bigint');
+    assertEquals(typeof mbegin.xid, 'number');
+
+    const mrel = actual.shift();
+    assertEquals(mrel.lsn, null);
+    assertEquals(typeof mrel.time, 'bigint');
+    assertEquals(mrel.tag, 'relation');
+    assertEquals(typeof mrel.relationOid, 'number');
+    assertEquals(mrel.schema, 'public');
+    assertEquals(mrel.name, 'pgo1rel');
+    assertEquals(mrel.replicaIdentity, 'default');
+    assertEquals(mrel.attrs, [
+      { flags: 1, typeOid: 23, typeMod: -1, typeSchema: null, typeName: null, name: 'id' },
+      { flags: 0, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'val' },
+      { flags: 0, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'note' },
+    ]);
+
+    const minsert = actual.shift();
+    assertEquals(typeof minsert.lsn, 'string');
+    assertEquals(typeof minsert.time, 'bigint');
+    assertEquals(minsert.tag, 'insert');
+    assertEquals(minsert.relation, mrel);
+    assertEquals(minsert.key, { id: 1 });
+    assertEquals(minsert.before, null);
+    assertEquals(minsert.after, { id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
+
+    const mupdate = actual.shift();
+    assertEquals(typeof mupdate.lsn, 'string');
+    assertEquals(typeof mupdate.time, 'bigint');
+    assertEquals(mupdate.tag, 'update');
+    assertEquals(mupdate.relation, mrel);
+    assertEquals(mupdate.key, { id: 1 });
+    assertEquals(mupdate.before, null);
+    assertEquals(mupdate.after, { id: 1, val: 'bar', note: undefined });
+
+    const mupdate_ = actual.shift();
+    assertEquals(typeof mupdate_.lsn, 'string');
+    assertEquals(typeof mupdate_.time, 'bigint');
+    assertEquals(mupdate_.tag, 'update');
+    assertEquals(mupdate_.relation, mrel);
+    assertEquals(mupdate_.key, { id: 1 });
+    assertEquals(mupdate_.before, null);
+    assertEquals(mupdate_.after, { id: 2, val: 'bar', note: undefined });
+
+    const mdelete = actual.shift();
+    assertEquals(typeof mdelete.lsn, 'string');
+    assertEquals(typeof mdelete.time, 'bigint');
+    assertEquals(mdelete.tag, 'delete');
+    assertEquals(mdelete.relation, mrel);
+    assertEquals(mdelete.key, { id: 2 });
+    assertEquals(mdelete.before, null);
+    assertEquals(mdelete.after, null);
+
+    const mrel2 = actual.shift();
+    assertEquals(mrel2.lsn, null);
+    assertEquals(typeof mrel2.time, 'bigint');
+    assertEquals(mrel2.tag, 'relation');
+    assertEquals(typeof mrel2.relationOid, 'number');
+    assertEquals(mrel2.schema, 'public');
+    assertEquals(mrel2.name, 'pgo1rel');
+    assertEquals(mrel2.replicaIdentity, 'full');
+    assertEquals(mrel2.attrs, [
+      { flags: 1, typeOid: 23, typeMod: -1, typeSchema: null, typeName: null, name: 'id' },
+      { flags: 1, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'val' },
+      { flags: 1, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'note' },
+    ]);
+
+    const minsert2 = actual.shift();
+    assertEquals(typeof minsert2.lsn, 'string');
+    assertEquals(typeof minsert2.time, 'bigint');
+    assertEquals(minsert2.tag, 'insert');
+    assertEquals(minsert2.relation, mrel2);
+    assertEquals(minsert2.key, { id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
+    assertEquals(minsert2.before, null);
+    assertEquals(minsert2.after, { id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
+
+    const mupdate2 = actual.shift();
+    assertEquals(typeof mupdate2.lsn, 'string');
+    assertEquals(typeof mupdate2.time, 'bigint');
+    assertEquals(mupdate2.tag, 'update');
+    assertEquals(mupdate2.relation, mrel2);
+    assertEquals(mupdate2.key, { id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
+    assertEquals(mupdate2.before, { id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
+    assertEquals(mupdate2.after, { id: 1, val: 'bar', note: '_toasted_'.repeat(10000) });
+
+    const mdelete2 = actual.shift();
+    assertEquals(typeof mdelete2.lsn, 'string');
+    assertEquals(typeof mdelete2.time, 'bigint');
+    assertEquals(mdelete2.tag, 'delete');
+    assertEquals(mdelete2.relation, mrel2);
+    assertEquals(mdelete2.key, { id: 1, val: 'bar', note: '_toasted_'.repeat(10000) });
+    assertEquals(mdelete2.before, { id: 1, val: 'bar', note: '_toasted_'.repeat(10000) });
+    assertEquals(mdelete2.after, null);
+
+    const mrel3 = actual.shift();
+    assertEquals(mrel3.lsn, null);
+    assertEquals(typeof mrel3.time, 'bigint');
+    assertEquals(mrel3.tag, 'relation');
+    assertEquals(typeof mrel3.relationOid, 'number');
+    assertEquals(mrel3.schema, 'public');
+    assertEquals(mrel3.name, 'pgo1rel');
+    assertEquals(mrel3.replicaIdentity, 'full');
+    assertEquals(mrel3.attrs, [
+      { flags: 1, typeOid: 23, typeMod: -1, typeSchema: null, typeName: null, name: 'id' },
+      { flags: 1, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'val' },
+      { flags: 1, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'note' },
+    ]);
+
+    const mtruncate = actual.shift();
+    assertEquals(typeof mtruncate.lsn, 'string');
+    assertEquals(typeof mtruncate.time, 'bigint');
+    assertEquals(mtruncate.tag, 'truncate');
+    assertEquals(mtruncate.flags, 0);
+    assertEquals(mtruncate.cascade, false);
+    assertEquals(mtruncate.restartIdentity, false);
+    assertEquals(mtruncate.relations, [mrel3]);
+
+    const mmessage = actual.shift();
+    assertEquals(typeof mmessage.lsn, 'string');
+    assertEquals(typeof mmessage.time, 'bigint');
+    assertEquals(mmessage.tag, 'message');
+    assertEquals(mmessage.flags, 1);
+    assertEquals(mmessage.transactional, true);
+    assertEquals(mmessage.messageLsn, messageLsn);
+    assertEquals(mmessage.prefix, 'testmessage');
+    const helloworld = Uint8Array.from([104, 101, 108, 108, 111,  32, 119, 111, 114, 108, 100]);
+    assertEquals(mmessage.content, helloworld);
+
+    const mcommit = actual.shift();
+    assertEquals(typeof mcommit.lsn, 'string');
+    assertEquals(typeof mcommit.time, 'bigint');
+    assertEquals(mcommit.tag, 'commit');
+    assertEquals(mcommit.flags, 0);
+    assertEquals(mcommit.commitTime, mbegin.commitTime);
+    assertEquals(mcommit.commitLsn, mbegin.commitLsn);
+    const mend = actual.shift();
+    assertEquals(mend, undefined);
+
+    // connection should be reusable after replication end
+    const { scalar: hello } = await conn.query(/*sql*/ `select 'hello'`);
+    assertEquals(hello, 'hello');
+  } finally {
+    await conn.end();
+  }
+});
+
+
 
 // Deno.test('logical replication - async iter break', async () => {
 //   const client = await pgwire.connect(process.env.POSTGRES, {
@@ -832,6 +1004,24 @@ Deno.test('logical replication', async _ => {
 //   await assert.rejects(response, {
 //     code: 'PGERR_INVALID_START_LSN',
 //   });
+// });
+
+// Deno.test('_parse', async _ => {
+//   const conn = await pgconnect('postgres://postgres@127.0.0.1:5432/postgres');
+//   try {
+//     const resultset = await conn.query({
+//       message: 'Parse',
+//       statement: /*sql*/ `select $1`,
+//       params: [{
+//         type: 'text',
+//         value: 'hello',
+//       }],
+//     });
+//     console.log();
+//     console.log(resultset);
+//   } finally {
+//     await conn.end();
+//   }
 // });
 
 Deno.test('parse bind execute', async () => {
@@ -1285,34 +1475,87 @@ Deno.test('stream destroy', async () => {
   }
 });
 
-
 Deno.test('cancel', async _ => {
-  const conn = await pgconnect('postgres://postgres:qwerty@127.0.0.1:5432/postgres');
+  const conn = await pgconnect('postgres://postgres:qwerty@127.0.0.1:5432/postgres?replication=database&.debug=true');
   try {
+    // -- select * from generate_series(1, 2000); -- force flush
     const response = conn.query(/*sql*/ `
-      select * from generate_series(1, 2000);
-      select pg_sleep(10);
+      select pg_sleep(10)
     `);
-    let count = 0;
-    let cancelStartTime = 0;
-    query: for await (const m of response) {
-      for (const [i] of m.rows) {
-        if (i > 1000) {
-          cancelStartTime = Date.now();
-          break query;
-        }
-        count++;
-      }
+    let startTime = performance.now();
+    // await conn._cancelRequest();
+    for await (const _ of response) {
+      console.log(_.tag, _.rows, _.payload);
+      // break;
     }
-    assertEquals(count, 1000);
-    const cancelDuration = Date.now() - cancelStartTime;
-    if (cancelDuration > 1000) {
-      throw Error(`cancel is too slow (${cancelDuration}ms), seems that cancel has no effect`);
+    const duration = performance.now() - startTime;
+    if (duration > 1000) {
+      throw Error(`cancel is too slow (${duration}ms), seems that cancel has no effect`);
     }
     // connection should be usable
     const { scalar } = await conn.query(/*sql*/ `select 'hello'`);
     assertEquals(scalar, 'hello');
   } finally {
     await conn.end();
+  }
+});
+
+
+Deno.test('wake', async _ => {
+  const conn = await pgconnect('postgres://postgres@127.0.0.1:5432/postgres?.debug=0');
+  console.log('-');
+  try {
+    const stream = conn.query(
+      { statement: /*sql*/ `prepare q as select now() from pg_sleep(0.8)` },
+      { statement: /*sql*/ `execute q;` },
+      { message: 'Flush' },
+      { statement: /*sql*/ `execute q;` },
+      { message: 'Flush' },
+      { statement: /*sql*/ `execute q;` },
+      { message: 'Flush' },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { message: 'Flush' },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+      { statement: /*sql*/ `execute q;` },
+    );
+    let i = 0;
+    for await (const chunk of stream) {
+      console.log(chunk.tag, chunk.rows);
+
+      if (i++ > 5) {
+        conn._abortCtl.abort();
+      }
+    }
+  } finally {
+    await conn.end();
+  }
+});
+
+
+Deno.test('first row', async _ => {
+  const pg = await pgconnect('postgres://postgres@127.0.0.1:5432/postgres?.debug=1');
+  try {
+    const res = await pg.query(/*sql*/ `
+      select 'hello', 'world';
+      select 10, 'foo', 'bar', 'buz'
+    `)
+    console.log(res);
+    const [a, b] = res;
+    console.log(a, b);
+  } finally {
+    await pg.end();
   }
 });

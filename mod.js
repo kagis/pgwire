@@ -1,45 +1,61 @@
-/**
- * @typedef {{
- *  hostname: string,
- *  port: number,
- *  user: string|Uint8Array,
- *  password: string|Uint8Array,
- *  database: string|Uint8Array,
- *  application_name: string|Uint8Array,
- * }} PGConnectOptions
- * */
+/* Copyright (c) 2022 exe-dealer@yandex.ru at KAGIS
 
-/** @param  {...(string|URL|PGConnectOptions)} options */
-export async function pgconnect(...options) {
-  let { '.connectRetry': connectRetry, ...connOptions } = computeConnectionOptions(options);
-  // const connectRetry = [1, '1', 'on', 'true', true].includes(connectRetryRaw);
-  const startTime = Date.now();
-  for (;;) {
-    const conn = new Connection(connOptions);
-    try {
-      await conn.whenReady;
-      return conn;
-    } catch (err) {
-      const elapsedTime = Date.now() - startTime;
-      if (elapsedTime < connectRetry && (
-        _networking.canReconnect(err) ||
-        pgerrcode(err) == '57P03' // cannot_connect_now
-      )) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        continue;
-      }
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
 
-      // const { stack } = Object.assign(Error(), { name: '\n    ...' });
-      // err.stack += stack;
-      // console.log({ stack });
-      // throw err;
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
 
-      // wrap error to keep stacktrace
-      // TODO fix PgError props
-      throw Error(err.message, { cause: err });
-    }
-  }
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
+
+export async function pgconnect(...optionsChain) {
+  const conn = new PgConnection(computeConnectionOptions(optionsChain));
+  await conn.whenReady;
+  return conn;
 }
+
+// export async function pgconnect(...options) {
+//   let { '.connectRetry': connectRetry, ...connOptions } = computeConnectionOptions(options);
+//   // const connectRetry = [1, '1', 'on', 'true', true].includes(connectRetryRaw);
+//   const startTime = Date.now();
+//   for (;;) {
+//     const conn = new Connection(connOptions);
+//     try {
+//       await conn.whenReady;
+//       return conn;
+//     } catch (err) {
+//       const elapsedTime = Date.now() - startTime;
+//       if (elapsedTime < connectRetry && (
+//         _networking.canReconnect(err) ||
+//         pgerrcode(err) == '57P03' // cannot_connect_now
+//       )) {
+//         await new Promise(resolve => setTimeout(resolve, 1000));
+//         continue;
+//       }
+
+//       // const { stack } = Object.assign(Error(), { name: '\n    ...' });
+//       // err.stack += stack;
+//       // console.log({ stack });
+//       // throw err;
+
+//       // wrap error to keep stacktrace
+//       // TODO fix PgError props
+//       throw Error(err.message, { cause: err });
+//     }
+//   }
+// }
 
 // /** @param  {...(string|URL|PGConnectOptions)} options */
 // export function pgconnect(...options) {
@@ -50,11 +66,12 @@ export async function pgconnect(...options) {
 //   return p;
 // }
 
-/** @param  {...(string|URL|PGConnectOptions)} options */
-export function pgpool(...options) {
-  return new Pool(computeConnectionOptions(options));
+/**
+ * @param  {...PgConnectOptions} optionsChain
+ * @returns {PgPool} */
+export function pgpool(...optionsChain) {
+  return new PgPool(computeConnectionOptions(optionsChain));
 }
-
 
 export function pgliteral(s) {
   if (s == null) {
@@ -71,7 +88,6 @@ export function pgident(...segments) {
     .join('.')
   );
 }
-
 
 function computeConnectionOptions([uriOrObj, ...rest]) {
   if (!uriOrObj) {
@@ -100,30 +116,44 @@ function computeConnectionOptions([uriOrObj, ...rest]) {
   }
 }
 
-export function pgerrcode(err) {
-  while (!err) {
-    if (err[kErrorCode]) {
-      return err[kErrorCode];
-    }
-    err = err.cause;
-  }
+// TODO name
+export function pgerror(err) {
+  if (!err) return;
+  const result = err[PgError.kDetails];
+  if (result) return result;
+  return pgerror(err.cause);
 }
 
-const kErrorCode = Symbol('kErrorCode');
+// export function pgerrcode(err) {
+//   while (!err) {
+//     if (err[kErrorCode]) {
+//       return err[kErrorCode];
+//     }
+//     err = err.cause;
+//   }
+// }
+
+// const kErrorCode = Symbol('kErrorCode');
 
 class PgError extends Error {
-  constructor({ message, ...props }) {
-    const code = props.code;
-    super(`[PGERR_${code}] ${message}`);
-    this.name = 'PgError';
-    this[kErrorCode] = code;
-    Object.assign(this, props);
+  static kDetails = Symbol.for('pgwire.error');
+  constructor(errorResponse) {
+    const { code, message, ...rest } = errorResponse ?? 0;
+    const propsfmt = (
+      Object.entries(rest)
+      .filter(([_, v]) => v != null)
+      .map(([k, v]) => k + ' ' + JSON.stringify(v))
+      .join(', ')
+    );
+    super(message + `\n    (${propsfmt})`);
+    this.name = 'PgError.' + code;
+    this[PgError.kDetails] = errorResponse;
   }
 }
 
-class Pool {
+class PgPool {
   constructor({ '.poolSize': poolSize, '.poolIdleTimeout': poolIdleTimeout, ...options }) {
-    this._connections = /** @type {Set<Connection>} */ new Set();
+    this._connections = new Set();
     this._ended = false;
     this._options = options;
     this._poolSize = Math.max(poolSize, 0);
@@ -136,9 +166,9 @@ class Pool {
     this._poolIdleTimeout = Math.max(poolIdleTimeout, 0);
   }
   query(...args) {
-    return new Response(this._query(args));
+    return new PgResponse(this._queryIter(args));
   }
-  async * _query(args) {
+  async * _queryIter(args) {
     const conn = this._getConnection();
     try {
       yield * conn.query(...args);
@@ -151,7 +181,9 @@ class Pool {
       //   await discard;
       // }
     } finally {
-      // TODO AggregateError
+      // TODO error can be thrown here when connection left in transaction.
+      // But left-in-transaction can be caused by another error which
+      // should be nested into left-in-transaction
       await this._recycleConnection(conn);
     }
   }
@@ -170,7 +202,7 @@ class Pool {
       throw Error('pool is not usable anymore');
     }
     if (!this._poolSize) {
-      return new Connection(this._options);
+      return new PgConnection(this._options);
     }
     let leastBusyConn;
     for (const conn of this._connections) {
@@ -183,7 +215,7 @@ class Pool {
       clearTimeout(leastBusyConn._poolTimeoutId);
       return leastBusyConn;
     }
-    const newConn = new Connection(this._options);
+    const newConn = new PgConnection(this._options);
     newConn._poolTimeoutId = null; // TODO check whether it disables v8 hidden class optimization
     this._connections.add(newConn);
     newConn.whenEnded.then(this._onConnectionEnded.bind(this, newConn));
@@ -235,7 +267,8 @@ class Pool {
   /** exports pgwire.pgerrcode for cases when Pool is injected as dependency
    * and we dont want to import pgwire directly for error handling code */
   errcode(...args) {
-    return pgerrcode(...args);
+    // TODO
+    // return pgerrcode(...args);
   }
 }
 
@@ -258,7 +291,8 @@ class Pool {
 //   }
 // }
 
-class Connection {
+
+class PgConnection {
   constructor({ hostname, port, password, '.debug': debug, ...startupOptions }) {
     this._connectOptions = { hostname, port };
     this._user = startupOptions['user'];
@@ -268,11 +302,15 @@ class Connection {
     this._backendKeyData = null;
     this._parameters = Object.create(null); // TODO retry init
     this._lastErrorResponse = null;
-    this._responseRxs = /** @type {Channel[]} */ [];
+    this._queuedResponseChannels = [];
+    this._currResponseChannel = null;
     this._notificationSubscriptions = /** @type {Set<Channel>} */ new Set();
     this._transactionStatus = null;
-    this._fields = null;
-    this._clientTextDecoder = new TextDecoder('utf-8', { fatal: true });
+    this._lastPullTime = 0;
+    this._wakeInterval = 2000;
+    this._wakeTimer = 0;
+    this._rowColumns = null; // last RowDescription
+    this._rowTextDecoder = new TextDecoder('utf-8', { fatal: true });
     this._copyingOut = false;
     this._copyBuf = new Uint8Array(1024);
     this._copyBufPos = 0;
@@ -288,15 +326,14 @@ class Connection {
     this._destroyReason = null;
     // run background message processing
     // create StartupMessage here to validate startupOptions in constructor call stack
-    this._whenDestroyed = this._startup(new StartupMessage({
+    this._whenDestroyed = this._ioloop(new StartupMessage({
       ...startupOptions,
       'client_encoding': 'UTF8', // TextEncoder supports UTF8 only, so hardcode and force UTF8
       // client_encoding: 'win1251',
     }));
   }
   _whenReadyExecutor(resolve, reject) {
-    // If ready is resolved then it still can be rejected.
-    // When ready is rejected then it cannot be resolved or rejected again.
+    // When ready is resolved then it still can be rejected.
     this._resolveReady = val => {
       this._resolveReady = Boolean; // noop
       this._rejectReady = err => {
@@ -306,6 +343,7 @@ class Connection {
       };
       resolve(val);
     };
+    // When ready is rejected then it cannot be resolved or rejected again.
     this._rejectReady = err => {
       this._resolveReady = Boolean; // noop
       this._rejectReady = Boolean; // noop
@@ -322,39 +360,71 @@ class Connection {
   }
   /** number of pending queries */
   get pending() {
-    return this._responseRxs.length;
+    return this._queuedResponseChannels.length;
   }
   get inTransaction() {
     return this._socket && ( // if not destroyed
+      // TODO != 0x49 /*I*/
       this._transactionStatus == 0x45 || // E
       this._transactionStatus == 0x54 // T
     ) && this._transactionStatus; // avoid T|E value erasure
   }
-  // TODO accept abortSignal
+  // TODO accept abortSignal to abort nonstream queries.
+  // If abortSignal is set then we can block tx (disable pipelining)
+  // to make query abortable in case of concurent queries queued.
+  // We can provide .setAbortSignal method on PgResponse .
+  // Is it ok to not follow AbortController convention?
+  // TODO executemany?
+  // Parse
+  // Describe(portal)
+  // Bind
+  // Execute
+  // Bind
+  // Execute
   query(...args) {
-    return new Response(this._queryIter(...args));
+    // TODO need to invent a way to accept abortSignal
+    this._abortCtl = new AbortController();
+    return new PgResponse(this._queryIter(this._abortCtl.signal, args));
   }
-  async * _queryIter(...args) {
+  async * _queryIter(abortSignal, args) {
+    // Stack trace is broken if error occures in initial generator tick.
+    // Spent many hours to understand why, but I can't.
+    // Seems that this is payment for Thenable satan magic in QueryResponse.
+    await null;
+    // `at QueryResponse.then` is the lowest line of stack trace when no `await null`.
+    // but if do `await null` then stack trace is proper.
+    // console.trace()
+
+    if (abortSignal.aborted) {
+      throw Error('postgres query aborted', { cause: abortSignal.reason });
+    }
     if (!this._tx) {
       throw Error('connection destroyed', { cause: this._destroyReason });
     }
-    // TODO ordered queue .query() and .end() calls
+    // TODO(test) ordered queue .query() and .end() calls
     // .query after .end should throw stable error ? what if auth failed after .end
 
     const stdinAbortCtl = new AbortController();
-    const readyForQueryLock = new Channel();
-    const feMessages = Array.from( // materialize messages to ensure no errors during emiting query
-      typeof args[0] == 'string'
-      ? simpleQuery(args[0], args[1], stdinAbortCtl.signal, readyForQueryLock)
-      : extendedQuery(args, stdinAbortCtl.signal)
-    );
-    const responseRx = new Channel();
-
-    for (const m of feMessages) {
-      this._tx.push(m);
+    const stdinAbortSignal = stdinAbortCtl.signal;
+    const responseEndLock = new Channel();
+    // Collect outgoing messages into intermediate array
+    // to allow errors occur before any message enqueued.
+    const frontendMessages = [];
+    if (typeof args[0] == 'string') {
+      simpleQuery(frontendMessages, args[0], args[1], stdinAbortSignal, responseEndLock);
+    } else {
+      extendedQuery(frontendMessages, args, stdinAbortSignal)
     }
-    this._responseRxs.push(responseRx);
+    const responseChannel = new Channel();
 
+    // TODO This two steps should be executed atomiсally.
+    // If one fails then connection instance
+    // will be desyncronized and should be destroyed.
+    // But I see no cases when this can throw error.
+    this._tx.push(...frontendMessages);
+    this._queuedResponseChannels.push(responseChannel);
+
+    const iter = responseChannel[Symbol.asyncIterator]();
     try {
       // TODO отмена через .return() не сработает пока текущий неотработавший .next() не завершится,
       // а .next() может долго висеть и ничего не отдавать.
@@ -362,15 +432,39 @@ class Connection {
       // при простое со стороны постгреса.
       // Если делать через AbortSignal то тогда висячий .next() придется reject'ить
       // а пользовательский код должен обрабатывать ошибку - неудобно
-      const error = yield * responseRx;
-      // TODO also save callstack for network errors
-      if (error instanceof Error) {
-        throw Error('postgres query failed', { cause: error });
+
+      // let channelResult;
+      for (;;) {
+        if (abortSignal.aborted) {
+          throw Error('postgres query aborted', { cause: abortSignal.reason });
+        }
+        // We will send 'wake' message if _lastPullTime is older
+        // than _wakeInterval, so user have a chance to break loop
+        // when response is stuck.
+        this._lastPullTime = performance.now();
+        const { value, done } = await iter.next();
+        if (!done) {
+          yield value;
+          continue;
+        }
+        if (value instanceof Error) {
+          throw Error('postgres query failed', { cause: value });
+        }
+        if (value) {
+          throw new PgError(value);
+        }
+        break;
       }
-      if (error) {
-        throw new PgError(error);
-      }
+
+      // const channelResult = yield * responseChannel;
+      // if (channelResult instanceof Error) {
+      //   throw Error('postgres query failed', { cause: channelResult });
+      // }
+      // if (channelResult) {
+      //   throw new PgError(channelResult);
+      // }
     } finally {
+      await iter.return();
       // if query completed successfully then all stdins are drained,
       // so abort will have no effect and will not break anything.
       // Оtherwise
@@ -382,9 +476,9 @@ class Connection {
 
       // https://github.com/kagis/pgwire/issues/17
       // going to do CancelRequest if response is not ended and there are no other pending responses
-      if (this._responseRxs.length == 1 && this._responseRxs[0] == responseRx) {
+      if (this._queuedResponseChannels.length == 1 && this._currResponseChannel == responseChannel) {
         // new queries should not be emitted during CancelRequest if _tx is not ended
-        this._tx?.push(readyForQueryLock);
+        this._tx?.push(responseEndLock);
         // TODO check if frontend messages reached postgres and query is actually executing,
         // check any response messages was received before calling CancelRequest.
         // First messages should be received fast
@@ -393,15 +487,14 @@ class Connection {
         // так как return() отработает только после next()
         await this._cancelRequest().catch(warnError);
       }
-      await responseRx.whenEnded; // skip until ReadyForQuery
-      readyForQueryLock.end();
+      await responseChannel.whenEnded; // skip until ReadyForQuery
+      responseEndLock.end();
     }
   }
 
-  // should terminate connection gracefully
-  // if termination was not gracefull then should throw error ?
-
-  // TODO should be idempotent or throw if already ended ?
+  // should terminate connection gracefully.
+  // should be idempotent
+  // should never throw, at least when used in finally block.
 
   /** terminates connection gracesfully if possible and waits until termination complete */
   async end() {
@@ -424,11 +517,12 @@ class Connection {
     }
     this._rejectReady(Error('connection ended'));
 
-    // TODO destroy will cause error
-    await this._whenDestroyed.catch(warnError); // TODO ignore error
+    // TODO destroy can cause error
+    await this._whenDestroyed;
   }
   destroy(destroyReason) {
     this._rejectReady(destroyReason || Error('connection destroyed'));
+    clearInterval(this._wakeTimer);
     if (this._socket) {
       _networking.close(this._socket); // TODO can throw
       this._socket = null;
@@ -442,18 +536,19 @@ class Connection {
       this._tx = null;
       // accept destroyReason only if .destroy() called before .end()
       // so new queries will be rejected with the same error before
-      // and after ready resolved/rejected
+      // and after whenReady settled
       this._destroyReason = destroyReason;
     }
     if (this._notificationSubscriptions) {
       this._notificationSubscriptions.forEach(it => it.end(destroyReason));
       this._notificationSubscriptions = null;
     }
-    // TODO await _flushDataRows
+    // TODO await _flushData
     const responseEndReason = destroyReason || Error('incomplete response');
-    while (this._responseRxs.length) {
-      this._responseRxs.shift().end(responseEndReason);
+    while (this._queuedResponseChannels.length) {
+      this._queuedResponseChannels.shift().end(responseEndReason);
     }
+    this._currResponseChannel = null;
     // TODO do CancelRequest to wake stuck connection which can continue executing ?
     return destroyReason; // user code can call .destroy and throw destroyReason in one line
   }
@@ -473,16 +568,8 @@ class Connection {
       subscriptions.delete(nsub);
     }
   }
-  /** starts logical replication
-   * @param {{
-   *  slot: string,
-   *  startLsn: string,
-   *  options: object,
-   *  ackIntervalMillis: number,
-   * }}
-   * @returns {AsyncIterable}
-   */
-  logicalReplication({ slot, startLsn = '0/0', options = {}, ackIntervalMillis = 10e3 }) {
+
+  logicalReplication({ slot, startLsn = '0/0', options = {}, ackInterval = 10e3 }) {
     const optionsSql = (
       Object.entries(options)
       // TODO fix option key is injectable
@@ -495,16 +582,14 @@ class Connection {
     const tx = new Channel();
     const q = this.query(startReplSql, { stdins: [tx] });
     const rx = q[Symbol.asyncIterator]();
-    const stream = new ReplicationStream(rx, tx, ackIntervalMillis);
+    const stream = new ReplicationStream(rx, tx, ackInterval);
     stream.ack(startLsn); // set initial lsn and also validate lsn
     return stream;
-
-    // TODO how to wait for CopyBothResponse ?
   }
   async _cancelRequest() {
     // await this._whenReady; // wait for backendkey
     if (!this._backendKeyData) {
-      throw Error('trying to cancel before BackendKeyData received');
+      throw Error('CancelRequest attempt before BackendKeyData received');
     }
     const socket = await this._createSocket();
     try {
@@ -515,23 +600,7 @@ class Connection {
       _networking.close(socket);
     }
   }
-  async _createSocket() {
-    let socket = await _networking.connect(this._connectOptions);
-    if (this._tls) {
-      try {
-        await _networking.write(socket, serializeFrontendMessage(new SSLRequest()));
-        const sslResp = await readByte(socket);
-        if (sslResp == 'S') {
-          socket = await Deno.startTls(socket, { });
-        }
-      } catch (err) {
-        _networking.close(socket);
-        throw err;
-      }
-    }
-    return socket;
-  }
-  async _startup(startupmsg) {
+  async _ioloop(startupmsg) {
     let caughtError;
     try {
       this._socket = await this._createSocket();
@@ -546,54 +615,76 @@ class Connection {
         // - сервер прислал херню
         // - pgwire не смог обработать авторизационные сообщения
         this._recvMessages(),
-        this._sendMessage(this._startTx),
+        // TODO this._socket.closeWrite when _pipeMessages complete
+        this._pipeMessages(this._startTx),
       ]);
     } catch (err) {
       caughtError = err;
     }
     this.destroy(caughtError);
   }
-  async _sendMessage(m) {
-    if (m[Symbol.asyncIterator]) { // pipe messages
-      const iter = m[Symbol.asyncIterator]();
-      try {
-        for (let value, done = false; !done; ) {
-          [{ value, done }] = await Promise.all([
-            iter.next(),
-            value && this._sendMessage(value),
-          ]);
-        }
-      } finally {
-        // TODO iter.return resolved on recvMessages side,
-        // but recvMessages will not accept messages if sendMessage
-        // failed with error before emit frontent message,
-        // which causes deadlock here
-        // await iter.return();
-        // need a way to abort iter.next() here
-        // or get rid of parallel piping
-
-        iter.return().catch(warnError); // TODO is this ok to not await ?
-        // there are limited types of iterators passed in _sendMessage
-        // - startTx Channel, queryTx Channel and copyWrap iterator
-        // no one of them will throw error
+  async _createSocket() {
+    const socket = await _networking.connect(this._connectOptions);
+    if (!this._tls) return socket;
+    // TODO implement tls
+    try {
+      await _networking.write(socket, serializeFrontendMessage(new SSLRequest()));
+      const sslResp = await readByte(socket);
+      if (sslResp == 'S') {
+        return await Deno.startTls(socket, { });
       }
-    } else {
-      if (this._debug) {
-        console.log(... m.payload === undefined
-          ? ['<- %c%s%c', 'font-weight: bold; color: magenta', m.tag, '']
-          : ['<- %c%s%c %o', 'font-weight: bold; color: magenta', m.tag, '', m.payload],
-        );
+      if (this._tls == 'require') {
+        // TODO error message
+        throw Error('postgres refuses secure connection');
       }
-      // TODO serializeFrontendMessage creates new Uint8Array
-      // per every call. Should reuse buffer.
-      // And should send all messages of query in single writeAll call
-      // (except copy from stdin)
-      // TODO zero copy for stdin
-      await _networking.write(this._socket, serializeFrontendMessage(m));
+      return socket;
+    } catch (err) {
+      _networking.close(socket);
+      throw err;
     }
   }
+  async _pipeMessages(from) {
+    const iter = from[Symbol.asyncIterator]();
+    try {
+      for (let value, done = false; !done; ) {
+        [{ value, done }] = await Promise.all([
+          iter.next(),
+          value && this._sendMessage(value),
+        ]);
+      }
+    } finally {
+      // TODO iter.return resolved on recvMessages side,
+      // but recvMessages will not accept messages if sendMessage
+      // failed with error before emit frontent message,
+      // which causes deadlock here
+      // await iter.return();
+      // need a way to abort iter.next() here
+      // or get rid of parallel piping
+      iter.return(); // TODO is this ok to not await ?
+      // there are limited types of iterators passed in _sendMessage
+      // - startTx Channel, queryTx Channel and copyWrap iterator
+      // no one of them will throw error
+    }
+  }
+  async _sendMessage(m) {
+    if (m[Symbol.asyncIterator]) {
+      return this._pipeMessages(m);
+    }
+    if (this._debug) {
+      console.log(... m.payload === undefined
+        ? ['<- %c%s%c', 'font-weight: bold; color: magenta', m.tag, '']
+        : ['<- %c%s%c %o', 'font-weight: bold; color: magenta', m.tag, '', m.payload],
+      );
+    }
+    // TODO serializeFrontendMessage creates new Uint8Array
+    // per every call. Should reuse buffer.
+    // And should send all messages of query in single writeAll call
+    // (except copy from stdin)
+    // TODO zero copy for stdin
+    await _networking.write(this._socket, serializeFrontendMessage(m));
+  }
   async _recvMessages() {
-    for await (const mchunk of iterBackendMessages(this._socket)) {
+    for await (const mchunk of BackendMessageReader.iterBackendMessages(this._socket)) {
       // TODO we can ? alloc _copyBuf here with size of undelying chunk buffer
       // so we can avoid buffer grow algorithm.
       // Also we can use copyBuf to store binary "decoded" values
@@ -613,14 +704,14 @@ class Connection {
           await maybePromise;
         }
       }
-      await this._flushDataRows();
+      await this._flushData();
     }
     if (this._lastErrorResponse) {
       throw new PgError(this._lastErrorResponse);
     }
     // TODO handle unexpected connection close when sendMessage still working.
     // if sendMessage(this._startTx) is not resolved yet
-    // then _startup will not be resolved. But there no more active socket
+    // then _ioloop will not be resolved. But there no more active socket
     // to keep process running
   }
   _recvMessage(m) {
@@ -653,17 +744,17 @@ class Connection {
     }
   }
   _recvDataRow(_, /** @type {Array<Uint8Array>} */ row) {
-    for (let i = 0; i < this._fields.length; i++) {
+    for (let i = 0; i < this._rowColumns.length; i++) {
       const valbuf = row[i];
       if (valbuf == null) continue;
-      const { binary, typeid } = this._fields[i];
+      const { binary, typeOid } = this._rowColumns[i];
       // TODO avoid this._clientTextDecoder.decode for bytea
       row[i] = (
         binary
           // do not valbuf.slice() because nodejs Buffer .slice does not copy
           // TODO but we not going to receive Buffer here ?
           ? Uint8Array.prototype.slice.call(valbuf)
-          : typeDecode(this._clientTextDecoder.decode(valbuf), typeid)
+          : typeDecode(this._rowTextDecoder.decode(valbuf), typeOid)
       );
     }
     this._rowsChunk.push(row);
@@ -701,22 +792,22 @@ class Connection {
       this._copyBufPos += copyData.length,
     ));
   }
-  async _flushDataRows() {
-    if (!this._rowsChunk.length) {
-      return;
+  async _flushData() {
+    // TODO separate _rowsChunk _copiesChunk
+    if (this._copyBufPos) {
+      const m = this._copyBuf.subarray(0, this._copyBufPos);
+      await this._pushChunk('copies', null, [], this._rowsChunk, m);
+      this._copyBufPos = 0;
+      this._rowsChunk = [];
+      // TODO bench reuse single _copyBuf vs new _copyBuf for each chunk
+      // Be carefull when commenting next line because awaiting responseRx.push
+      // does not awaits until _copyBuf is consumed and ready to resuse
+      this._copyBuf = new Uint8Array(this._copyBuf.length);
     }
-    const m = this._copyBuf.subarray(0, this._copyBufPos);
-    m.rows = this._rowsChunk;
-    m.tag = null; // TODO m.message ? consistent with .query({ message: 'Parse' }, ...)
-    m.payload = undefined;
-    const [responseRx] = this._responseRxs;
-    await responseRx.push(m);
-    this._rowsChunk = [];
-    this._copyBufPos = 0;
-    // TODO bench reuse single _copyBuf vs new _copyBuf for each chunk
-    // Be carefull when commenting next line because awaiting responseRx.push
-    // does not awaits until _copyBuf is consumed and ready to resuse
-    this._copyBuf = new Uint8Array(this._copyBuf.length);
+    if (this._rowsChunk.length) {
+      await this._pushChunk('rows', null, this._rowsChunk);
+      this._rowsChunk = [];
+    }
   }
   async _recvCopyInResponse(m) {
     await this._fwdBackendMessage(m);
@@ -752,8 +843,8 @@ class Connection {
   async _recvNoData(m) {
     await this._fwdBackendMessage(m);
   }
-  async _recvRowDescription(m, fields) {
-    this._fields = fields;
+  async _recvRowDescription(m, columns) {
+    this._rowColumns = columns;
     await this._fwdBackendMessage(m);
   }
   _recvAuthenticationCleartextPassword() {
@@ -767,9 +858,11 @@ class Connection {
     if (this._password == null) {
       throw Error('password required (md5)');
     }
+    // const authResponse = md5AuthResponse(this._user, this._password, salt);
+
     // should use server_encoding, but there is
     // no way to know server_encoding before authentication.
-    // So it should be possible to provide password as byte-string
+    // So it should be possible to provide password as Uint8Array
     const utf8enc = new TextEncoder();
     const passwordb = this._password instanceof Uint8Array ? this._password : utf8enc.encode(this._password);
     const userb = this._user instanceof Uint8Array ? this._user : utf8enc.encode(this._user);
@@ -832,37 +925,40 @@ class Connection {
   }
   async _recvReadyForQuery(m, { transactionStatus }) {
     this._transactionStatus = transactionStatus;
-    if (this._startTx) { // complete startup
-      this._startTx.push(this._txReadable);
-      this._startTx.end();
-      this._startTx = null;
-      this._resolveReady();
-      return;
+    if (this._startTx) {
+      return this._completeStartup();
     }
-    await this._fwdBackendMessage(m)
-    this._responseRxs.shift().end(this._lastErrorResponse);
+    if (this._currResponseChannel) {
+      this._endResponse();
+    } else {
+      this._startResponse();
+    }
+  }
+  _completeStartup() {
+    this._startTx.push(this._txReadable);
+    this._startTx.end();
+    this._startTx = null;
+    this._resolveReady();
+    this._wakeTimer = setInterval(this._wake.bind(this), this._wakeInterval);
+  }
+  _startResponse() {
+    this._currResponseChannel = this._queuedResponseChannels[0];
+    // TODO assert this._currResponseChan is not null
+    // await this._fwdBackendMessage(m);
+  }
+  _endResponse() {
+    // await this._fwdBackendMessage(m);
+    this._queuedResponseChannels.shift();
+    this._currResponseChannel.end(this._lastErrorResponse);
+    this._currResponseChannel = null;
     this._lastErrorResponse = null;
   }
 
-  async _recvNotificationResponse(_, payload) {
-    await Promise.all(Array.from(
-      this._notificationSubscriptions,
-      nc => nc.push(payload)
-    ));
-  }
-  _recvNoticeResponse(m) {
-    // TODO async NoticeResponse can be recevied after .query called
-    // but before query messages actually received by postres.
-    // Such NoticeResponse will be uncorrectly forwared to query response.
-    // Seems that there is no way to check whether NoticeResponse
-    // belongs to query or not. May be we should treat all NoticeResponse
-    // messages as connection level notices and do not forward NoticeResponses
-    // to query responses at all.
-
-    // if (!this._fwdBackendMessage(m)) {
-    //   // NoticeResponse is not associated with query
-    //   // TODO report nonquery NoticeResponse
-    // }
+  async _recvNoticeResponse(m) {
+    if (this._currResponseChannel) {
+      return this._fwdBackendMessage(m);
+    }
+    // TODO dispatchEvent for nonquery NoticeResponse
   }
   _recvParameterStatus(_, { parameter, value }) {
     this._parameters[parameter] = value;
@@ -871,91 +967,109 @@ class Connection {
   _recvBackendKeyData(_, backendKeyData) {
     this._backendKeyData = backendKeyData;
   }
+  async _recvNotificationResponse(_, payload) {
+    await Promise.all(Array.from(
+      this._notificationSubscriptions,
+      nc => nc.push(payload)
+    ));
+  }
   async _fwdBackendMessage({ tag, payload }) {
-    await this._flushDataRows();
-    const m = new Uint8Array(0);
-    m.rows = [];
+    await this._flushData();
+    await this._pushChunk(tag, payload);
+  }
+  _wake() {
+    if (
+      this._currResponseChannel &&
+      !this._currResponseChannel.length &&
+      this._lastPullTime + this._wakeInterval <= performance.now()
+    ) {
+      this._pushChunk('wake');
+    }
+  }
+  _pushChunk(tag, payload = null, rows = [], copies = [], m = new Uint8Array(0)) {
     m.tag = tag;
     m.payload = payload;
-    const [responseRx] = this._responseRxs;
-    await responseRx.push(m);
+    m.rows = rows;
+    m.copies = copies;
+    // console.log('pushChunk', m.tag);
+    return this._currResponseChannel.push(m);
   }
-
-  // // TODO replace with { connection, then, catch, finally } object, less magic
-  // // sync pgconnect not expected to be commonly used anyway.
-  // // the only case is Pool, and this case is internal
-  // then(...args) { return this._whenReady.then(...args); }
-  // catch(...args) { return this._whenReady.catch(...args); }
-  // finally(...args) { return this._whenReady.finally(...args); }
-  // _createReadyConn() { return new Proxy(this, { get: this._getPropExceptThen }); }
-  // _getPropExceptThen(target, prop) { return prop == 'then' ? undefined : target[prop]; }
 }
 
 function warnError(err) {
-  // console.trace('warning', err);
+  // console.error('warning', err);
 }
 
-// there is no strong need to use generators to create message sequence,
-// but generators help to generate conditional messages in more readable way
-function * simpleQuery(script, { stdin, stdins = [] } = {}, stdinAbortSignal, readyForQueryLock) {
-  yield new Query(script);
+function simpleQuery(out, script, { stdin, stdins = [] } = {}, stdinAbortSignal, responseEndLock) {
+  // To cancel query we should send CancelRequest _after_
+  // query is received by server and started executing.
+  // But we cannot wait for first chunk because postgres can hold it
+  // for an unpredictably long time. I see no way to make postgres
+  // to flush RowDescription in simple protocol. So we prepend Query message
+  // with Sync to eagerly know when query is started and can be cancelled.
+  // Also it makes possible to determine whether NoticeResponse/ErrorResponse
+  // is asyncronous server message or belongs to query.
+  // (TODO Maybe there is a small window between first ReadyForQuery and actual
+  // query execution, when async messages can be received. Need more source digging)
+  // Seems that this is ok to do Sync during simple protocol
+  // even when replication=database.
+  out.push(new Sync());
+  out.push(new Query(script));
   // TODO handle case when number of stdins is unknown
   // should block tx and wait for CopyInResponse/CopyBothResponse
   if (stdin) {
-    yield wrapCopyData(stdin, stdinAbortSignal);
+    out.push(wrapCopyData(stdin, stdinAbortSignal));
   }
   for (const stdin of stdins) {
-    yield wrapCopyData(stdin, stdinAbortSignal);
+    out.push(wrapCopyData(stdin, stdinAbortSignal));
   }
   // when CREATE_REPLICATION_SLOT or START_REPLICATION is emitted
   // then no other queries should be emmited until ReadyForQuery is received.
   // Seems that its a postgres server bug.
-  // Looks like fragile dirty hack but its not.
+  // This workaround looks like fragile hack but its not.
   // Its dirty but safe enough because no comments or other statements can
   // precede CREATE_REPLICATION_SLOT or START_REPLICATION
   if (/^\s*(CREATE_REPLICATION_SLOT|START_REPLICATION)\b/.test(script)) {
-    yield readyForQueryLock;
-    return;
+    out.push(responseEndLock);
+  } else {
+    out.push(new CopyFail('missing copy upstream'));
   }
-  yield new CopyFail('missing copy upstream');
 }
-function * extendedQuery(blocks, stdinAbortSignal) {
+function extendedQuery(out, blocks, stdinAbortSignal) {
+  out.push(new Sync()); // see top comment in simpleQuery
   for (const m of blocks) {
-    yield * extendedQueryBlock(m, stdinAbortSignal);
+    switch (m.message) {
+      case undefined:
+      case null: extendedQueryStatement(out, m, stdinAbortSignal); break;
+      case 'Parse': extendedQueryParse(out, m); break;
+      case 'Bind': extendedQueryBind(out, m); break;
+      case 'Execute': extendedQueryExecute(out, m, stdinAbortSignal); break;
+      case 'DescribeStatement': extendedQueryDescribeStatement(out, m); break;
+      case 'CloseStatement': extendedQueryCloseStatement(out, m); break;
+      case 'DescribePortal': extendedQueryDescribePortal(out, m); break;
+      case 'ClosePortal': extendedQueryClosePortal(out, m); break;
+      case 'Flush': out.push(new Flush()); break;
+      default: throw Error('unknown extended message ' + JSON.stringify(m.message));
+    }
   }
-  yield new Sync();
+  out.push(new Sync());
 }
-function extendedQueryBlock(m, stdinAbortSignal) {
-  switch (m.message) {
-    case undefined:
-    case null: return extendedQueryStatement(m, stdinAbortSignal);
-    case 'Parse': return extendedQueryParse(m);
-    case 'Bind': return extendedQueryBind(m);
-    case 'Execute': return extendedQueryExecute(m, stdinAbortSignal);
-    case 'DescribeStatement': return extendedQueryDescribeStatement(m);
-    case 'CloseStatement': return extendedQueryCloseStatement(m);
-    case 'DescribePortal': return extendedQueryDescribePortal(m);
-    case 'ClosePortal': return extendedQueryClosePortal(m);
-    default: throw Error('unknown extended message ' + JSON.stringify(m.message));
-  }
-}
-function * extendedQueryStatement({ statement, params = [], limit, binary, stdin, noBuffer }, stdinAbortSignal) {
+function extendedQueryStatement(out, { statement, params = [], limit, binary, stdin, noBuffer }, stdinAbortSignal) {
   const paramTypes = params.map(({ type }) => type);
-  const flush = []; // [new Flush()];
-  yield * extendedQueryParse({ statement, paramTypes });
-  yield * flush;
-  yield * extendedQueryBind({ params, binary });
-  yield * flush;
-  yield * extendedQueryExecute({ limit, stdin }, stdinAbortSignal);
-  yield * flush;
+  extendedQueryParse(out, { statement, paramTypes });
+  extendedQueryBind(out, { params, binary });
+  extendedQueryExecute(out, { limit, stdin, noBuffer }, stdinAbortSignal);
+  // if (noBuffer) {
+  //   out.push(new Flush());
+  // }
 }
-function * extendedQueryParse({ statement, statementName, paramTypes = [] }) {
-  paramTypes = paramTypes.map(typeResolve);
-  yield new Parse({ statement, statementName, paramTypes });
+function extendedQueryParse(out, { statement, statementName, paramTypes = [] }) {
+  const paramTypeOids = paramTypes.map(typeResolve);
+  out.push(new Parse({ statement, statementName, paramTypeOids }));
 }
-function * extendedQueryBind({ portal, statementName, binary, params = [] }) {
+function extendedQueryBind(out, { portal, statementName, binary, params = [] }) {
   params = params.map(encodeParam);
-  yield new Bind({ portal, statementName, binary, params });
+  out.push(new Bind({ portal, statementName, binary, params }));
 
   function encodeParam({ value, type}) {
     if (value instanceof Uint8Array) {
@@ -968,35 +1082,36 @@ function * extendedQueryBind({ portal, statementName, binary, params = [] }) {
     return typeEncode(value, typeResolve(type));
   }
 }
-function * extendedQueryExecute({ portal, stdin, limit }, stdinAbortSignal) {
+function extendedQueryExecute(out, { portal, stdin, limit, noBuffer }, stdinAbortSignal) {
   // TODO write test to explain why
   // we need unconditional DescribePortal
   // before Execute
-  yield new DescribePortal(portal);
-  // TODO nobuffer option
-  // yield new Flush();
-  yield new Execute({ portal, limit });
+  out.push(new DescribePortal(portal));
+  out.push(new Execute({ portal, limit }));
+  // if (noBuffer) {
+  //   out.push(new Flush());
+  // }
   if (stdin) {
-    yield wrapCopyData(stdin, stdinAbortSignal)
+    out.push(wrapCopyData(stdin, stdinAbortSignal));
   } else {
     // CopyFail message ignored by postgres
     // if there is no COPY FROM statement
-    yield new CopyFail('missing copy upstream');
+    out.push(new CopyFail('missing copy upstream'));
   }
   // TODO nobuffer option
   // yield new Flush();
 }
-function * extendedQueryDescribeStatement({ statementName }) {
-  yield new DescribeStatement(statementName);
+function extendedQueryDescribeStatement(out, { statementName }) {
+  out.push(new DescribeStatement(statementName));
 }
-function * extendedQueryCloseStatement({ statementName }) {
-  yield new CloseStatement(statementName);
+function extendedQueryCloseStatement(out, { statementName }) {
+  out.push(new CloseStatement(statementName));
 }
-function * extendedQueryDescribePortal({ portal }) {
-  yield new DescribePortal(portal);
+function extendedQueryDescribePortal(out, { portal }) {
+  out.push(new DescribePortal(portal));
 }
-function * extendedQueryClosePortal({ portal }) {
-  yield new ClosePortal(portal);
+function extendedQueryClosePortal({ portal }) {
+  out.push(new ClosePortal(portal));
 }
 async function * wrapCopyData(source, abortSignal) {
   // TODO dry
@@ -1022,16 +1137,17 @@ async function * wrapCopyData(source, abortSignal) {
   yield new CopyDone();
 }
 
-class Response {
-  _loadPromise
-  _iter
+class PgResponse {
+  /** @type {Promise<PgResultSet>} */
+  _loadPromise;
+  _iter;
 
   constructor(iter) {
     this._iter = iter;
   }
   [Symbol.asyncIterator]() {
-    // TODO activate iterator ? emit query
-    // it can be handy when we need to enqueue .end after .query immediatly
+    // TODO activate iterator (emit query)?
+    // it can be handy when we need to enqueue .end after .query immediately
     // or if need to enqueue .query('discard all') after user .query in pool
     return this._iter[Symbol.asyncIterator]();
   }
@@ -1044,123 +1160,239 @@ class Response {
   finally(...args) {
     return this._loadOnce().finally(...args);
   }
-  async _loadOnce() {
+  _loadOnce() {
     return this._loadPromise || (this._loadPromise = this._load());
   }
   async _load() {
-    let inTransaction = false;
-    let lastResult;
-    const results = [];
-    for await (const chunk of this) {
-      lastResult = lastResult || {
-        rows: [],
-        // TODO copied: [],
-        // notices: [],
-        scalar: undefined,
-        command: undefined,
-        suspended: false,
-        empty: false,
-      };
-      lastResult.rows.push(...chunk.rows);
+    let notices = []
+    let results = [];
+    let result = new PgResult();
+    for await (const chunk of this._iter) {
+      result.rows.push(...chunk.rows);
+      // lastResult.copies.push(...chunk.copies); // TODO chunk.copies
       switch (chunk.tag) {
-        // TODO RowDescription
+        // TODO NoData
+        // TODO ParameterDescription
         // TODO CopyOutResponse
 
         case 'NoticeResponse':
-          lastResult.notices.push(chunk.payload);
+          notices.push(chunk.payload);
           continue;
-        case 'ReadyForQuery':
-          inTransaction = chunk.payload.transactionStatus != 0x49 /*I*/;
+        // case 'CopyOutResponse':
+        // case 'CopyBothResponse':
+        //   lastResult.columns = chunk.payload.columns;
+        //   break;
+        case 'RowDescription':
+          result.columns = chunk.payload;
           continue;
         default:
           continue;
+
+        // statement result boundaries
         case 'CommandComplete':
-          lastResult.command = chunk.payload;
+          result.command = chunk.payload;
           break;
         case 'PortalSuspended':
-          lastResult.suspended = true;
+          result.suspended = true;
           break;
         case 'EmptyQueryResponse':
-          lastResult.empty = true;
+          result.empty = true;
           break;
       }
-      lastResult.scalar = lastResult.rows[0];
-      // TODO seems that `scalar` has no use cases for COPY TO STDOUT
-      if (Array.isArray(lastResult.scalar)) { // DataRow or CopyData
-        lastResult.scalar = lastResult.scalar[0];
-      }
-      results.push(lastResult);
-      lastResult = null;
+      results.push(result);
+      result = new PgResult();
     }
-    return {
-      ...results[results.length - 1],
-      inTransaction,
-      results,
-      // TODO root `rows` concat ?
-      // get notices() {
-      //   return results.flatMap(({ notices }) => notices);
-      // },
-    };
+    // TODO return { empty: true } if no results
+    return new PgResultSet(results, notices);
   }
+  // async _load() {
+  //   // let inTransaction = false;
+
+  //   let lastResult = new PgResult();
+  //   const results = [];
+  //   for await (const chunk of this._iter) {
+  //     // lastResult = lastResult || {
+  //     //   // copies: [],
+  //     //   rows: [],
+  //     //   first: [],
+  //     //   scalar: undefined,
+  //     //   columns: [],
+  //     //   notices: [],
+  //     //   command: null,
+  //     //   suspended: false,
+  //     //   empty: false,
+  //     // };
+  //     lastResult.rows.push(...chunk.rows);
+  //     // lastResult.copies.push(...chunk.copies); // TODO chunk.copies
+  //     switch (chunk.tag) {
+  //       // TODO NoData
+  //       // TODO ParameterDescription
+  //       // TODO CopyOutResponse
+
+  //       case 'NoticeResponse':
+  //         lastResult.notices.push(chunk.payload);
+  //         continue;
+  //       // case 'ReadyForQuery':
+  //       //   inTransaction = chunk.payload.transactionStatus != 0x49 /*I*/;
+  //       // //   continue;
+  //       // case 'CopyOutResponse':
+  //       // case 'CopyBothResponse':
+  //       //   lastResult.columns = chunk.payload.columns;
+  //       //   break;
+  //       case 'RowDescription':
+  //         lastResult.columns = chunk.payload;
+  //         continue;
+  //       default:
+  //         continue;
+
+  //       // statement result boundaries
+  //       case 'CommandComplete':
+  //         lastResult.command = chunk.payload;
+  //         break;
+  //       case 'PortalSuspended':
+  //         lastResult.suspended = true;
+  //         break;
+  //       case 'EmptyQueryResponse':
+  //         lastResult.empty = true;
+  //         break;
+  //     }
+  //     lastResult.first = lastResult.rows[0] || [];
+  //     lastResult.scalar = lastResult.first[0];
+  //     results.push(lastResult);
+  //     lastResult = new PgResult();
+  //   }
+  //   const resultset = new PgResult();
+  //   Object.assign(resultset, results[results.length - 1]);
+  //   resultset.results = results;
+  //   return resultset;
+  // }
 }
 
+class PgResultSet {
+  constructor(results, notices) {
+    /** @type {PgResult[]} */
+    this.results = results;
+    this.notices = notices;
+  }
+  get scalar() { return this._last?.scalar; }
+  get rows() { return this._last?.rows || []; }
+  get columns() { return this._last?.columns || []; }
+  get command() { return this._last?.command; }
+  get suspended() { return this._last?.suspended || false; }
+  get empty() { return this._last?.empty || false; } // TODO ?? true ?
+  get _last() { return this.results[this.results.length - 1]; }
+  [Symbol.iterator]() { return (this.rows[0] || []).values(); }
+}
+
+class PgResult {
+  /** @type {any[][]} */
+  rows = [];
+  columns = [];
+  command = null;
+  suspended = false;
+  empty = false;
+  get scalar() { return this.rows[0]?.[0]; }
+}
+
+// class PgResult {
+//   rows = [];
+//   columns = [];
+//   notices = [];
+//   command = null;
+//   suspended = false;
+//   empty = false;
+//   prev = null;
+//   constructor(prev) {
+//     this.prev = prev;
+//   }
+//   [Symbol.iterator]() {
+//     return (this.rows[0] || []).values();
+//   }
+//   // TODO deprecated? use array destructurization instead
+//   // const [scalar] = await pg.query(`select hello`);
+//   get scalar() {
+//     return Array.from(this)[0];
+//   }
+//   get results() {
+//     const results = [];
+//     for (let r = this; r; r = r.prev) {
+//       results.push(r);
+//     }
+//     return results.reverse();
+//   }
+// }
+
 class ReplicationStream {
-  constructor(rx, tx, ackIntervalMillis) {
+  constructor(rx, tx, ackInterval) {
     this._rx = rx;
+    /** @type {Channel} */
     this._tx = tx;
-    this._ackIntervalMillis = ackIntervalMillis;
+    this._ackInterval = ackInterval;
     this._ackingLsn = '00000000/00000000';
+    this._ackmsg = Uint8Array.of(
+      0x72 /*r*/,
+      0, 0, 0, 0, 0, 0, 0, 0, // 1 - written lsn
+      0, 0, 0, 0, 0, 0, 0, 0, // 9 - flushed lsn
+      0, 0, 0, 0, 0, 0, 0, 0, // 17 - applied lsn
+      0, 0, 0, 0, 0, 0, 0, 0, // 25 - time
+      0, // 33 - should reply
+    );
+    this._ackmsgv = new DataView(this._ackmsg.buffer);
     this._iter = this._iterate(); // TODO can use `this` before all props inited? (hidden class optimization)
   }
   [Symbol.asyncIterator]() {
     return this._iter[Symbol.asyncIterator]();
   }
-  async * pgoutput() {
-    const relationCache = Object.create(null);
-    const typeCache = Object.create(null);
-    for await (const chunk of this) {
-      yield chunk.map(decodePgoutputMessage);
-    }
-    function decodePgoutputMessage(xlogData) {
-      const pgoreader = new PgoutputMessageReader(xlogData, relationCache, typeCache);
-      return pgoreader.readPgoutputMessage()
-    }
+  /** @returns {AsyncIterable<PgoChunk>} */
+  pgoutputDecode() {
+    return PgoutputReader.decodeStream(this);
   }
   async * _iterate() {
-    // TODO start timer after successfull replication start.
-    // CopyBothResponse is not best option because replication
-    // can be aborted immediatly after CopyBothResponse when
-    // replication is started second time on connection.
-    // So after first PrimaryKeepaliveMessage?
-    const ackTimer = setInterval(this._ackImmediate.bind(this), this._ackIntervalMillis);
+    let ackTimer;
     try {
-      for (let chunk, done;;) {
-        ({ value: chunk, done } = await this._rx.next());
+      const msgreader = new ReplicationMessageReader();
+      let lastLsn = '';
+      let lastTime = 0n;
+      for (;;) {
+        const { value: chunk, done } = await this._rx.next();
         if (done) break;
-        // если при старте репликации случилась ошибка, то
-        // в поток будет сначала отдано ReadyForQuery,
-        // и только следующий .next вернет ошибку.
-        // Это неудобно когда надо выполнить какойто код после успешного старта репликации.
-        // Мы могли бы выполнять такой код в первой итерации цикла,
-        // но не можем изза ReadyForQuery
-        // TODO возможно для обычных стримовых запросов это тоже нужно
-        if (chunk.tag == 'ReadyForQuery') continue;
-
-        const xlogMessages = [];
-        for (const copyData of chunk.rows) {
-          const replmsgReader = new ReplicationMessageReader(copyData);
-          const replmsg = replmsgReader.readReplicationMessage();
-          if (replmsg.tag == 'XLogData') {
-            xlogMessages.push(replmsg);
-            continue;
+        const messages = [];
+        for (const copyData of chunk.copies) {
+          msgreader.reset(copyData);
+          const msg = msgreader.readReplicationMessage();
+          if (lastLsn < msg.lsn) {
+            lastLsn = msg.lsn;
           }
-          if (replmsg.tag == 'PrimaryKeepaliveMessage' && replmsg.shouldReply) {
-            this._ackImmediate();
+          if (lastLsn < msg.endLsn) {
+            lastLsn = msg.endLsn;
+          }
+          if (lastTime < msg.time) {
+            lastTime = msg.time;
+          }
+          switch (msg.tag) {
+            case 'XLogData':
+              messages.push(msg);
+              break;
+            case 'PrimaryKeepaliveMessage':
+              if (msg.shouldReply) {
+                this._ackImmediate();
+              }
+              // Start timer after successfull replication start.
+              // CopyBothResponse is not an option because replication
+              // can be aborted immediatly after CopyBothResponse when
+              // replication is started second time on connection.
+              if (!ackTimer) {
+                ackTimer = setInterval(this._ackImmediate.bind(this), this._ackInterval);
+              }
+              break;
           }
         }
-        // TODO we can emit empty replication message (fwd PrimaryKeepAlive?) every 1sec
-        // so user have a chance to `break` loop
-        yield xlogMessages;
+        // Start yielding messages only when replication started succesfully.
+        // First message on successful start will be PrimaryKeepaliveMessage.
+        // Skip CopyBothResponse, seems that there is no usefull information.
+        if (lastLsn) {
+          yield { lastLsn, lastTime, messages };
+        }
       }
     } finally {
       clearInterval(ackTimer);
@@ -1178,61 +1410,17 @@ class ReplicationStream {
     if (lsn > this._ackingLsn) {
       this._ackingLsn = lsn;
     }
+    let nlsn = BigInt('0x' + this._ackingLsn.replace('/', ''));
+    nlsn += 1n;
+    // TODO accept { written, flushed, applied, immediate }
+    this._ackmsgv.setBigUint64(1, nlsn); // written
+    this._ackmsgv.setBigUint64(9, nlsn); // flushed
+    this._ackmsgv.setBigUint64(17, nlsn); // applied
   }
   _ackImmediate() {
     // if (!this._tx) return;
-    const msg = new Uint8Array(1 + 8 + 8 + 8 + 8 + 1);
-    const msgv = new DataView(msg.buffer);
-    let nlsn = BigInt('0x' + this._ackingLsn.replace('/', ''));
-    nlsn += 1n;
-    msgv.setUint8(0, 0x72); // r
-    msgv.setBigUint64(1, nlsn);
-    msgv.setBigUint64(9, nlsn);
-    msgv.setBigUint64(17, nlsn);
-    // TODO push the same buf every time, update msg in .ack
-    this._tx.push(msg); // TODO backpreassure
-  }
-}
-
-async function * iterBackendMessages(socket) {
-  let buf = new Uint8Array(16_640);
-  let nbuf = 0;
-  for (;;) {
-    if (nbuf >= buf.length) { // grow buffer
-      const oldbuf = buf;
-      buf = new Uint8Array(oldbuf.length * 2); // TODO prevent uncontrolled grow
-      buf.set(oldbuf);
-    }
-    const nread = await _networking.read(socket, buf.subarray(nbuf));
-    if (nread == null) break;
-    nbuf += nread;
-
-    let nparsed = 0;
-    const messages = [];
-    for (;;) {
-      const itag = nparsed;
-      const isize = itag + 1;
-      const ipayload = isize + 4;
-      if (nbuf < ipayload) break; // incomplete message
-      const size = buf[isize] << 24 | buf[isize + 1] << 16 | buf[isize + 2] << 8 | buf[isize + 3];
-      if (size < 4) {
-        throw Error('invalid backend message size');
-      }
-      const inext = isize + size;
-      // TODO use grow hint
-      if (nbuf < inext) break; // incomplete message
-      const msgreader = new BackendMessageReader(buf.subarray(ipayload, inext))
-      const message = msgreader.readBackendMessage(buf[itag]);
-      messages.push(message);
-      // TODO batch DataRow here
-      nparsed = inext;
-    }
-    yield messages;
-
-    if (nparsed) { // TODO check if copyWithin(0, 0) is noop
-      buf.copyWithin(0, nparsed, nbuf); // move unconsumed bytes to begining of buffer
-      nbuf -= nparsed;
-    }
+    if (this._tx.length) return;
+    this._tx.push(this._ackmsg);
   }
 }
 
@@ -1247,7 +1435,7 @@ class FrontendMessage {
   constructor(payload) {
     this.payload = payload;
     this.size = 0;
-    const sizeCounter = new MessageSizeCounter();
+    const sizeCounter = new MessageSizer();
     this._write(sizeCounter, null, payload);
     this.size = sizeCounter.result;
   }
@@ -1326,14 +1514,14 @@ class Query extends FrontendMessage {
 }
 
 class Parse extends FrontendMessage {
-  _write(w, size, { statement, statementName = '', paramTypes = [] }) {
+  _write(w, size, { statement, statementName = '', paramTypeOids = [] }) {
     w.writeUint8(0x50); // P
     w.writeInt32BE(size - 1);
     w.writeString(statementName);
     w.writeString(statement);
-    w.writeInt16BE(paramTypes.length);
-    for (const typeid of paramTypes) {
-      w.writeUint32BE(typeid || 0);
+    w.writeInt16BE(paramTypeOids.length);
+    for (const typeOid of paramTypeOids) {
+      w.writeUint32BE(typeOid || 0);
     }
   }
 }
@@ -1354,14 +1542,7 @@ class Bind extends FrontendMessage {
         w.writeInt32BE(-1);
         continue;
       }
-      let encoded = p;
-      // TODO avoid twice encoding
-      if (!(p instanceof Uint8Array)) {
-        encoded = utf8encoder.encode(p);
-      }
-      w.writeInt32BE(encoded.length);
-      // TODO zero copy param encode
-      w.write(encoded);
+      w.writeBindParam(p);
     }
     w.writeInt16BE(binary.length);
     for (const fmt of binary) {
@@ -1462,10 +1643,16 @@ class Terminate extends FrontendMessage {
 
 // https://www.postgresql.org/docs/14/protocol-message-types.html
 class MessageReader {
-  constructor (b) {
+  /** @type {Uint8Array} */
+  _b = null;
+  _p = 0;
+  // should not use { fatal: true } because ErrorResponse can use invalid utf8 chars
+  static defaultTextDecoder = new TextDecoder();
+  _textDecoder = MessageReader.defaultTextDecoder;
+
+  reset(/** @type {Uint8Array} */ b) {
     this._b = b;
     this._p = 0;
-    this._textDecoder = MessageReader.defaultTextDecoder;
   }
   readUint8() {
     this._checkSize(1);
@@ -1502,55 +1689,128 @@ class MessageReader {
       throw Error('unexpected end of message');
     }
   }
-  // should not use { fatal: true } because ErrorResponse can use invalid utf8 chars
-  static defaultTextDecoder = new TextDecoder();
+  _array(length, fn) {
+    return Array.from({ length }, fn, this);
+  }
+  // replication helpers
+  readLsn() {
+    const h = this.readUint32(), l = this.readUint32();
+    if (h == 0 && l == 0) return null;
+    return (
+      h.toString(16).padStart(8, '0') + '/' +
+      l.toString(16).padStart(8, '0')
+    ).toUpperCase();
+  }
+  readTime() {
+    // (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY == 946684800000000
+    return this.readUint64() + 946684800000000n;
+  }
+  readUint64() {
+    return BigInt(this.readUint32()) << 32n | BigInt(this.readUint32());
+  }
+  readUint32() {
+    return this.readInt32() >>> 0;
+  }
 }
 
 // https://www.postgresql.org/docs/14/protocol-message-formats.html
 class BackendMessageReader extends MessageReader {
-  readBackendMessage(asciiTag) {
-    switch (asciiTag) {
-      case 0x64 /* d */: return { tag: 'CopyData', payload: this._b };
-      case 0x44 /* D */: return { tag: 'DataRow', payload: this.readDataRow() };
-      case 0x76 /* v */: return { tag: 'NegotiateProtocolVersion', payload: this.readNegotiateProtocolVersion() };
-      case 0x53 /* S */: return { tag: 'ParameterStatus', payload: this.readParameterStatus() };
-      case 0x4b /* K */: return { tag: 'BackendKeyData', payload: this.readBackendKeyData() };
-      case 0x5a /* Z */: return { tag: 'ReadyForQuery', payload: this.readReadyForQuery() };
-      case 0x48 /* H */: return { tag: 'CopyOutResponse', payload: this.readCopyResponse() };
-      case 0x47 /* G */: return { tag: 'CopyInResponse', payload: this.readCopyResponse() };
-      case 0x57 /* W */: return { tag: 'CopyBothResponse', payload: this.readCopyResponse() };
-      case 0x63 /* c */: return { tag: 'CopyDone' };
-      case 0x54 /* T */: return { tag: 'RowDescription', payload: this.readRowDescription() };
-      case 0x74 /* t */: return { tag: 'ParameterDescription', payload: this.readParameterDescription() };
-      case 0x43 /* C */: return { tag: 'CommandComplete', payload: this.readString() };
-      case 0x31 /* 1 */: return { tag: 'ParseComplete' };
-      case 0x32 /* 2 */: return { tag: 'BindComplete' };
-      case 0x33 /* 3 */: return { tag: 'CloseComplete' };
-      case 0x73 /* s */: return { tag: 'PortalSuspended' };
-      case 0x49 /* I */: return { tag: 'EmptyQueryResponse' };
-      case 0x4e /* N */: return { tag: 'NoticeResponse', payload: this.readErrorOrNotice() };
-      case 0x45 /* E */: return { tag: 'ErrorResponse', payload: this.readErrorOrNotice() };
-      case 0x6e /* n */: return { tag: 'NoData' };
-      case 0x41 /* A */: return { tag: 'NotificationResponse', payload: this.readNotificationResponse() };
-      case 0x52 /* R */:
-        switch (this.readInt32()) {
-          case 0x0: return { tag: 'AuthenticationOk' };
-          case 0x2: return { tag: 'AuthenticationKerberosV5' };
-          case 0x3: return { tag: 'AuthenticationCleartextPassword' };
-          case 0x5: return { tag: 'AuthenticationMD5Password', payload: { salt: this.read(4) } };
-          case 0x6: return { tag: 'AuthenticationSCMCredential' };
-          case 0x7: return { tag: 'AuthenticationGSS' };
-          case 0x8: return { tag: 'AuthenticationGSSContinue', payload: this.readToEnd() };
-          case 0x9: return { tag: 'AuthenticationSSPI' };
-          case 0xa: return { tag: 'AuthenticationSASL', payload: { mechanism: this.readString() } };
-          case 0xb: return { tag: 'AuthenticationSASLContinue', payload: this.readToEnd() };
-          case 0xc: return { tag: 'AuthenticationSASLFinal', payload: this.readToEnd() };
-          default: throw Error('unknown auth message');
+  static async * iterBackendMessages(socket) {
+    const msgreader = new BackendMessageReader();
+    let buf = new Uint8Array(16_640);
+    let nbuf = 0;
+    for (;;) {
+      if (nbuf >= buf.length) { // grow buffer
+        const oldbuf = buf;
+        buf = new Uint8Array(oldbuf.length * 2); // TODO prevent uncontrolled grow
+        buf.set(oldbuf);
+      }
+      const nread = await _networking.read(socket, buf.subarray(nbuf));
+      if (nread == null) break;
+      nbuf += nread;
+
+      let nparsed = 0;
+      const messages = [];
+      for (;;) {
+        const itag = nparsed;
+        const isize = itag + 1;
+        const ipayload = isize + 4;
+        if (nbuf < ipayload) break; // incomplete message
+        const size = buf[isize] << 24 | buf[isize + 1] << 16 | buf[isize + 2] << 8 | buf[isize + 3];
+        if (size < 4) {
+          throw Error('invalid backend message size');
         }
-      default: return { tag: asciiTag, payload: this._b }; // TODO warn unknown message
+        const inext = isize + size;
+        // TODO use grow hint
+        if (nbuf < inext) break; // incomplete message
+        msgreader.reset(buf.subarray(ipayload, inext));
+        const message = msgreader._readBackendMessage(buf[itag]);
+        messages.push(message);
+        // TODO batch DataRow here
+        nparsed = inext;
+      }
+      yield messages;
+
+      if (nparsed) { // TODO check if copyWithin(0, 0) is noop
+        buf.copyWithin(0, nparsed, nbuf); // move unconsumed bytes to begining of buffer
+        nbuf -= nparsed;
+      }
     }
   }
-  readDataRow() {
+
+  /**
+   * @template {string} T
+   * @template P
+   * @param {T} tag
+   * @param {P} payload
+   */
+  _m(tag, payload) {
+    return { tag, payload };
+  }
+  _readBackendMessage(asciiTag) {
+    const m = this._m;
+    switch (asciiTag) {
+      case 0x64 /*d*/: return m('CopyData', this._b);
+      case 0x44 /*D*/: return m('DataRow', this._readDataRow());
+      case 0x76 /*v*/: return m('NegotiateProtocolVersion', this._readNegotiateProtocolVersion());
+      case 0x53 /*S*/: return m('ParameterStatus', this._readParameterStatus());
+      case 0x4b /*K*/: return m('BackendKeyData', this._readBackendKeyData());
+      case 0x5a /*Z*/: return m('ReadyForQuery', this._readReadyForQuery());
+      case 0x48 /*H*/: return m('CopyOutResponse', this._readCopyResponse());
+      case 0x47 /*G*/: return m('CopyInResponse', this._readCopyResponse());
+      case 0x57 /*W*/: return m('CopyBothResponse', this._readCopyResponse());
+      case 0x63 /*c*/: return m('CopyDone');
+      case 0x54 /*T*/: return m('RowDescription', this._readRowDescription());
+      case 0x74 /*t*/: return m('ParameterDescription', this._readParameterDescription());
+      case 0x43 /*C*/: return m('CommandComplete', this.readString());
+      case 0x31 /*1*/: return m('ParseComplete');
+      case 0x32 /*2*/: return m('BindComplete');
+      case 0x33 /*3*/: return m('CloseComplete');
+      case 0x73 /*s*/: return m('PortalSuspended');
+      case 0x49 /*I*/: return m('EmptyQueryResponse');
+      case 0x4e /*N*/: return m('NoticeResponse', this._readErrorOrNotice());
+      case 0x45 /*E*/: return m('ErrorResponse', this._readErrorOrNotice());
+      case 0x6e /*n*/: return m('NoData');
+      case 0x41 /*A*/: return m('NotificationResponse', this._readNotificationResponse());
+
+      case 0x52 /*R*/: switch (this.readInt32()) {
+        case 0       : return m('AuthenticationOk');
+        case 2       : return m('AuthenticationKerberosV5');
+        case 3       : return m('AuthenticationCleartextPassword');
+        case 5       : return m('AuthenticationMD5Password', { salt: this.read(4) });
+        case 6       : return m('AuthenticationSCMCredential');
+        case 7       : return m('AuthenticationGSS');
+        case 8       : return m('AuthenticationGSSContinue', this.readToEnd());
+        case 9       : return m('AuthenticationSSPI');
+        case 10      : return m('AuthenticationSASL', { mechanism: this.readString() });
+        case 11      : return m('AuthenticationSASLContinue', this.readToEnd());
+        case 12      : return m('AuthenticationSASLFinal', this.readToEnd());
+        default      : throw Error('unknown auth message');
+      }
+      default: throw Error(`unsupported backend message ${asciiTag}`);
+    }
+  }
+  _readDataRow() {
     const nfields = this.readInt16()
     const row = Array(nfields);
     for (let i = 0; i < nfields; i++) {
@@ -1559,60 +1819,47 @@ class BackendMessageReader extends MessageReader {
     }
     return row;
   }
-  readNegotiateProtocolVersion() {
-    return {
-      version: this.readInt32(),
-      unrecognizedOptions: Array.from(
-        { length: this.readInt32() },
-        this.readString,
-        this,
-      ),
-    };
+  _readNegotiateProtocolVersion() {
+    const version = this.readInt32();
+    const unrecognizedOptions = this._array(this.readInt32(), this.readString);
+    return { version, unrecognizedOptions };
   }
-  readParameterDescription() {
-    return Array.from(
-      { length: this.readInt16() },
-      this.readInt32,
-      this,
-    );
+  _readParameterDescription() {
+    return this._array(this.readInt16(), this.readInt32);
   }
-  readBackendKeyData() {
-    return {
-      pid: this.readInt32(),
-      secretKey: this.readInt32(),
-    };
+  _readBackendKeyData() {
+    const pid = this.readInt32();
+    const secretKey = this.readInt32();
+    return { pid, secretKey };
   }
-  readReadyForQuery() {
+  _readReadyForQuery() {
     return { transactionStatus: this.readUint8() };
   }
-  readCopyResponse() {
-    return {
-      binary: this.readUint8(),
-      binaryPerAttr: Array.from(
-        { length: this.readInt16() },
-        this.readInt16,
-        this,
-      ),
-    };
+  _readCopyResponse() {
+    const binary = this.readUint8();
+    const columns = this._array(this.readInt16(), _ => ({
+      binary: this.readInt16(),
+    }));
+    // TODO names
+    return { binary, columns };
   }
-  readRowDescription() {
-    return Array.from({ length: this.readInt16() }, _ => ({
+  _readRowDescription() {
+    return this._array(this.readInt16(), _ => ({
       name: this.readString(),
-      tableid: this.readInt32(),
-      column: this.readInt16(),
-      typeid: this.readInt32(),
-      typelen: this.readInt16(),
-      typemod: this.readInt32(),
+      tableOid: this.readInt32(),
+      tableColumn: this.readInt16(),
+      typeOid: this.readInt32(),
+      typeSize: this.readInt16(),
+      typeMod: this.readInt32(),
       binary: this.readInt16(),
     }));
   }
-  readParameterStatus() {
-    return {
-      parameter: this.readString(),
-      value: this.readString(),
-    };
+  _readParameterStatus() {
+    const parameter = this.readString();
+    const value = this.readString();
+    return { parameter, value };
   }
-  readErrorOrNotice() {
+  _readErrorOrNotice() {
     const fields = Array(256);
     for (;;) {
       const fieldCode = this.readUint8();
@@ -1639,252 +1886,259 @@ class BackendMessageReader extends MessageReader {
       constraint: fields[0x6e], // n
     };
   }
-  readNotificationResponse() {
-    return {
-      pid: this.readInt32(),
-      channel: this.readString(),
-      payload: this.readString(),
-    };
+  _readNotificationResponse() {
+    const pid = this.readInt32();
+    const channel = this.readString();
+    const payload = this.readString();
+    return { pid, channel, payload };
   }
 }
 
 // https://www.postgresql.org/docs/14/protocol-replication.html#id-1.10.5.9.7.1.5.1.8
 class ReplicationMessageReader extends MessageReader {
+  // _attached = null;
+
   readReplicationMessage() {
     const tag = this.readUint8();
     switch (tag) {
-      case 0x77 /*w*/: return {
-        tag: 'XLogData',
-        lsn: this.readLsn(),
-        endLsn: this.readLsn(),
-        time: this.readTime(),
-        data: this.readToEnd(),
-      };
-      case 0x6b /*k*/: return {
-        tag: 'PrimaryKeepaliveMessage',
-        endLsn: this.readLsn(),
-        time: this.readTime(),
-        shouldReply: this.readUint8(),
-      };
+      case 0x77 /*w*/: return this._readXLogData();
+      case 0x6b /*k*/: return this._readPrimaryKeepaliveMessage();
       default: throw Error('unknown replication message');
     }
   }
-  readLsn() {
-    return (
-      this.readUint32().toString(16).padStart(8, '0') + '/' +
-      this.readUint32().toString(16).padStart(8, '0')
-    ).toUpperCase();
+  _readXLogData() {
+    const m = {
+      tag: /** @type {const} */ ('XLogData'),
+      lsn: this.readLsn(),
+      // `endLsn` is always the same as `lsn` in case of logical replication.
+      // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/walsender.c#L1240
+      endLsn: this.readLsn(),
+      // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/walsender.c#L1270-L1271
+      time: this.readTime(),
+      data: this.readToEnd(),
+      // attached: this._attached,
+    }
+    // this._attached = m.lsn ? null : m;
+    return m;
   }
-  readTime() {
-    // (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY == 946684800000000
-    return this.readUint64() + 946684800000000n;
-  }
-  readUint64() {
-    return BigInt(this.readUint32()) << 32n | BigInt(this.readUint32());
-  }
-  readUint32() {
-    return this.readInt32() >>> 0;
+  _readPrimaryKeepaliveMessage() {
+    return {
+      tag: /** @type {const} */ ('PrimaryKeepaliveMessage'),
+      lsn: null, // hidden class opt
+      endLsn: this.readLsn(),
+      time: this.readTime(),
+      shouldReply: this.readUint8(),
+    };
   }
 }
 
 // https://www.postgresql.org/docs/14/protocol-logicalrep-message-formats.html
-class PgoutputMessageReader extends ReplicationMessageReader {
-  constructor({ data, lsn, endLsn, time }, relationCache, typeCache) {
-    super(data);
-    this._relationCache = relationCache;
-    this._typeCache = typeCache;
-    this._lsn = lsn;
-    this._endLsn = endLsn;
-    this._time = time;
+class PgoutputReader extends MessageReader {
+  static async * decodeStream(replstream) {
+    const pgoreader = new PgoutputReader();
+    for await (const chunk of replstream) {
+      for (const msg of chunk.messages) {
+        pgoreader.reset(msg.data);
+        pgoreader._upgradeMsg(msg);
+        msg.data = null; // free XLogData buffer
+      }
+      yield chunk;
+    }
   }
-  readPgoutputMessage() {
+
+  /** @type {Map<number, { typeSchema: string, typeName: string }>} */
+  _typeCache = new Map();
+  _relationCache = new Map();
+
+  _upgradeMsg(out) {
     const tag = this.readUint8();
     switch (tag) {
-      case 0x42 /*B*/: return this.readBegin();
-      case 0x4d /*M*/: return this.readLogicalMessage();
-      case 0x43 /*C*/: return this.readCommit();
-      case 0x4f /*O*/: return this.readOrigin();
-      case 0x52 /*R*/: return this.readRelation();
-      case 0x59 /*Y*/: return this.readType();
-      case 0x49 /*I*/: return this.readInsert();
-      case 0x55 /*U*/: return this.readUpdate();
-      case 0x44 /*D*/: return this.readDelete();
-      case 0x54 /*T*/: return this.readTruncate();
+      case 0x42 /*B*/: return this._upgradeMsgBegin(out);
+      case 0x4f /*O*/: return this._upgradeMsgOrigin(out);
+      case 0x59 /*Y*/: return this._upgradeMsgType(out);
+      case 0x52 /*R*/: return this._upgradeMsgRelation(out);
+      case 0x49 /*I*/: return this._upgradeMsgChange(out, 'insert', true);
+      case 0x55 /*U*/: return this._upgradeMsgChange(out, 'update', true);
+      case 0x44 /*D*/: return this._upgradeMsgChange(out, 'delete', false);
+      case 0x54 /*T*/: return this._upgradeMsgTruncate(out);
+      case 0x4d /*M*/: return this._upgradeMsgMessage(out);
+      case 0x43 /*C*/: return this._upgradeMsgCommit(out);
       default: throw Error('unknown pgoutput message');
     }
   }
-  readBegin() {
-    return {
-      tag: 'begin',
-      lsn: this._lsn,
-      endLsn: this._endLsn,
-      time: this._time,
-      finalLsn: this.readLsn(),
-      commitTime: this.readTime(),
-      xid: this.readInt32(),
-    };
+  _upgradeMsgBegin(out) {
+    // TODO lsn can be null if origin sended
+    // https://github.com/postgres/postgres/blob/85c61ba8920ba73500e1518c63795982ee455d14/src/backend/replication/pgoutput/pgoutput.c#L409
+    out.tag = 'begin';
+    // https://github.com/postgres/postgres/blob/27b77ecf9f4d5be211900eda54d8155ada50d696/src/include/replication/reorderbuffer.h#L275
+    out.commitLsn = this.readLsn();
+    out.commitTime = this.readTime();
+    out.xid = this.readInt32();
   }
-  readLogicalMessage() {
-    return {
-      tag: 'message',
-      lsn: this._lsn,
-      endLsn: this._endLsn,
-      time: this._time,
-      transactional: this.readUint8(),
-      _lsn: this.readLsn(),
-      prefix: this.readString(),
-      content: this.read(this.readInt32()),
-    };
+  _upgradeMsgOrigin(out) {
+    out.tag = 'origin';
+    out.originLsn = this.readLsn();
+    out.originName = this.readString();
   }
-  readCommit() {
-    return {
-      tag: 'commit',
-      lsn: this._lsn,
-      endLsn: this._endLsn,
-      time: this._time,
-      flags: this.readUint8(),
-      commitLsn: this.readLsn(),
-      _endLsn: this.readLsn(), // TODO fix dup
-      commitTime: this.readTime(),
-    };
+  _upgradeMsgType(out) {
+    out.tag = 'type';
+    out.typeOid = this.readInt32();
+    out.typeSchema = this.readString();
+    out.typeName = this.readString();
+    // mem leak not likely to happen because amount of types is usually small
+    this._typeCache.set(out.typeOid, {
+      typeSchema: out.typeSchema,
+      typeName: out.typeName,
+    });
   }
-  readOrigin() {
-    return {
-      tag: 'origin',
-      lsn: this.readLsn(),
-      origin: this.readString(),
-    };
+  _upgradeMsgRelation(out) {
+    // lsn expected to be null
+    // https://github.com/postgres/postgres/blob/27b77ecf9f4d5be211900eda54d8155ada50d696/src/backend/replication/walsender.c#L1342
+    out.tag = 'relation';
+    out.relationOid = this.readInt32();
+    out.schema = this.readString();
+    out.name = this.readString();
+    out.replicaIdentity = this._readRelationReplicaIdentity();
+    out.attrs = this._array(this.readInt16(), this._readRelationAttr);
+    out.keyNames = out.attrs.filter(it => it.flags & 0b1).map(it => it.name);
+    // mem leak not likely to happen because amount of relations is usually small
+    this._relationCache.set(out.relationOid, out);
   }
-  readRelation() {
-    const rel = {
-      tag: 'relation',
-      // lsn: this._lsn,
-      // endLsn: this._endLsn,
-      // time,
-      relationid: this.readInt32(),
-      schema: this.readString(),
-      name: this.readString(),
-      replicaIdentity: String.fromCharCode(this.readUint8()),
-      attrs: Array.from({ length: this.readInt16() }, _ => ({
-        flags: this.readUint8(), // TODO bool accessors
-        name: this.readString(),
-        typeid: this.readInt32(),
-        typemod: this.readInt32(),
-        // TODO lookup typeSchema and typeName
-      })),
-    };
-    // mem leak not likely to happen because number of relations is usually small
-    this._relationCache[rel.relationid] = rel;
-    return rel;
-  }
-  readType() {
-    const type = {
-      tag: 'type',
-      typeid: this.readInt32(),
-      schema: this.readString(),
-      name: this.readString(),
-    };
-    this._typeCache[type.typeid] = type;
-    return type;
-  }
-  readInsert() {
-    const relid = this.readInt32();
-    const relation = this._relationCache[relid];
-    const _kind = this.readUint8();
-    const after = this.readTuple(relation);
-    return {
-      tag: 'insert',
-      lsn: this._lsn,
-      endLsn: this._endLsn,
-      time: this._time,
-      relation,
-      before: null,
-      after,
-    };
-  }
-  readUpdate() {
-    const relid = this.readInt32();
-    const relation = this._relationCache[relid];
-    let kind = this.readUint8();
-    let before = null;
-    if (kind == 0x4b /*K*/ || kind == 0x4f /*O*/) {
-      before = this.readTuple(relation);
-      kind = this.readUint8();
+  _readRelationReplicaIdentity() {
+    // https://www.postgresql.org/docs/14/catalog-pg-class.html
+    const relreplident = this.readUint8();
+    switch (relreplident) {
+      case 0x64 /*d*/: return 'default';
+      case 0x6e /*n*/: return 'nothing';
+      case 0x66 /*f*/: return 'full';
+      case 0x69 /*i*/: return 'index';
+      default: return relreplident;
     }
-    const after = this.readTuple(relation);
-    return {
-      tag: 'update',
-      lsn: this._lsn,
-      endLsn: this._endLsn,
-      time: this._time,
-      relation: relation,
-      before,
-      after,
-      // TODO keyOnly ?
-    };
   }
-  readDelete() {
+  _readRelationAttr() {
+    const attr = {
+      flags: this.readUint8(),
+      name: this.readString(),
+      typeOid: this.readInt32(),
+      typeMod: this.readInt32(),
+      typeSchema: null,
+      typeName: null, // TODO resolve builtin type names?
+    }
+    Object.assign(attr, this._typeCache.get(attr.typeOid));
+    return attr;
+  }
+  _upgradeMsgChange(out, tag, readN) {
     const relid = this.readInt32();
-    const relation = this._relationCache[relid];
-    const kind = this.readUint8();
-    const before = this.readTuple(relation);
-    return {
-      tag: 'delete',
-      lsn: this._lsn,
-      endLsn: this._endLsn,
-      time: this._time,
-      relation,
-      before,
-      after: null,
-      keyOnly: kind == 0x4b /*K*/,
-    };
+    const relation = this._relationCache.get(relid);
+    const actionKON = this.readUint8();
+    const keyOnly = actionKON == 0x4b /*K*/;
+    let before = this._readTuple(relation);
+    let after = null;
+    if (actionKON == 0x4e /*N*/) {
+      after = before;
+      before = null;
+    } else if (readN) {
+      const actionN = this.readUint8();
+      // TODO assert actionN == 'N'
+      after = this._readTuple(relation, before);
+    }
+    let key = before || after;
+    if (relation.keyNames.length < relation.attrs.length) {
+      const tup = key;
+      key = Object.create(null);
+      for (const k of relation.keyNames) {
+        key[k] = tup[k];
+      }
+    }
+    if (keyOnly) {
+      before = null;
+    }
+    out.tag = tag;
+    out.relation = relation;
+    out.key = key;
+    out.before = before;
+    out.after = after;
   }
-  readTruncate() {
-    const nrels = this.readInt32();
-    const flags = this.readUint8();
-    return {
-      tag: 'truncate',
-      lsn: this._lsn,
-      endLsn: this._endLsn,
-      time: this._time,
-      cascade: Boolean(flags & 0b1),
-      restartSeqs: Boolean(flags & 0b10),
-      relations: Array.from(
-        { length: nrels },
-        _ => this._relationCache[this.readInt32()],
-      ),
-    };
-  }
-  readTuple(relation) {
+  _readTuple({ attrs }, unchangedToastFallback) {
     const nfields = this.readInt16();
     const tuple = Object.create(null);
     for (let i = 0; i < nfields; i++) {
-      const { name, typeid } = relation.attrs[i];
-      switch (this.readUint8()) {
+      const { name, typeOid } = attrs[i];
+      const kind = this.readUint8();
+      switch (kind) {
+        case 0x62 /*b*/:
+          const bsize = this.readInt32();
+          const bval = this.read(bsize);
+          // dont need to .slice() because new buffer
+          // is created for each replication chunk
+          tuple[name] = bval;
+          break;
         case 0x74 /*t*/:
           const valsize = this.readInt32();
           const valbuf = this.read(valsize);
+          // TODO lazy decode
+          // https://github.com/kagis/pgwire/issues/16
           const valtext = this._textDecoder.decode(valbuf);
-          tuple[name] = typeDecode(valtext, typeid);
+          tuple[name] = typeDecode(valtext, typeOid);
           break;
         case 0x6e /*n*/:
           tuple[name] = null;
           break;
-        default /*u*/:
-          tuple[name] = undefined;
+        case 0x75 /*u*/:
+          tuple[name] = unchangedToastFallback?.[name] ?? undefined;
+          break;
+        default: throw Error(`uknown attribute kind ${kind}`);
       }
     }
     return tuple;
+  }
+  _upgradeMsgTruncate(out) {
+    const nrels = this.readInt32();
+    out.tag = 'truncate';
+    out.flags = this.readUint8();
+    out.cascade = Boolean(out.flags & 0b1);
+    out.restartIdentity = Boolean(out.flags & 0b10);
+    out.relations = this._array(nrels, _ => this._relationCache.get(this.readInt32()));
+  }
+  _upgradeMsgMessage(out) {
+    out.tag = 'message';
+    out.flags = this.readUint8();
+    out.transactional = Boolean(out.flags & 0b1);
+    out.messageLsn = this.readLsn();
+    out.prefix = this.readString();
+    out.content = this.read(this.readInt32());
+  }
+  _upgradeMsgCommit(out) {
+    out.tag = 'commit';
+    out.flags = this.readUint8(); // reserved unused
+    // should be the same as begin.commitLsn,
+    // postgres somehow uses it to synchronize initial dump with slot position.
+    out.commitLsn = this.readLsn();
+    // `out.commitEndLsn` is redundant because it always the same as `out.lsn` .
+    // Here we see that ctx->write_location = txn->end_lsn
+    // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/logical/logical.c#L819
+    // Here we see that ctx->write_location is used for `out.lsn` field.
+    // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/logical/logical.c#L634
+    // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/walsender.c#L1239
+    // And here we see that txn->end_lsn is used for `out.commitEndLsn` field.
+    // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/logical/proto.c#L87
+    // Seems that they include `out.commitEndLsn` into pgoutput message to simplify `apply_handle_commit` code
+    // so it can be independent of `out.lsn`, which is lower level XLogData message field.
+    // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/logical/worker.c#L780
+    out.commitEndLsn = this.readLsn();
+    out.commitTime = this.readTime();
   }
 }
 
 
 // TODO no DataView
 class MessageWriter {
-  _buf
-  _pos = 0
+  static defaultTextEncoder = new TextEncoder();
+
   constructor(buf) {
     this._buf = buf
+    this._pos = 0;
+    this._textEncoder = MessageWriter.defaultTextEncoder;
   }
   writeUint8(val) {
     new DataView(this._buf, this._pos).setUint8(0, val);
@@ -1903,27 +2157,43 @@ class MessageWriter {
     this._pos += 4
   }
   writeString(val) {
-    if (val instanceof Uint8Array) {
-      this.write(val);
-    } else {
-      const { read, written } = utf8encoder.encodeInto(val, new Uint8Array(this._buf, this._pos));
-      if (read < val.length) {
-        throw Error('too small buffer');
-      }
-      this._pos += written;
-    }
+    this.write(val);
     this.writeUint8(0);
   }
+  writeBindParam(val) {
+    this.writeInt32BE(0); // size prefix, will update later
+    const pos = this._pos;
+    this.write(val);
+    const size = this._pos - pos;
+    // update size prefix
+    new DataView(this._buf, pos - 4).setInt32(0, size);
+  }
   write(val) {
-    if (!(val instanceof Uint8Array)) {
-      throw TypeError('Uint8Array expected');
+    if (val instanceof Uint8Array) {
+      return this._writeUint8Array(val);
     }
+    if (typeof val == 'string') {
+      return this._writeString(val);
+    }
+    throw TypeError('string or Uint8Array expected');
+  }
+  _writeUint8Array(val) {
     new Uint8Array(this._buf, this._pos).set(val);
-    this._pos += val.byteLength;
+    this._pos += val.length;
+  }
+  _writeString(val) {
+    const { read, written } = this._textEncoder.encodeInto(
+      val,
+      new Uint8Array(this._buf, this._pos),
+    );
+    if (read < val.length) {
+      throw Error('too small buffer');
+    }
+    this._pos += written;
   }
 }
 
-class MessageSizeCounter {
+class MessageSizer {
   result = 0
   writeUint8() {
     this.result += 1;
@@ -1938,36 +2208,38 @@ class MessageSizeCounter {
     this.result += 4;
   }
   writeString(val) {
+    // do write before zero check to validate val type first
+    this.write(val);
+    const z = val instanceof Uint8Array ? 0x0 : '\0';
+    if (val.indexOf(z) > 0) {
+      throw TypeError('zero char is not allowed');
+    }
+    this.writeUint8(0);
+  }
+  writeBindParam(val) {
+    this.writeInt32BE(0);
+    this.write(val);
+  }
+  write(val) { // TODO accept this._textEncoder
     if (val instanceof Uint8Array) {
-      if (val.indexOf(0x00) > 0) {
-        throw TypeError('zero char is not allowed');
-      }
-      this.result += val.length + 1;
+      this.result += val.length;
     } else if (typeof val == 'string') {
-      if (val.indexOf('\0') > 0) {
-        throw TypeError('zero char is not allowed');
-      }
-      this.result += utf8length(val) + 1;
+      // TODO count length with this._textEncoder
+      this.result += MessageSizer._utf8length(val);
     } else {
       throw TypeError('string or Uint8Array expected');
     }
   }
-  write(val) {
-    if (!(val instanceof Uint8Array)) {
-      throw TypeError('Uint8Array expected');
-    }
-    this.result += val.length;
-  }
-}
 
-// https://stackoverflow.com/a/25994411
-function utf8length(s) {
-  let result = 0;
-  for (let i = 0; i < s.length; i++) {
-    let c = s.charCodeAt(i);
-    result += c >> 11 ? 3 : c >> 7 ? 2 : 1;
+  // https://stackoverflow.com/a/25994411
+  static _utf8length(s) {
+    let result = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      result += c >> 11 ? 3 : c >> 7 ? 2 : 1;
+    }
+    return result;
   }
-  return result;
 }
 
 ///////// begin type codec
@@ -2103,33 +2375,33 @@ function lsnMakeComparable(text) {
 ///////////// end type codec
 
 
-const utf8encoder = new TextEncoder();
-
-
 class Channel {
   constructor() {
     this._buf = [];
     this._result = undefined;
     this._ended = false;
-    this._resolveDrained = _ => _;
-    this._resolvePushed = _ => _;
+    this._resolvePushed = Boolean;
     this.whenEnded = new Promise(resolve => {
       this._resolveEnded = resolve;
     });
     this._whenDrained = null;
     this._resolveDrained = Boolean; // noop
-    this._whenDrainedExecutor = resolve => this._resolveDrained = resolve;
+    this._whenDrainedExecutor = resolve => {
+      this._resolveDrained = resolve;
+    };
     this._iter = this._iterate();
   }
-
-  push(value) {
+  get length() {
+    return this._buf.length;
+  }
+  push(...values) {
     if (this._ended) {
       throw Error('push after ended');
     }
     if (!this._buf) {
       return; // iterator is aborted
     }
-    if (this._buf.push(value) == 1) {
+    if (this._buf.push(...values) == 1) {
       this._whenDrained = new Promise(this._whenDrainedExecutor);
     }
     this._resolvePushed();
@@ -2150,8 +2422,10 @@ class Channel {
     };
     try {
       for (;;) {
-        yield * this._buf; // FIXME can stuck for a long time when push/next phase are not in sync
-        this._buf = [];
+        while (this._buf.length) {
+          // TODO perfomance
+          yield this._buf.shift();
+        }
         this._resolveDrained();
         if (this._ended) {
           return this._result;
@@ -2172,8 +2446,7 @@ class SaslScramSha256 {
   _clientFirstMessageBare;
   _serverSignatureB64;
   async start() {
-    const clientNonce = new Uint8Array(24);
-    crypto.getRandomValues(clientNonce);
+    const clientNonce = crypto.getRandomValues(new Uint8Array(24));
     this._clientFirstMessageBare = 'n=,r=' + this._b64encode(clientNonce);
     return 'n,,' + this._clientFirstMessageBare;
   }
