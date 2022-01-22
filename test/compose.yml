@@ -1,0 +1,21 @@
+version: '3.8'
+services:
+
+  deno:
+    image: denoland/deno:alpine-1.18.0
+    depends_on: [postgres]
+    working_dir: /app
+    volumes: [..:/app]
+    environment: [TEST_FILTER]
+    command: sh -c 'sleep 5 && deno test --allow-net --filter="$TEST_FILTER" test/test_deno.js'
+
+  node:
+    image: node:14.18-alpine3.15
+    depends_on: [postgres]
+    working_dir: /app
+    volumes: [..:/app]
+    environment: [TEST_FILTER]
+    command: sh -c 'sleep 5 && node --unhandled-rejections=strict test/test_node.js'
+
+  postgres:
+    build: .

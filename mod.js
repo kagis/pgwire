@@ -138,7 +138,7 @@ export function pgerror(err) {
 class PgError extends Error {
   static kDetails = Symbol.for('pgwire.error');
   constructor(errorResponse) {
-    const { code, message, ...rest } = errorResponse ?? 0;
+    const { code, message, ...rest } = errorResponse || 0;
     const propsfmt = (
       Object.entries(rest)
       .filter(([_, v]) => v != null)
@@ -383,10 +383,9 @@ class PgConnection {
   // Execute
   query(...args) {
     // TODO need to invent a way to accept abortSignal
-    this._abortCtl = new AbortController();
-    return new PgResponse(this._queryIter(this._abortCtl.signal, args));
+    return new PgResponse(this._queryIter(args, null /*signal*/));
   }
-  async * _queryIter(abortSignal, args) {
+  async * _queryIter(args, signal) {
     // Stack trace is broken if error occures in initial generator tick.
     // Spent many hours to understand why, but I can't.
     // Seems that this is payment for Thenable satan magic in QueryResponse.
@@ -395,25 +394,28 @@ class PgConnection {
     // but if do `await null` then stack trace is proper.
     // console.trace()
 
-    if (abortSignal.aborted) {
-      throw Error('postgres query aborted', { cause: abortSignal.reason });
+    if (signal?.aborted) {
+      const err = Error('postgres query aborted');
+      err.cause = signal.reason;
+      throw err;
     }
     if (!this._tx) {
-      throw Error('connection destroyed', { cause: this._destroyReason });
+      const err = Error('connection destroyed');
+      err.cause = this._destroyReason;
+      throw err;
     }
     // TODO(test) ordered queue .query() and .end() calls
     // .query after .end should throw stable error ? what if auth failed after .end
 
-    const stdinAbortCtl = new AbortController();
-    const stdinAbortSignal = stdinAbortCtl.signal;
+    const stdinSignal = { aborted: false, reason: Error('aborted') };
     const responseEndLock = new Channel();
     // Collect outgoing messages into intermediate array
     // to allow errors occur before any message enqueued.
     const frontendMessages = [];
     if (typeof args[0] == 'string') {
-      simpleQuery(frontendMessages, args[0], args[1], stdinAbortSignal, responseEndLock);
+      simpleQuery(frontendMessages, args[0], args[1], stdinSignal, responseEndLock);
     } else {
-      extendedQuery(frontendMessages, args, stdinAbortSignal)
+      extendedQuery(frontendMessages, args, stdinSignal);
     }
     const responseChannel = new Channel();
 
@@ -421,10 +423,9 @@ class PgConnection {
     // If one fails then connection instance
     // will be desyncronized and should be destroyed.
     // But I see no cases when this can throw error.
-    this._tx.push(...frontendMessages);
+    frontendMessages.forEach(this._tx.push, this._tx);
     this._queuedResponseChannels.push(responseChannel);
 
-    const iter = responseChannel[Symbol.asyncIterator]();
     try {
       // TODO отмена через .return() не сработает пока текущий неотработавший .next() не завершится,
       // а .next() может долго висеть и ничего не отдавать.
@@ -432,39 +433,39 @@ class PgConnection {
       // при простое со стороны постгреса.
       // Если делать через AbortSignal то тогда висячий .next() придется reject'ить
       // а пользовательский код должен обрабатывать ошибку - неудобно
-
-      // let channelResult;
       for (;;) {
-        if (abortSignal.aborted) {
-          throw Error('postgres query aborted', { cause: abortSignal.reason });
+        // Important to call responseChannel.next() as first step of try block
+        // to maximize chance that finally block will be executed when
+        // query is received by server. So CancelRequest will be emited
+        // in case of error, and skip-waiting duration will be minimized.
+        const { value, done } = await responseChannel.next();
+        if (signal?.aborted) {
+          const err = Error('postgres query aborted');
+          err.cause = signal.reason;
+          throw err;
         }
         // We will send 'wake' message if _lastPullTime is older
         // than _wakeInterval, so user have a chance to break loop
         // when response is stuck.
-        this._lastPullTime = performance.now();
-        const { value, done } = await iter.next();
+        this._lastPullTime = Date.now();
         if (!done) {
           yield value;
           continue;
         }
         if (value instanceof Error) {
-          throw Error('postgres query failed', { cause: value });
+          const err = Error('postgres query failed');
+          err.cause = value;
+          throw err;
         }
         if (value) {
           throw new PgError(value);
         }
         break;
       }
-
-      // const channelResult = yield * responseChannel;
-      // if (channelResult instanceof Error) {
-      //   throw Error('postgres query failed', { cause: channelResult });
-      // }
-      // if (channelResult) {
-      //   throw new PgError(channelResult);
-      // }
+    } catch (err) {
+      stdinSignal.reason = err;
+      throw err;
     } finally {
-      await iter.return();
       // if query completed successfully then all stdins are drained,
       // so abort will have no effect and will not break anything.
       // Оtherwise
@@ -472,22 +473,27 @@ class PgConnection {
       // - or iter was .returned()
       // - or no COPY FROM STDIN was queries
       // then we should abort all pending stdins
-      stdinAbortCtl.abort();
+      // stdinAbortCtl.abort();
+      stdinSignal.aborted = true;
 
       // https://github.com/kagis/pgwire/issues/17
-      // going to do CancelRequest if response is not ended and there are no other pending responses
-      if (this._queuedResponseChannels.length == 1 && this._currResponseChannel == responseChannel) {
-        // new queries should not be emitted during CancelRequest if _tx is not ended
+      if ( // going to do CancelRequest
+        // if response is started and not ended
+        this._currResponseChannel == responseChannel &&
+         // and there are no other pending responses
+         // (to prevent miscancel of next queued query)
+        this._queuedResponseChannels.length == 1
+      ) {
+        // new queries should not be emitted during CancelRequest
         this._tx?.push(responseEndLock);
-        // TODO check if frontend messages reached postgres and query is actually executing,
-        // check any response messages was received before calling CancelRequest.
-        // First messages should be received fast
-        // но если мы до сюда дошли значит один yield уже отработал и
-        // как минимум первое сообщение уже было получено от сервера
-        // так как return() отработает только после next()
+        // TODO there is a small window between first Sync and Query message
+        // when query is not actually executing, so there is small chance
+        // that CancelRequest may be ignored. So need to repeat CancelRequest until
+        // responseChannel.return() is resolved
         await this._cancelRequest().catch(warnError);
       }
-      await responseChannel.whenEnded; // skip until ReadyForQuery
+      // skip until ReadyForQuery
+      await responseChannel.return();
       responseEndLock.end();
     }
   }
@@ -524,7 +530,7 @@ class PgConnection {
     this._rejectReady(destroyReason || Error('connection destroyed'));
     clearInterval(this._wakeTimer);
     if (this._socket) {
-      _networking.close(this._socket); // TODO can throw
+      _net.close(this._socket); // TODO can throw
       this._socket = null;
     }
     if (this._startTx) {
@@ -554,15 +560,20 @@ class PgConnection {
   }
   async * notifications() {
     if (!this._tx) {
-      throw Error('connection destroyed', { cause: this._destroyReason });
+      const err = Error('connection destroyed');
+      err.cause = this._destroyReason;
+      throw err;
     }
     const subscriptions = this._notificationSubscriptions;
     const nsub = new Channel();
     subscriptions.add(nsub);
     try {
-      const error = yield * nsub;
-      if (error) {
-        throw Error('postgres notification stream broken', { cause: error });
+      // TODO nsub.return() will not resolve until nsub.end()
+      const cause = yield * nsub;
+      if (cause) {
+        const err = Error('postgres notification stream broken');
+        err.cause = cause;
+        throw err;
       }
     } finally {
       subscriptions.delete(nsub);
@@ -593,11 +604,11 @@ class PgConnection {
     }
     const socket = await this._createSocket();
     try {
-      await _networking.write(socket, serializeFrontendMessage(
+      await _net.write(socket, serializeFrontendMessage(
         new CancelRequest(this._backendKeyData),
       ));
     } finally {
-      _networking.close(socket);
+      _net.close(socket);
     }
   }
   async _ioloop(startupmsg) {
@@ -624,14 +635,14 @@ class PgConnection {
     this.destroy(caughtError);
   }
   async _createSocket() {
-    const socket = await _networking.connect(this._connectOptions);
+    const socket = await _net.connect(this._connectOptions);
     if (!this._tls) return socket;
     // TODO implement tls
     try {
-      await _networking.write(socket, serializeFrontendMessage(new SSLRequest()));
+      await _net.write(socket, serializeFrontendMessage(new SSLRequest()));
       const sslResp = await readByte(socket);
       if (sslResp == 'S') {
-        return await Deno.startTls(socket, { });
+        return await _net.startTls(socket, { });
       }
       if (this._tls == 'require') {
         // TODO error message
@@ -639,7 +650,7 @@ class PgConnection {
       }
       return socket;
     } catch (err) {
-      _networking.close(socket);
+      _net.close(socket);
       throw err;
     }
   }
@@ -681,7 +692,7 @@ class PgConnection {
     // And should send all messages of query in single writeAll call
     // (except copy from stdin)
     // TODO zero copy for stdin
-    await _networking.write(this._socket, serializeFrontendMessage(m));
+    await _net.write(this._socket, serializeFrontendMessage(m));
   }
   async _recvMessages() {
     for await (const mchunk of BackendMessageReader.iterBackendMessages(this._socket)) {
@@ -858,8 +869,6 @@ class PgConnection {
     if (this._password == null) {
       throw Error('password required (md5)');
     }
-    // const authResponse = md5AuthResponse(this._user, this._password, salt);
-
     // should use server_encoding, but there is
     // no way to know server_encoding before authentication.
     // So it should be possible to provide password as Uint8Array
@@ -929,9 +938,9 @@ class PgConnection {
       return this._completeStartup();
     }
     if (this._currResponseChannel) {
-      this._endResponse();
+      await this._endResponse(m);
     } else {
-      this._startResponse();
+      await this._startResponse(m);
     }
   }
   _completeStartup() {
@@ -941,12 +950,13 @@ class PgConnection {
     this._resolveReady();
     this._wakeTimer = setInterval(this._wake.bind(this), this._wakeInterval);
   }
-  _startResponse() {
+  async _startResponse(m) {
     this._currResponseChannel = this._queuedResponseChannels[0];
     // TODO assert this._currResponseChan is not null
-    // await this._fwdBackendMessage(m);
+    // this._pushChunk('wake');
+    await this._fwdBackendMessage(m);
   }
-  _endResponse() {
+  async _endResponse() {
     // await this._fwdBackendMessage(m);
     this._queuedResponseChannels.shift();
     this._currResponseChannel.end(this._lastErrorResponse);
@@ -978,20 +988,15 @@ class PgConnection {
     await this._pushChunk(tag, payload);
   }
   _wake() {
-    if (
-      this._currResponseChannel &&
-      !this._currResponseChannel.length &&
-      this._lastPullTime + this._wakeInterval <= performance.now()
-    ) {
-      this._pushChunk('wake');
-    }
+    if (!this._currResponseChannel?.drained) return;
+    if (this._lastPullTime + this._wakeInterval > Date.now()) return;
+    this._pushChunk('wake');
   }
   _pushChunk(tag, payload = null, rows = [], copies = [], m = new Uint8Array(0)) {
     m.tag = tag;
     m.payload = payload;
     m.rows = rows;
     m.copies = copies;
-    // console.log('pushChunk', m.tag);
     return this._currResponseChannel.push(m);
   }
 }
@@ -1000,7 +1005,7 @@ function warnError(err) {
   // console.error('warning', err);
 }
 
-function simpleQuery(out, script, { stdin, stdins = [] } = {}, stdinAbortSignal, responseEndLock) {
+function simpleQuery(out, script, { stdin, stdins = [] } = {}, stdinSignal, responseEndLock) {
   // To cancel query we should send CancelRequest _after_
   // query is received by server and started executing.
   // But we cannot wait for first chunk because postgres can hold it
@@ -1018,10 +1023,10 @@ function simpleQuery(out, script, { stdin, stdins = [] } = {}, stdinAbortSignal,
   // TODO handle case when number of stdins is unknown
   // should block tx and wait for CopyInResponse/CopyBothResponse
   if (stdin) {
-    out.push(wrapCopyData(stdin, stdinAbortSignal));
+    out.push(wrapCopyData(stdin, stdinSignal));
   }
   for (const stdin of stdins) {
-    out.push(wrapCopyData(stdin, stdinAbortSignal));
+    out.push(wrapCopyData(stdin, stdinSignal));
   }
   // when CREATE_REPLICATION_SLOT or START_REPLICATION is emitted
   // then no other queries should be emmited until ReadyForQuery is received.
@@ -1035,15 +1040,15 @@ function simpleQuery(out, script, { stdin, stdins = [] } = {}, stdinAbortSignal,
     out.push(new CopyFail('missing copy upstream'));
   }
 }
-function extendedQuery(out, blocks, stdinAbortSignal) {
+function extendedQuery(out, blocks, stdinSignal) {
   out.push(new Sync()); // see top comment in simpleQuery
   for (const m of blocks) {
     switch (m.message) {
       case undefined:
-      case null: extendedQueryStatement(out, m, stdinAbortSignal); break;
+      case null: extendedQueryStatement(out, m, stdinSignal); break;
       case 'Parse': extendedQueryParse(out, m); break;
       case 'Bind': extendedQueryBind(out, m); break;
-      case 'Execute': extendedQueryExecute(out, m, stdinAbortSignal); break;
+      case 'Execute': extendedQueryExecute(out, m, stdinSignal); break;
       case 'DescribeStatement': extendedQueryDescribeStatement(out, m); break;
       case 'CloseStatement': extendedQueryCloseStatement(out, m); break;
       case 'DescribePortal': extendedQueryDescribePortal(out, m); break;
@@ -1054,11 +1059,11 @@ function extendedQuery(out, blocks, stdinAbortSignal) {
   }
   out.push(new Sync());
 }
-function extendedQueryStatement(out, { statement, params = [], limit, binary, stdin, noBuffer }, stdinAbortSignal) {
+function extendedQueryStatement(out, { statement, params = [], limit, binary, stdin, noBuffer }, stdinSignal) {
   const paramTypes = params.map(({ type }) => type);
   extendedQueryParse(out, { statement, paramTypes });
   extendedQueryBind(out, { params, binary });
-  extendedQueryExecute(out, { limit, stdin, noBuffer }, stdinAbortSignal);
+  extendedQueryExecute(out, { limit, stdin, noBuffer }, stdinSignal);
   // if (noBuffer) {
   //   out.push(new Flush());
   // }
@@ -1072,17 +1077,15 @@ function extendedQueryBind(out, { portal, statementName, binary, params = [] }) 
   out.push(new Bind({ portal, statementName, binary, params }));
 
   function encodeParam({ value, type}) {
-    if (value instanceof Uint8Array) {
-      // treat Uint8Array values as already encoded,
-      // so user can receive value with unknown type as Uint8Array
-      // from extended .query and pass it back as parameter
-      return value;
-      // it also "encodes" bytea in efficient way instead of hex
-    }
+    // treat Uint8Array values as already encoded,
+    // so user can receive value with unknown type as Uint8Array
+    // from extended .query and pass it back as parameter
+    // it also "encodes" bytea in efficient way instead of hex
+    if (value instanceof Uint8Array) return value;
     return typeEncode(value, typeResolve(type));
   }
 }
-function extendedQueryExecute(out, { portal, stdin, limit, noBuffer }, stdinAbortSignal) {
+function extendedQueryExecute(out, { portal, stdin, limit, noBuffer }, stdinSignal) {
   // TODO write test to explain why
   // we need unconditional DescribePortal
   // before Execute
@@ -1092,7 +1095,7 @@ function extendedQueryExecute(out, { portal, stdin, limit, noBuffer }, stdinAbor
   //   out.push(new Flush());
   // }
   if (stdin) {
-    out.push(wrapCopyData(stdin, stdinAbortSignal));
+    out.push(wrapCopyData(stdin, stdinSignal));
   } else {
     // CopyFail message ignored by postgres
     // if there is no COPY FROM statement
@@ -1113,28 +1116,26 @@ function extendedQueryDescribePortal(out, { portal }) {
 function extendedQueryClosePortal({ portal }) {
   out.push(new ClosePortal(portal));
 }
-async function * wrapCopyData(source, abortSignal) {
+async function * wrapCopyData(source, signal) {
   // TODO dry
   // if (abortSignal.aborted) {
   //   return;
   // }
   try {
     for await (const chunk of source) {
-      yield new CopyData(chunk);
-      if (abortSignal.aborted) {
-        yield new CopyFail('aborted'); // TODO is correct?
-        return;
+      if (signal.aborted) {
+        throw signal.reason;
       }
+      yield new CopyData(chunk);
     }
+    yield new CopyDone();
   } catch (err) {
     // FIXME err.stack lost
     // store err
     // do CopyFail (copy_error_key)
     // rethrow stored err when ErrorResponse received
     yield new CopyFail(String(err));
-    return;
   }
-  yield new CopyDone();
 }
 
 class PgResponse {
@@ -1151,18 +1152,13 @@ class PgResponse {
     // or if need to enqueue .query('discard all') after user .query in pool
     return this._iter[Symbol.asyncIterator]();
   }
-  then(...args) {
-    return this._loadOnce().then(...args);
-  }
-  catch(...args) {
-    return this._loadOnce().catch(...args);
-  }
-  finally(...args) {
-    return this._loadOnce().finally(...args);
-  }
-  _loadOnce() {
-    return this._loadPromise || (this._loadPromise = this._load());
-  }
+
+  // make PgResponse behave like lazy promise
+  then(...args) { return this._loadOnce().then(...args); }
+  catch(...args) { return this._loadOnce().catch(...args); }
+  finally(...args) { return this._loadOnce().finally(...args); }
+  _loadOnce() { return this._loadPromise || (this._loadPromise = this._load()); }
+
   async _load() {
     let notices = []
     let results = [];
@@ -1202,70 +1198,8 @@ class PgResponse {
       results.push(result);
       result = new PgResult();
     }
-    // TODO return { empty: true } if no results
     return new PgResultSet(results, notices);
   }
-  // async _load() {
-  //   // let inTransaction = false;
-
-  //   let lastResult = new PgResult();
-  //   const results = [];
-  //   for await (const chunk of this._iter) {
-  //     // lastResult = lastResult || {
-  //     //   // copies: [],
-  //     //   rows: [],
-  //     //   first: [],
-  //     //   scalar: undefined,
-  //     //   columns: [],
-  //     //   notices: [],
-  //     //   command: null,
-  //     //   suspended: false,
-  //     //   empty: false,
-  //     // };
-  //     lastResult.rows.push(...chunk.rows);
-  //     // lastResult.copies.push(...chunk.copies); // TODO chunk.copies
-  //     switch (chunk.tag) {
-  //       // TODO NoData
-  //       // TODO ParameterDescription
-  //       // TODO CopyOutResponse
-
-  //       case 'NoticeResponse':
-  //         lastResult.notices.push(chunk.payload);
-  //         continue;
-  //       // case 'ReadyForQuery':
-  //       //   inTransaction = chunk.payload.transactionStatus != 0x49 /*I*/;
-  //       // //   continue;
-  //       // case 'CopyOutResponse':
-  //       // case 'CopyBothResponse':
-  //       //   lastResult.columns = chunk.payload.columns;
-  //       //   break;
-  //       case 'RowDescription':
-  //         lastResult.columns = chunk.payload;
-  //         continue;
-  //       default:
-  //         continue;
-
-  //       // statement result boundaries
-  //       case 'CommandComplete':
-  //         lastResult.command = chunk.payload;
-  //         break;
-  //       case 'PortalSuspended':
-  //         lastResult.suspended = true;
-  //         break;
-  //       case 'EmptyQueryResponse':
-  //         lastResult.empty = true;
-  //         break;
-  //     }
-  //     lastResult.first = lastResult.rows[0] || [];
-  //     lastResult.scalar = lastResult.first[0];
-  //     results.push(lastResult);
-  //     lastResult = new PgResult();
-  //   }
-  //   const resultset = new PgResult();
-  //   Object.assign(resultset, results[results.length - 1]);
-  //   resultset.results = results;
-  //   return resultset;
-  // }
 }
 
 class PgResultSet {
@@ -1274,12 +1208,12 @@ class PgResultSet {
     this.results = results;
     this.notices = notices;
   }
-  get scalar() { return this._last?.scalar; }
+  get scalar() { return this._last?.scalar; } // deprecated
   get rows() { return this._last?.rows || []; }
   get columns() { return this._last?.columns || []; }
   get command() { return this._last?.command; }
   get suspended() { return this._last?.suspended || false; }
-  get empty() { return this._last?.empty || false; } // TODO ?? true ?
+  get empty() { return this._last?.empty || false; } // TODO true if no results
   get _last() { return this.results[this.results.length - 1]; }
   [Symbol.iterator]() { return (this.rows[0] || []).values(); }
 }
@@ -1291,36 +1225,8 @@ class PgResult {
   command = null;
   suspended = false;
   empty = false;
-  get scalar() { return this.rows[0]?.[0]; }
+  get scalar() { return this.rows[0]?.[0]; } // deprecated
 }
-
-// class PgResult {
-//   rows = [];
-//   columns = [];
-//   notices = [];
-//   command = null;
-//   suspended = false;
-//   empty = false;
-//   prev = null;
-//   constructor(prev) {
-//     this.prev = prev;
-//   }
-//   [Symbol.iterator]() {
-//     return (this.rows[0] || []).values();
-//   }
-//   // TODO deprecated? use array destructurization instead
-//   // const [scalar] = await pg.query(`select hello`);
-//   get scalar() {
-//     return Array.from(this)[0];
-//   }
-//   get results() {
-//     const results = [];
-//     for (let r = this; r; r = r.prev) {
-//       results.push(r);
-//     }
-//     return results.reverse();
-//   }
-// }
 
 class ReplicationStream {
   constructor(rx, tx, ackInterval) {
@@ -1330,14 +1236,16 @@ class ReplicationStream {
     this._ackInterval = ackInterval;
     this._ackingLsn = '00000000/00000000';
     this._ackmsg = Uint8Array.of(
-      0x72 /*r*/,
+      0x72, // r
       0, 0, 0, 0, 0, 0, 0, 0, // 1 - written lsn
       0, 0, 0, 0, 0, 0, 0, 0, // 9 - flushed lsn
       0, 0, 0, 0, 0, 0, 0, 0, // 17 - applied lsn
       0, 0, 0, 0, 0, 0, 0, 0, // 25 - time
       0, // 33 - should reply
     );
-    this._ackmsgv = new DataView(this._ackmsg.buffer);
+    this._ackmsgWrittenLsn = new DataView(this._ackmsg.buffer, 1, 8);
+    this._ackmsgFlushedLsn = new DataView(this._ackmsg.buffer, 9, 8);
+    this._ackmsgAppliedLsn = new DataView(this._ackmsg.buffer, 17, 8);
     this._iter = this._iterate(); // TODO can use `this` before all props inited? (hidden class optimization)
   }
   [Symbol.asyncIterator]() {
@@ -1357,40 +1265,31 @@ class ReplicationStream {
         const { value: chunk, done } = await this._rx.next();
         if (done) break;
         const messages = [];
+        let shouldReply = false;
         for (const copyData of chunk.copies) {
           msgreader.reset(copyData);
           const msg = msgreader.readReplicationMessage();
-          if (lastLsn < msg.lsn) {
-            lastLsn = msg.lsn;
-          }
-          if (lastLsn < msg.endLsn) {
-            lastLsn = msg.endLsn;
-          }
-          if (lastTime < msg.time) {
-            lastTime = msg.time;
-          }
           switch (msg.tag) {
             case 'XLogData':
               messages.push(msg);
               break;
             case 'PrimaryKeepaliveMessage':
-              if (msg.shouldReply) {
-                this._ackImmediate();
-              }
-              // Start timer after successfull replication start.
-              // CopyBothResponse is not an option because replication
-              // can be aborted immediatly after CopyBothResponse when
-              // replication is started second time on connection.
-              if (!ackTimer) {
-                ackTimer = setInterval(this._ackImmediate.bind(this), this._ackInterval);
-              }
+              shouldReply = shouldReply || msg.shouldReply;
               break;
           }
+          if (lastLsn < msg.lsn) lastLsn = msg.lsn;
+          if (lastLsn < msg.endLsn) lastLsn = msg.endLsn;
+          if (lastTime < msg.time) lastTime = msg.time;
+        }
+        if (shouldReply) {
+          this._ackImmediate();
         }
         // Start yielding messages only when replication started succesfully.
         // First message on successful start will be PrimaryKeepaliveMessage.
         // Skip CopyBothResponse, seems that there is no usefull information.
+        // TODO but we loose ability to break loop if replication initialization is stuck.
         if (lastLsn) {
+          ackTimer = ackTimer || setInterval(this._ackImmediate.bind(this), this._ackInterval);
           yield { lastLsn, lastTime, messages };
         }
       }
@@ -1413,13 +1312,12 @@ class ReplicationStream {
     let nlsn = BigInt('0x' + this._ackingLsn.replace('/', ''));
     nlsn += 1n;
     // TODO accept { written, flushed, applied, immediate }
-    this._ackmsgv.setBigUint64(1, nlsn); // written
-    this._ackmsgv.setBigUint64(9, nlsn); // flushed
-    this._ackmsgv.setBigUint64(17, nlsn); // applied
+    this._ackmsgWrittenLsn.setBigUint64(0, nlsn);
+    this._ackmsgFlushedLsn.setBigUint64(0, nlsn);
+    this._ackmsgAppliedLsn.setBigUint64(0, nlsn);
   }
   _ackImmediate() {
-    // if (!this._tx) return;
-    if (this._tx.length) return;
+    if (!this._tx.drained) return;
     this._tx.push(this._ackmsg);
   }
 }
@@ -1725,7 +1623,7 @@ class BackendMessageReader extends MessageReader {
         buf = new Uint8Array(oldbuf.length * 2); // TODO prevent uncontrolled grow
         buf.set(oldbuf);
       }
-      const nread = await _networking.read(socket, buf.subarray(nbuf));
+      const nread = await _net.read(socket, buf.subarray(nbuf));
       if (nread == null) break;
       nbuf += nread;
 
@@ -2376,69 +2274,51 @@ function lsnMakeComparable(text) {
 
 
 class Channel {
-  constructor() {
-    this._buf = [];
-    this._result = undefined;
-    this._ended = false;
-    this._resolvePushed = Boolean;
-    this.whenEnded = new Promise(resolve => {
-      this._resolveEnded = resolve;
-    });
-    this._whenDrained = null;
-    this._resolveDrained = Boolean; // noop
-    this._whenDrainedExecutor = resolve => {
-      this._resolveDrained = resolve;
-    };
-    this._iter = this._iterate();
+  _qnext = []
+  _qpush = [];
+  _value = undefined;
+  _pausePushAsync = resolve => this._qpush.push({ done: false, value: this._value, resolve });
+  _pauseNextAsync = resolve => this._qnext.push(resolve);
+  _resolveEnded = null;
+  _whenEnded = new Promise(resolve => this._resolveEnded = resolve);
+
+  get drained() {
+    return this._qpush && !this._qpush.length;
   }
-  get length() {
-    return this._buf.length;
+  async push(value) {
+    if (!this._qnext) throw Error('push after ended');
+    const resumeNext = this._qnext.shift();
+    if (resumeNext) return resumeNext({ done: false, value });
+    if (!this._qpush) return; // iterator returned
+    this._value = value;
+    await new Promise(this._pausePushAsync);
   }
-  push(...values) {
-    if (this._ended) {
-      throw Error('push after ended');
+  end(value) {
+    if (!this._qnext) throw Error('already ended');
+    this._value = value;
+    for (const resumeNext of this._qnext) {
+      resumeNext({ done: true, value });
+      // TODO return { value: undefined }
     }
-    if (!this._buf) {
-      return; // iterator is aborted
-    }
-    if (this._buf.push(...values) == 1) {
-      this._whenDrained = new Promise(this._whenDrainedExecutor);
-    }
-    this._resolvePushed();
-    return this._whenDrained;
-  }
-  end(result) {
-    if (this._ended) {
-      throw Error('already ended');
-    }
-    this._result = result;
-    this._ended = true;
-    this._resolvePushed();
+    this._qnext = null; // do not pull anymore
     this._resolveEnded();
   }
-  async * _iterate() {
-    const whenPushedExecutor = resolve => {
-      this._resolvePushed = resolve;
-    };
-    try {
-      for (;;) {
-        while (this._buf.length) {
-          // TODO perfomance
-          yield this._buf.shift();
-        }
-        this._resolveDrained();
-        if (this._ended) {
-          return this._result;
-        }
-        await new Promise(whenPushedExecutor);
-      }
-    } finally {
-      this._buf = null;
-      this._resolveDrained();
+  async next() {
+    if (!this._qpush) return { done: true, value: undefined };
+    const unpushed = this._qpush.shift();
+    if (unpushed) return unpushed.resolve(), unpushed;
+    if (!this._qnext) return { done: true, value: this._value };
+    return new Promise(this._pauseNextAsync);
+  }
+  async return() {
+    if (this._qpush) {
+      this._qpush.forEach(it => it.resolve());
+      this._qpush = null; // do not push anymore
     }
+    await this._whenEnded;
   }
   [Symbol.asyncIterator]() {
-    return this._iter[Symbol.asyncIterator]();
+    return this;
   }
 }
 
@@ -2446,29 +2326,33 @@ class SaslScramSha256 {
   _clientFirstMessageBare;
   _serverSignatureB64;
   async start() {
-    const clientNonce = crypto.getRandomValues(new Uint8Array(24));
-    this._clientFirstMessageBare = 'n=,r=' + this._b64encode(clientNonce);
+    const clientNonce = await _crypto.randomBytes(24);
+    this._clientFirstMessageBare = 'n=,r=' + _crypto.b64encode(clientNonce);
     return 'n,,' + this._clientFirstMessageBare;
   }
   async continue(serverFirstMessage, password) {
     const utf8enc = new TextEncoder();
     const { 'i': iterations, 's': saltB64, 'r': nonceB64 } = this._parseMsg(serverFirstMessage);
     const finalMessageWithoutProof = 'c=biws,r=' + nonceB64;
-    const salt = this._b64decode(saltB64);
+    const salt = _crypto.b64decode(saltB64);
     const passwordUtf8 = utf8enc.encode(password.normalize());
-    const saltedPassword = await this._pbkdf2(passwordUtf8, salt, +iterations, 32 * 8);
-    const clientKey = await this._hmac(saltedPassword, utf8enc.encode('Client Key'));
-    const storedKey = await this._sha256(clientKey);
+    const saltedPassword = await _crypto.sha256pbkdf2(passwordUtf8, salt, +iterations, 32);
+    const clientKey = await _crypto.sha256hmac(saltedPassword, utf8enc.encode('Client Key'));
+    const storedKey = await _crypto.sha256(clientKey);
     const authMessage = utf8enc.encode(
       this._clientFirstMessageBare + ',' +
       serverFirstMessage + ',' +
       finalMessageWithoutProof
     );
-    const clientSignature = await this._hmac(storedKey, authMessage);
-    const clientProof = this._xor(clientKey, clientSignature);
-    const serverKey = await this._hmac(saltedPassword, utf8enc.encode('Server Key'));
-    this._serverSignatureB64 = this._b64encode(await this._hmac(serverKey, authMessage));
-    return finalMessageWithoutProof + ',p=' + this._b64encode(clientProof);
+    const clientSignature = await _crypto.sha256hmac(storedKey, authMessage);
+    const clientProof = xor(clientKey, clientSignature);
+    const serverKey = await _crypto.sha256hmac(saltedPassword, utf8enc.encode('Server Key'));
+    this._serverSignatureB64 = _crypto.b64encode(await _crypto.sha256hmac(serverKey, authMessage));
+    return finalMessageWithoutProof + ',p=' + _crypto.b64encode(clientProof);
+
+    function xor(a, b) {
+      return Uint8Array.from(a, (ai, i) => ai ^ b[i]);
+    }
   }
   finish(response) {
     if (!this._serverSignatureB64) {
@@ -2482,66 +2366,8 @@ class SaslScramSha256 {
   _parseMsg(msg) { // parses `key1=val,key2=val` into object
     return Object.fromEntries(msg.split(',').map(it => /^(.*?)=(.*)$/.exec(it).slice(1)));
   }
-  async _sha256(val) {
-    return new Uint8Array(await crypto.subtle.digest('SHA-256', val));
-  }
-  async _pbkdf2(pwd, salt, iterations, len) {
-    const cryptoKey = await crypto.subtle.importKey('raw', pwd, 'PBKDF2', false, ['deriveBits']);
-    const pbkdf2params = { name: 'PBKDF2', hash: 'SHA-256', salt, iterations };
-    const buf = await crypto.subtle.deriveBits(pbkdf2params, cryptoKey, len);
-    return new Uint8Array(buf);
-  }
-  async _hmac(key, inp) {
-    const hmacParams = { name: 'HMAC', hash: 'SHA-256' };
-    const importedKey = await crypto.subtle.importKey('raw', key, hmacParams, false, ['sign']);
-    const buf = await crypto.subtle.sign('HMAC', importedKey, inp);
-    return new Uint8Array(buf);
-  }
-  _xor(a, b) {
-    return Uint8Array.from(a, (x, i) => x ^ b[i]);
-  }
-  _b64encode(bytes) {
-    return btoa(String.fromCharCode(...bytes));
-  }
-  _b64decode(b64) {
-    return Uint8Array.from(atob(b64), x => x.charCodeAt());
-  }
 }
 
-const _networking = {
-  async connect(options) {
-    return Deno.connect(options);
-  },
-  canReconnect(err) {
-    return (
-      err instanceof Deno.errors.ConnectionRefused ||
-      err instanceof Deno.errors.ConnectionReset
-    );
-  },
-  async startTls(socket) {
-    return Deno.startTls(socket);
-  },
-  async write(socket, arr) {
-    let nwritten = 0;
-    while (nwritten < arr.length) {
-      nwritten += await socket.write(arr.subarray(nwritten));
-    }
-  },
-  async read(socket, buf) {
-    return socket.read(buf);
-  },
-  close(socket) {
-    try {
-      socket.close();
-    } catch (err) {
-      if (!(err instanceof Deno.errors.BadResource)) {
-        throw err;
-      }
-    }
-  },
-};
-
-// We will not use Deno std to make this module compatible with Node
 function md5(/** @type {Uint8Array} */ input) {
   const padded = new Uint8Array(Math.ceil((input.byteLength + 1 + 8) / 64) * 64);
   const paddedv = new DataView(padded.buffer);
@@ -2651,3 +2477,57 @@ function md5(/** @type {Uint8Array} */ input) {
     return (x << n) | (x >>> (32 - n));
   }
 }
+
+export const _net = {
+  async connect(options) {
+    return Deno.connect(options);
+  },
+  async startTls(socket) {
+    return Deno.startTls(socket);
+  },
+  async write(socket, arr) {
+    let nwritten = 0;
+    while (nwritten < arr.length) {
+      nwritten += await socket.write(arr.subarray(nwritten));
+    }
+  },
+  async read(socket, buf) {
+    return socket.read(buf);
+  },
+  close(socket) {
+    try {
+      socket.close();
+    } catch (err) {
+      if (err instanceof Deno.errors.BadResource) return; // already closed
+      throw err;
+    }
+  },
+};
+
+// for scram-sha-256
+export const _crypto = {
+  b64encode(bytes) {
+    return btoa(String.fromCharCode(...bytes));
+  },
+  b64decode(b64) {
+    return Uint8Array.from(atob(b64), x => x.charCodeAt());
+  },
+  async randomBytes(n) {
+    return crypto.getRandomValues(new Uint8Array(n));
+  },
+  async sha256(val) {
+    return new Uint8Array(await crypto.subtle.digest('SHA-256', val));
+  },
+  async sha256hmac(key, inp) {
+    const hmacParams = { name: 'HMAC', hash: 'SHA-256' };
+    const importedKey = await crypto.subtle.importKey('raw', key, hmacParams, false, ['sign']);
+    const buf = await crypto.subtle.sign('HMAC', importedKey, inp);
+    return new Uint8Array(buf);
+  },
+  async sha256pbkdf2(pwd, salt, iterations, nbytes) {
+    const cryptoKey = await crypto.subtle.importKey('raw', pwd, 'PBKDF2', false, ['deriveBits']);
+    const pbkdf2params = { name: 'PBKDF2', hash: 'SHA-256', salt, iterations };
+    const buf = await crypto.subtle.deriveBits(pbkdf2params, cryptoKey, nbytes * 8);
+    return new Uint8Array(buf);
+  },
+};

@@ -1,59 +1,30 @@
-FROM denoland/deno:alpine-1.17.2
-
-RUN set -x \
- && cd /tmp \
- && wget -O- https://github.com/postgres/postgres/archive/REL_14_1.tar.gz | tar xz \
- && apk add --no-cache \
-  libxml2 \
-  libxslt \
-  json-c \
-  icu \
-  openssl \
-  llvm10 \
- && apk add --no-cache --virtual .build-deps \
-  build-base \
-  linux-headers \
-  bison \
-  flex \
-  libxml2-dev \
-  libxslt-dev \
-  icu-dev \
-  openssl-dev \
-  autoconf \
-  automake \
-  libtool \
-  clang-dev \
-  llvm10-dev \
- \
- && cd /tmp/postgres-* \
- && ./configure \
-  --prefix=/usr/local \
-  --without-readline \
-  --with-libxml \
-  --with-libxslt \
-  --with-icu \
-  --with-openssl \
-  --with-llvm LLVM_CONFIG=/usr/lib/llvm10/bin/llvm-config \
- && make \
- && make install \
- && cd contrib \
- && make \
- && make install \
- && apk del .build-deps \
- && rm -r /tmp/*
-
+FROM alpine:3.15
+RUN apk add --no-cache postgresql14
 ENV PGDATA=/var/lib/postgresql/data
-# VOLUME $PGDATA
-
 RUN set -x \
- && adduser --uid 70 --disabled-password --home /var/lib/postgresql --no-create-home postgres \
- && install -o postgres -g postgres -m 700 -d /var/lib/postgresql/data \
  && su postgres -c initdb \
- && echo "listen_addresses = '*'"  > $PGDATA/postgresql.conf \
- && echo "wal_level = logical"    >> $PGDATA/postgresql.conf \
- #             db     user addr method
- && echo "host all    all  all  trust" > $PGDATA/pg_hba.conf
+ && install -o postgres -g postgres -m 700 -d /run/postgresql \
+ && printf %s\\n \
+  "listen_addresses='0.0.0.0'" \
+  "wal_level=logical" \
+  "log_timezone=UTC" \
+  "timezone=UTC" \
+  > $PGDATA/postgresql.conf \
+ && printf %s\\n \
+  #      db  user       addr method
+  "host  all pwduser    all password" \
+  "host  all md5user    all md5" \
+  "host  all sha256user all scram-sha-256" \
+  "host  all all        all trust" \
+  "local all all            trust" \
+  > $PGDATA/pg_hba.conf \
+ && su postgres -c "pg_ctl --wait start" \
+ && psql -U postgres -v ON_ERROR_STOP=1 \
+  -c " create role pwduser login password 'secret' " \
+  -c " set password_encryption = 'md5' " \
+  -c " create role md5user login password 'secret' " \
+  -c " set password_encryption = 'scram-sha-256' " \
+  -c " create role sha256user login password 'secret' "
 
-WORKDIR /app
-CMD su postgres -c "pg_ctl --wait start" \
- && deno test --allow-net --filter "$TEST_FILTER"
+USER postgres
+CMD ["postgres"]

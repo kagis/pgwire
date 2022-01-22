@@ -1,0 +1,6 @@
+#!/bin/sh
+set -xe
+export COMPOSE_FILE=test/compose.yml
+docker compose down -v
+export TEST_FILTER="$@"
+docker compose -f test/compose.yml up --exit-code-from deno deno
