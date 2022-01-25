@@ -22,7 +22,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 export async function pgconnect(...optionsChain) {
   const conn = new PgConnection(computeConnectionOptions(optionsChain));
-  await conn.whenReady;
+  await conn.waitReady(); // TODO .start()
   return conn;
 }
 
@@ -82,11 +82,7 @@ export function pgliteral(s) {
 }
 
 export function pgident(...segments) {
-  return (
-    segments
-    .map(it => '"' + it.replace(/"/g, '""') + '"')
-    .join('.')
-  );
+  return segments.map(it => '"' + it.replace(/"/g, '""') + '"').join('.');
 }
 
 function computeConnectionOptions([uriOrObj, ...rest]) {
@@ -133,10 +129,11 @@ export function pgerror(err) {
 //   }
 // }
 
-// const kErrorCode = Symbol('kErrorCode');
-
 class PgError extends Error {
   static kDetails = Symbol.for('pgwire.error');
+  static rethrow(err) {
+    return new PgError(err[PgError.kDetails]);
+  }
   constructor(errorResponse) {
     const { code, message, ...rest } = errorResponse || 0;
     const propsfmt = (
@@ -350,13 +347,26 @@ class PgConnection {
       reject(err);
     };
   }
-  /** resolved when connection is established and authenticated */
-  get whenReady() {
-    return this._whenReady;
+  async waitReady() {
+    try {
+      await this._whenReady;
+    } catch (cause) {
+      if (cause instanceof PgError) {
+        throw PgError.rethrow(cause);
+      }
+      const err = Error(cause.message);
+      err.cause = cause;
+      throw err;
+    }
   }
+  // /** resolved when connection is established and authenticated */
+  // get whenReady() {
+  //   return this._whenReady;
+  // }
   /** resolved when no quieries can be emitted and connection is about to terminate */
   get whenEnded() {
-    return this._txReadable.whenEnded;
+    // TODO private _whenEnded
+    return this._txReadable._whenEnded;
   }
   /** number of pending queries */
   get pending() {
@@ -492,7 +502,7 @@ class PgConnection {
         // responseChannel.return() is resolved
         await this._cancelRequest().catch(warnError);
       }
-      // skip until ReadyForQuery
+      // wait ReadyForQuery
       await responseChannel.return();
       responseEndLock.end();
     }
@@ -558,28 +568,30 @@ class PgConnection {
     // TODO do CancelRequest to wake stuck connection which can continue executing ?
     return destroyReason; // user code can call .destroy and throw destroyReason in one line
   }
-  async * notifications() {
+  async * notifications({ channel, signal } = 0) {
     if (!this._tx) {
       const err = Error('connection destroyed');
       err.cause = this._destroyReason;
       throw err;
     }
+    if (signal?.aborted) return;
+    const chan = new Channel({ waitForEnd: false });
+    const onAbort = _ => chan.end();
+    signal?.addEventListener('abort', onAbort);
     const subscriptions = this._notificationSubscriptions;
-    const nsub = new Channel();
-    subscriptions.add(nsub);
+    subscriptions.add(chan);
     try {
-      // TODO nsub.return() will not resolve until nsub.end()
-      const cause = yield * nsub;
+      const cause = yield * chan;
       if (cause) {
         const err = Error('postgres notification stream broken');
         err.cause = cause;
         throw err;
       }
     } finally {
-      subscriptions.delete(nsub);
+      subscriptions.delete(chan);
+      signal?.removeEventListener('abort', onAbort);
     }
   }
-
   logicalReplication({ slot, startLsn = '0/0', options = {}, ackInterval = 10e3 }) {
     const optionsSql = (
       Object.entries(options)
@@ -663,18 +675,14 @@ class PgConnection {
           value && this._sendMessage(value),
         ]);
       }
+    } catch (err) {
+      // need to destroy connection here to prevent deadlock.
+      // If _sendMessage throw error than startTx.next() is still
+      // unresolved and waiting for server to respond or close connection.
+      // So iter.return() also will not be resolved
+      throw this.destroy(err);
     } finally {
-      // TODO iter.return resolved on recvMessages side,
-      // but recvMessages will not accept messages if sendMessage
-      // failed with error before emit frontent message,
-      // which causes deadlock here
-      // await iter.return();
-      // need a way to abort iter.next() here
-      // or get rid of parallel piping
-      iter.return(); // TODO is this ok to not await ?
-      // there are limited types of iterators passed in _sendMessage
-      // - startTx Channel, queryTx Channel and copyWrap iterator
-      // no one of them will throw error
+      await iter.return();
     }
   }
   async _sendMessage(m) {
@@ -720,8 +728,8 @@ class PgConnection {
     if (this._lastErrorResponse) {
       throw new PgError(this._lastErrorResponse);
     }
-    // TODO handle unexpected connection close when sendMessage still working.
-    // if sendMessage(this._startTx) is not resolved yet
+    // TODO handle unexpected connection close when _pipeMessages still working.
+    // if _pipeMessages(this._startTx) is not resolved yet
     // then _ioloop will not be resolved. But there no more active socket
     // to keep process running
   }
@@ -751,7 +759,7 @@ class PgConnection {
       case 'ErrorResponse': return this._recvErrorResponse(m, m.payload);
       case 'ReadyForQuery': return this._recvReadyForQuery(m, m.payload);
 
-      case 'NotificationResponse': return this._recvNotificationResponse(m.payload, m);
+      case 'NotificationResponse': return this._recvNotificationResponse(m, m.payload);
     }
   }
   _recvDataRow(_, /** @type {Array<Uint8Array>} */ row) {
@@ -978,7 +986,9 @@ class PgConnection {
     this._backendKeyData = backendKeyData;
   }
   async _recvNotificationResponse(_, payload) {
-    await Promise.all(Array.from(
+    // TODO we should await here,
+    // but deadlock can occur if emit queries.
+    Promise.all(Array.from(
       this._notificationSubscriptions,
       nc => nc.push(payload)
     ));
@@ -1139,7 +1149,7 @@ async function * wrapCopyData(source, signal) {
 }
 
 class PgResponse {
-  /** @type {Promise<PgResultSet>} */
+  /** @type {Promise<PgResult>} */
   _loadPromise;
   _iter;
 
@@ -1160,9 +1170,9 @@ class PgResponse {
   _loadOnce() { return this._loadPromise || (this._loadPromise = this._load()); }
 
   async _load() {
-    let notices = []
-    let results = [];
-    let result = new PgResult();
+    const notices = []
+    const results = [];
+    let result = new PgSubResult();
     for await (const chunk of this._iter) {
       result.rows.push(...chunk.rows);
       // lastResult.copies.push(...chunk.copies); // TODO chunk.copies
@@ -1186,46 +1196,61 @@ class PgResponse {
 
         // statement result boundaries
         case 'CommandComplete':
-          result.command = chunk.payload;
+          result.status = chunk.payload;
           break;
         case 'PortalSuspended':
-          result.suspended = true;
-          break;
         case 'EmptyQueryResponse':
-          result.empty = true;
+          result.status = chunk.tag;
           break;
       }
       results.push(result);
-      result = new PgResult();
+      result = new PgSubResult();
     }
-    return new PgResultSet(results, notices);
+    return new PgResult(results, notices);
   }
-}
-
-class PgResultSet {
-  constructor(results, notices) {
-    /** @type {PgResult[]} */
-    this.results = results;
-    this.notices = notices;
-  }
-  get scalar() { return this._last?.scalar; } // deprecated
-  get rows() { return this._last?.rows || []; }
-  get columns() { return this._last?.columns || []; }
-  get command() { return this._last?.command; }
-  get suspended() { return this._last?.suspended || false; }
-  get empty() { return this._last?.empty || false; } // TODO true if no results
-  get _last() { return this.results[this.results.length - 1]; }
-  [Symbol.iterator]() { return (this.rows[0] || []).values(); }
 }
 
 class PgResult {
+  constructor(results, notices) {
+    /** @type {PgSubResult[]} */
+    this.results = results;
+    this.notices = notices;
+  }
+  /** @deprecated */
+  get scalar() {
+    const [scalar] = this;
+    return scalar;
+  }
+  get rows() {
+    return this._lastSelect?.rows || [];
+  }
+  get columns() {
+    return this._lastSelect?.columns || [];
+  }
+  get status() {
+    if (this.results.length == 1) {
+      return this.results[0].status;
+    }
+  }
+  * [Symbol.iterator]() {
+    const [row] = this.rows;
+    if (row) yield * row;
+  }
+  get _lastSelect() {
+    for (let i = this.results.length - 1; i >= 0; i--) {
+      if (!this.results[i].columns.length) continue;
+      return this.results[i];
+    }
+  }
+}
+
+class PgSubResult {
   /** @type {any[][]} */
   rows = [];
   columns = [];
-  command = null;
-  suspended = false;
-  empty = false;
-  get scalar() { return this.rows[0]?.[0]; } // deprecated
+  status = null;
+  /** @deprecated */
+  get scalar() { return this.rows[0]?.[0]; }
 }
 
 class ReplicationStream {
@@ -1248,12 +1273,12 @@ class ReplicationStream {
     this._ackmsgAppliedLsn = new DataView(this._ackmsg.buffer, 17, 8);
     this._iter = this._iterate(); // TODO can use `this` before all props inited? (hidden class optimization)
   }
-  [Symbol.asyncIterator]() {
-    return this._iter[Symbol.asyncIterator]();
-  }
   /** @returns {AsyncIterable<PgoChunk>} */
   pgoutputDecode() {
     return PgoutputReader.decodeStream(this);
+  }
+  [Symbol.asyncIterator]() {
+    return this._iter;
   }
   async * _iterate() {
     let ackTimer;
@@ -1265,7 +1290,7 @@ class ReplicationStream {
         const { value: chunk, done } = await this._rx.next();
         if (done) break;
         const messages = [];
-        let shouldReply = false;
+        let shouldAck = false;
         for (const copyData of chunk.copies) {
           msgreader.reset(copyData);
           const msg = msgreader.readReplicationMessage();
@@ -1274,14 +1299,14 @@ class ReplicationStream {
               messages.push(msg);
               break;
             case 'PrimaryKeepaliveMessage':
-              shouldReply = shouldReply || msg.shouldReply;
+              shouldAck = shouldAck || msg.shouldReply;
               break;
           }
           if (lastLsn < msg.lsn) lastLsn = msg.lsn;
           if (lastLsn < msg.endLsn) lastLsn = msg.endLsn;
           if (lastTime < msg.time) lastTime = msg.time;
         }
-        if (shouldReply) {
+        if (shouldAck) {
           this._ackImmediate();
         }
         // Start yielding messages only when replication started succesfully.
@@ -1333,6 +1358,7 @@ class FrontendMessage {
   constructor(payload) {
     this.payload = payload;
     this.size = 0;
+    // TODO string size is depends on encoder
     const sizeCounter = new MessageSizer();
     this._write(sizeCounter, null, payload);
     this.size = sizeCounter.result;
@@ -1587,6 +1613,10 @@ class MessageReader {
       throw Error('unexpected end of message');
     }
   }
+  /**
+   * @template T
+   * @param {() => T} fn
+   * @return {T[]} */
   _array(length, fn) {
     return Array.from({ length }, fn, this);
   }
@@ -1794,8 +1824,6 @@ class BackendMessageReader extends MessageReader {
 
 // https://www.postgresql.org/docs/14/protocol-replication.html#id-1.10.5.9.7.1.5.1.8
 class ReplicationMessageReader extends MessageReader {
-  // _attached = null;
-
   readReplicationMessage() {
     const tag = this.readUint8();
     switch (tag) {
@@ -1805,7 +1833,7 @@ class ReplicationMessageReader extends MessageReader {
     }
   }
   _readXLogData() {
-    const m = {
+    return {
       tag: /** @type {const} */ ('XLogData'),
       lsn: this.readLsn(),
       // `endLsn` is always the same as `lsn` in case of logical replication.
@@ -1814,10 +1842,7 @@ class ReplicationMessageReader extends MessageReader {
       // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/walsender.c#L1270-L1271
       time: this.readTime(),
       data: this.readToEnd(),
-      // attached: this._attached,
-    }
-    // this._attached = m.lsn ? null : m;
-    return m;
+    };
   }
   _readPrimaryKeepaliveMessage() {
     return {
@@ -2274,14 +2299,16 @@ function lsnMakeComparable(text) {
 
 
 class Channel {
-  _qnext = []
-  _qpush = [];
-  _value = undefined;
-  _pausePushAsync = resolve => this._qpush.push({ done: false, value: this._value, resolve });
-  _pauseNextAsync = resolve => this._qnext.push(resolve);
-  _resolveEnded = null;
-  _whenEnded = new Promise(resolve => this._resolveEnded = resolve);
-
+  constructor({ waitForEnd = true } = 0) {
+    this._waitForEnd = waitForEnd;
+    this._qnext = []
+    this._qpush = [];
+    this._value = undefined;
+    this._pausePushAsync = resolve => this._qpush.push({ done: false, value: this._value, resolve });
+    this._pauseNextAsync = resolve => this._qnext.push(resolve);
+    this._resolveEnded = null;
+    this._whenEnded = new Promise(resolve => this._resolveEnded = resolve);
+  }
   get drained() {
     return this._qpush && !this._qpush.length;
   }
@@ -2310,12 +2337,15 @@ class Channel {
     if (!this._qnext) return { done: true, value: this._value };
     return new Promise(this._pauseNextAsync);
   }
-  async return() {
+  async return(value) {
     if (this._qpush) {
       this._qpush.forEach(it => it.resolve());
       this._qpush = null; // do not push anymore
     }
-    await this._whenEnded;
+    if (this._waitForEnd) {
+      await this._whenEnded;
+    }
+    return { done: true, value };
   }
   [Symbol.asyncIterator]() {
     return this;

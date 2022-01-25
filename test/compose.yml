@@ -7,7 +7,7 @@ services:
     working_dir: /app
     volumes: [..:/app]
     environment: [TEST_FILTER]
-    command: sh -c 'sleep 5 && deno test --allow-net --filter="$TEST_FILTER" test/test_deno.js'
+    command: sh -c 'sleep 5 && deno test --allow-net --v8-flags=--stack_trace_limit=30 --filter="$TEST_FILTER" test/test_deno.js'
 
   node:
     image: node:14.18-alpine3.15

@@ -23,7 +23,7 @@ Object.assign(_net, {
   },
 });
 
-// methods below need for scram sha256
+// for scram-sha-256
 Object.assign(_crypto, {
   b64encode(bytes) {
     return Buffer.from(bytes).toString('base64');

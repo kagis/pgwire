@@ -26,11 +26,10 @@ async function runTests() {
       await Promise.race([fn(), new Promise((_, reject) => {
         testTimeout = setTimeout(reject, 60 * 1000, Error('test timeout'));
       })]);
-      console.log('%s - ok', name); // eslint-disable-line no-console
+      console.log('%s ... ok', name); // eslint-disable-line no-console
     } catch (err) {
-      // console.log(err);
-      console.log('%s - failed', name); // eslint-disable-line no-console
-      throw err; // Error('test failed');
+      console.log('%s ... failed', name); // eslint-disable-line no-console
+      throw err;
     } finally {
       clearTimeout(testTimeout);
     }
