@@ -1125,7 +1125,7 @@ class PgResponse {
   _loadOnce() { return this._loadPromise || (this._loadPromise = this._load()); }
 
   async _load() {
-    const notices = []
+    const notices = [];
     const results = [];
     let result = new PgSubResult();
     for await (const chunk of this._iter) {
@@ -1877,8 +1877,8 @@ class PgoutputReader extends MessageReader {
     out.schema = this.readString();
     out.name = this.readString();
     out.replicaIdentity = this._readRelationReplicaIdentity();
-    out.attrs = this._array(this.readInt16(), this._readRelationAttr);
-    out.keyNames = out.attrs.filter(it => it.flags & 0b1).map(it => it.name);
+    out.columns = this._array(this.readInt16(), this._readRelationColumn);
+    out.keyColumns = out.columns.filter(it => it.flags & 0b1).map(it => it.name);
     // mem leak not likely to happen because amount of relations is usually small
     this._relationCache.set(out.relationOid, out);
   }
@@ -1893,8 +1893,8 @@ class PgoutputReader extends MessageReader {
       default: return relreplident;
     }
   }
-  _readRelationAttr() {
-    const attr = {
+  _readRelationColumn() {
+    const col = {
       flags: this.readUint8(),
       name: this.readString(),
       typeOid: this.readInt32(),
@@ -1902,15 +1902,15 @@ class PgoutputReader extends MessageReader {
       typeSchema: null,
       typeName: null, // TODO resolve builtin type names?
     }
-    Object.assign(attr, this._typeCache.get(attr.typeOid));
-    return attr;
+    Object.assign(col, this._typeCache.get(col.typeOid));
+    return col;
   }
   _upgradeMsgChange(out, tag, readN) {
     const relid = this.readInt32();
     const relation = this._relationCache.get(relid);
     const actionKON = this.readUint8();
     const keyOnly = actionKON == 0x4b /*K*/;
-    let before = this._readTuple(relation);
+    let before = this._readTuple(relation, keyOnly);
     let after = null;
     if (actionKON == 0x4e /*N*/) {
       after = before;
@@ -1918,13 +1918,13 @@ class PgoutputReader extends MessageReader {
     } else if (readN) {
       const actionN = this.readUint8();
       // TODO assert actionN == 'N'
-      after = this._readTuple(relation, before);
+      after = this._readTuple(relation, false, before);
     }
     let key = before || after;
-    if (relation.keyNames.length < relation.attrs.length) {
+    if (relation.keyColumns.length < relation.columns.length) {
       const tup = key;
       key = Object.create(null);
-      for (const k of relation.keyNames) {
+      for (const k of relation.keyColumns) {
         key[k] = tup[k];
       }
     }
@@ -1937,21 +1937,21 @@ class PgoutputReader extends MessageReader {
     out.before = before;
     out.after = after;
   }
-  _readTuple({ attrs }, unchangedToastFallback) {
+  _readTuple({ columns }, keyOnly, unchangedToastFallback) {
     const nfields = this.readInt16();
     const tuple = Object.create(null);
     for (let i = 0; i < nfields; i++) {
-      const { name, typeOid } = attrs[i];
+      const { name, typeOid } = columns[i];
       const kind = this.readUint8();
       switch (kind) {
-        case 0x62 /*b*/:
+        case 0x62 /*b*/: // binary
           const bsize = this.readInt32();
           const bval = this.read(bsize);
           // dont need to .slice() because new buffer
           // is created for each replication chunk
           tuple[name] = bval;
           break;
-        case 0x74 /*t*/:
+        case 0x74 /*t*/: // text
           const valsize = this.readInt32();
           const valbuf = this.read(valsize);
           // TODO lazy decode
@@ -1959,11 +1959,20 @@ class PgoutputReader extends MessageReader {
           const valtext = this._textDecoder.decode(valbuf);
           tuple[name] = typeDecode(valtext, typeOid);
           break;
-        case 0x6e /*n*/:
-          tuple[name] = null;
+        case 0x6e /*n*/: // null
+          if (keyOnly) {
+            // If value is `null`, then it is definitely not part of key,
+            // because key cannot have nulls by documentation.
+            // And if we got `null` while reading keyOnly tuple,
+            // then it means that `null` is not actual value
+            // but placeholder of non key column.
+            tuple[name] = undefined;
+          } else {
+            tuple[name] = null;
+          }
           break;
-        case 0x75 /*u*/:
-          tuple[name] = unchangedToastFallback?.[name] ?? undefined;
+        case 0x75 /*u*/: // unchanged toast datum
+          tuple[name] = unchangedToastFallback?.[name];
           break;
         default: throw Error(`uknown attribute kind ${kind}`);
       }
