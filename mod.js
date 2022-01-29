@@ -949,7 +949,8 @@ class PgConnection {
     this._backendKeyData = backendKeyData;
   }
   _recvNotificationResponse(_, payload) {
-    this.onnotification?.(payload);
+    // if onnotification throw error in _ioloop then error will be swallowed
+    Promise.resolve(payload).then(this.onnotification);
   }
   async _fwdBackendMessage({ tag, payload }) {
     await this._flushData();

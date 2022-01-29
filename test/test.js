@@ -1223,7 +1223,21 @@ test('connection end idempotent', async _ => {
       { pid, channel: 'test_chan', payload: 'hello2' },
       { pid, channel: 'test_chan', payload: 'hello3' },
     ]);
-  })
+  });
+
+  _test('notifications handler should not swallow errors', async _ => {
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?.debug=1');
+    try {
+      conn.onnotification = onnotification;
+      await conn.query(/*sql*/ `listen test_chan`);
+      await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello1')`);
+    } finally {
+      await conn.end();
+    }
+    function onnotification(n) {
+      throw Error('boom');
+    }
+  });
 
 }
 
