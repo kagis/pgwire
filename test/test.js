@@ -1205,45 +1205,25 @@ test('connection end idempotent', async _ => {
     }
   });
 
-  _test('notifications', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?.debug=1');
+  test('notifications', async _ => {
+    const actual = [];
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?.debug=0');
+    const pid = conn.pid;
     try {
-      const abortctl = new AbortController();
-      const timeout = setTimeout(_ => abortctl.abort(), 10000);
-      let n;
+      conn.onnotification = n => actual.push(n);
       await conn.query(/*sql*/ `listen test_chan`);
-      const emitterTask = runEmitter();
-      for await (n of conn.notifications({ signal: abortctl.signal })) {
-        console.log(n);
-        await conn.query(/*sql*/ `select 'hello'`);
-
-        // break;
-        // если мы тут начнем делать query,
-        // то query повиснут если в это время в соединение придет NotificationResponse.
-        // recvMessages застрянет на ожидании доставки NotificationResponse.
-        // а этот цикл застрянет на ожидании ответа на запрос.
-        // TODO How to make backpreassured notification subscribtion and avoid deadlock for queries?
-      }
-      clearTimeout(timeout);
-      // console.log(n);
-      await emitterTask;
+      await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello1')`);
+      await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello2')`);
+      await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello3')`);
     } finally {
       await conn.end();
     }
-
-    async function runEmitter() {
-      const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
-      try {
-        await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello1')`);
-        await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello2')`);
-        await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello3')`);
-        await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello4')`);
-        await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello5')`);
-      } finally {
-        await conn.end();
-      }
-    }
-  });
+    assertEquals(actual, [
+      { pid, channel: 'test_chan', payload: 'hello1' },
+      { pid, channel: 'test_chan', payload: 'hello2' },
+      { pid, channel: 'test_chan', payload: 'hello3' },
+    ]);
+  })
 
 }
 

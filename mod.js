@@ -291,6 +291,7 @@ class PgPool {
 
 class PgConnection {
   constructor({ hostname, port, password, '.debug': debug, ...startupOptions }) {
+    this.onnotification = null;
     this._connectOptions = { hostname, port };
     this._user = startupOptions['user'];
     this._password = password;
@@ -301,7 +302,6 @@ class PgConnection {
     this._lastErrorResponse = null;
     this._queuedResponseChannels = [];
     this._currResponseChannel = null;
-    this._notificationSubscriptions = /** @type {Set<Channel>} */ new Set();
     this._transactionStatus = null;
     this._lastPullTime = 0;
     this._wakeInterval = 2000;
@@ -359,10 +359,6 @@ class PgConnection {
       throw err;
     }
   }
-  // /** resolved when connection is established and authenticated */
-  // get whenReady() {
-  //   return this._whenReady;
-  // }
   /** resolved when no quieries can be emitted and connection is about to terminate */
   get whenEnded() {
     // TODO private _whenEnded
@@ -378,6 +374,10 @@ class PgConnection {
       this._transactionStatus == 0x45 || // E
       this._transactionStatus == 0x54 // T
     ) && this._transactionStatus; // avoid T|E value erasure
+  }
+  get pid() {
+    if (!this._backendKeyData) return null;
+    return this._backendKeyData.pid;
   }
   // TODO accept abortSignal to abort nonstream queries.
   // If abortSignal is set then we can block tx (disable pipelining)
@@ -398,9 +398,9 @@ class PgConnection {
   async * _queryIter(args, signal) {
     // Stack trace is broken if error occures in initial generator tick.
     // Spent many hours to understand why, but I can't.
-    // Seems that this is payment for Thenable satan magic in QueryResponse.
+    // Seems that this is payment for Thenable satan magic in PgResponse.
     await null;
-    // `at QueryResponse.then` is the lowest line of stack trace when no `await null`.
+    // `at PgResponse.then` is the lowest line of stack trace when no `await null`.
     // but if do `await null` then stack trace is proper.
     // console.trace()
 
@@ -435,14 +435,7 @@ class PgConnection {
     // But I see no cases when this can throw error.
     frontendMessages.forEach(this._tx.push, this._tx);
     this._queuedResponseChannels.push(responseChannel);
-
     try {
-      // TODO отмена через .return() не сработает пока текущий неотработавший .next() не завершится,
-      // а .next() может долго висеть и ничего не отдавать.
-      // Возможно стоит раз в секунду отдавать в канал пустое сообщение
-      // при простое со стороны постгреса.
-      // Если делать через AbortSignal то тогда висячий .next() придется reject'ить
-      // а пользовательский код должен обрабатывать ошибку - неудобно
       for (;;) {
         // Important to call responseChannel.next() as first step of try block
         // to maximize chance that finally block will be executed when
@@ -454,12 +447,13 @@ class PgConnection {
           err.cause = signal.reason;
           throw err;
         }
-        // We will send 'wake' message if _lastPullTime is older
-        // than _wakeInterval, so user have a chance to break loop
-        // when response is stuck.
-        this._lastPullTime = Date.now();
         if (!done) {
           yield value;
+          // We will send 'wake' message if _lastPullTime is older
+          // than _wakeInterval, so user have a chance to break loop
+          // when response is stuck.
+          // perfomance.now is more suitable, but nodejs incompatible
+          this._lastPullTime = Date.now();
           continue;
         }
         if (value instanceof Error) {
@@ -508,18 +502,13 @@ class PgConnection {
     }
   }
 
-  // should terminate connection gracefully.
+  // should immediately close connection for new queries
+  // should terminate connection gracefully
   // should be idempotent
   // should never throw, at least when used in finally block.
 
-  /** terminates connection gracesfully if possible and waits until termination complete */
+  /** terminates connection gracefully if possible and waits until termination complete */
   async end() {
-    // if (!this._closed) {
-    //   this._closed = true;
-    //   this._resolveClosed();
-    // TODO(test) end() should immediatly prevent new queries
-    // FIXME(test) delays whenEnded resolution
-    // await this._whenReady;
     if (this._tx) {
       // TODO
       // if (pgbouncer) {
@@ -533,7 +522,7 @@ class PgConnection {
     }
     this._rejectReady(Error('connection ended'));
 
-    // TODO destroy can cause error
+    // TODO _net.close can throw
     await this._whenDestroyed;
   }
   destroy(destroyReason) {
@@ -542,6 +531,7 @@ class PgConnection {
     if (this._socket) {
       _net.close(this._socket); // TODO can throw
       this._socket = null;
+      this._backendKeyData = null;
     }
     if (this._startTx) {
       this._startTx.end();
@@ -555,10 +545,6 @@ class PgConnection {
       // and after whenReady settled
       this._destroyReason = destroyReason;
     }
-    if (this._notificationSubscriptions) {
-      this._notificationSubscriptions.forEach(it => it.end(destroyReason));
-      this._notificationSubscriptions = null;
-    }
     // TODO await _flushData
     const responseEndReason = destroyReason || Error('incomplete response');
     while (this._queuedResponseChannels.length) {
@@ -568,30 +554,7 @@ class PgConnection {
     // TODO do CancelRequest to wake stuck connection which can continue executing ?
     return destroyReason; // user code can call .destroy and throw destroyReason in one line
   }
-  async * notifications({ channel, signal } = 0) {
-    if (!this._tx) {
-      const err = Error('connection destroyed');
-      err.cause = this._destroyReason;
-      throw err;
-    }
-    if (signal?.aborted) return;
-    const chan = new Channel({ waitForEnd: false });
-    const onAbort = _ => chan.end();
-    signal?.addEventListener('abort', onAbort);
-    const subscriptions = this._notificationSubscriptions;
-    subscriptions.add(chan);
-    try {
-      const cause = yield * chan;
-      if (cause) {
-        const err = Error('postgres notification stream broken');
-        err.cause = cause;
-        throw err;
-      }
-    } finally {
-      subscriptions.delete(chan);
-      signal?.removeEventListener('abort', onAbort);
-    }
-  }
+
   logicalReplication({ slot, startLsn = '0/0', options = {}, ackInterval = 10e3 }) {
     const optionsSql = (
       Object.entries(options)
@@ -985,13 +948,8 @@ class PgConnection {
   _recvBackendKeyData(_, backendKeyData) {
     this._backendKeyData = backendKeyData;
   }
-  async _recvNotificationResponse(_, payload) {
-    // TODO we should await here,
-    // but deadlock can occur if emit queries.
-    Promise.all(Array.from(
-      this._notificationSubscriptions,
-      nc => nc.push(payload)
-    ));
+  _recvNotificationResponse(_, payload) {
+    this.onnotification?.(payload);
   }
   async _fwdBackendMessage({ tag, payload }) {
     await this._flushData();
@@ -2299,8 +2257,7 @@ function lsnMakeComparable(text) {
 
 
 class Channel {
-  constructor({ waitForEnd = true } = 0) {
-    this._waitForEnd = waitForEnd;
+  constructor() {
     this._qnext = []
     this._qpush = [];
     this._value = undefined;
@@ -2342,9 +2299,7 @@ class Channel {
       this._qpush.forEach(it => it.resolve());
       this._qpush = null; // do not push anymore
     }
-    if (this._waitForEnd) {
-      await this._whenEnded;
-    }
+    await this._whenEnded;
     return { done: true, value };
   }
   [Symbol.asyncIterator]() {
