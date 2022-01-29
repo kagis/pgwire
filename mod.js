@@ -292,13 +292,13 @@ class PgPool {
 class PgConnection {
   constructor({ hostname, port, password, '.debug': debug, ...startupOptions }) {
     this.onnotification = null;
+    this.parameters = Object.create(null); // TODO retry init
+    this._debug = ['true', 'on', '1', 1, true].includes(debug);
     this._connectOptions = { hostname, port };
     this._user = startupOptions['user'];
     this._password = password;
-    this._debug = ['true', 'on', '1', 1, true].includes(debug);
     this._socket = null;
     this._backendKeyData = null;
-    this._parameters = Object.create(null); // TODO retry init
     this._lastErrorResponse = null;
     this._queuedResponseChannels = [];
     this._currResponseChannel = null;
@@ -308,10 +308,12 @@ class PgConnection {
     this._wakeTimer = 0;
     this._rowColumns = null; // last RowDescription
     this._rowTextDecoder = new TextDecoder('utf-8', { fatal: true });
+    this._rows = [];
     this._copyingOut = false;
-    this._copyBuf = new Uint8Array(1024);
-    this._copyBufPos = 0;
-    this._rowsChunk = [];
+    this._copies = [];
+    this._copybuf = null;
+    this._copybufn = 0;
+    this._copybufSize = null;
     this._tx = new Channel();
     this._txReadable = this._tx; // _tx can be nulled after _tx.end(), but _txReadable will be available
     this._startTx = new Channel(); // TODO retry init
@@ -579,9 +581,8 @@ class PgConnection {
     }
     const socket = await this._createSocket();
     try {
-      await _net.write(socket, serializeFrontendMessage(
-        new CancelRequest(this._backendKeyData),
-      ));
+      const m = new CancelRequest(this._backendKeyData);
+      await _net.write(socket, serializeFrontendMessage(m));
     } finally {
       _net.close(socket);
     }
@@ -666,14 +667,12 @@ class PgConnection {
     await _net.write(this._socket, serializeFrontendMessage(m));
   }
   async _recvMessages() {
-    for await (const mchunk of BackendMessageReader.iterBackendMessages(this._socket)) {
-      // TODO we can ? alloc _copyBuf here with size of undelying chunk buffer
-      // so we can avoid buffer grow algorithm.
-      // Also we can use copyBuf to store binary "decoded" values
-      // instead of alloc Uint8Array for each binary value.
-      // May be its better to alloc new Uint8Array for each chunk in iterBackendMessages
-      // when do many COPY TO STDOUT (will not get countinious chunk) or selecting byteas
-      for (const m of mchunk) {
+    for await (const { nparsed, messages } of BackendMessageReader.iterBackendMessages(this._socket)) {
+      // Use last backend messages chunk size as _copybuf size hint.
+      this._copybufSize = nparsed;
+      this._copybuf = null;
+      this._copybufn = 0;
+      for (const m of messages) {
         if (this._debug) {
           console.log(... m.payload === undefined
             ? ['-> %s', m.tag]
@@ -682,11 +681,13 @@ class PgConnection {
         }
         // TODO check if connection is destroyed to prevent errors in _recvMessage?
         const maybePromise = this._recvMessage(m);
+        // avoid await for DataRow and CopyData messages for perfomance
         if (maybePromise) {
           await maybePromise;
         }
       }
-      await this._flushData();
+      await this._flushDataRows();
+      await this._flushCopyDatas();
     }
     if (this._lastErrorResponse) {
       throw new PgError(this._lastErrorResponse);
@@ -739,57 +740,47 @@ class PgConnection {
           : typeDecode(this._rowTextDecoder.decode(valbuf), typeOid)
       );
     }
-    this._rowsChunk.push(row);
+    this._rows.push(row);
   }
-  _recvCopyData(_, /** @type {Uint8Array} */ copyData) {
+  _recvCopyData(_, /** @type {Uint8Array} */ data) {
     if (!this._copyingOut) {
-      // postgres can send CopyData when not in copy out mode
-      // steps to reproduce:
+      // postgres can send CopyData when not in copy out mode, steps to reproduce:
       //
-      // StartupMessage({ database: 'postgres', user: 'postgres', replication: 'database' })
-      //
-      // Query('CREATE_REPLICATION_SLOT a LOGICAL test_decoding')
+      // <- StartupMessage({ database: 'postgres', user: 'postgres', replication: 'database' })
+      // <- Query('CREATE_REPLICATION_SLOT a LOGICAL test_decoding')
       // wait for ReadyForQuery
+      // <- Query('START_REPLICATION SLOT a LOGICAL 0/0');
+      // <- CopyDone() before wal_sender_timeout expires
+      // -> CopyData keepalive message can be received here after CopyDone but before ReadyForQuery
       //
-      // Query('START_REPLICATION SLOT a LOGICAL 0/0');
-      //
-      // CopyDone() // before wal_sender_timeout expires
-      // CopyData-keepalive message can be received here after CopyDone
-      // but before ReadyForQuery
-      //
-      // Query('CREATE_REPLICATION_SLOT b LOGICAL test_decoding')
-      // sometimes CopyData-keepalive message can be received here
-      // before RowDescription message
+      // <- Query('CREATE_REPLICATION_SLOT b LOGICAL test_decoding')
+      // -> CopyData keepalive message sometimes can be received here before RowDescription message
       return;
     }
-
-    if (this._copyBuf.length < this._copyBufPos + copyData.length) { // grow _copyBuf
-      const oldbuf = this._copyBuf;
-      this._copyBuf = new Uint8Array(oldbuf.length * 2 + copyData.length);
-      this._copyBuf.set(oldbuf);
+    if (!this._copybuf) {
+      this._copybuf = new Uint8Array(this._copybufSize);
     }
-    this._copyBuf.set(copyData, this._copyBufPos);
-    this._rowsChunk.push(this._copyBuf.subarray(
-      this._copyBufPos,
-      this._copyBufPos += copyData.length,
-    ));
+    this._copybuf.set(data, this._copybufn);
+    this._copies.push(this._copybuf.subarray(this._copybufn, this._copybufn + data.length));
+    this._copybufn += data.length;
   }
-  async _flushData() {
-    // TODO separate _rowsChunk _copiesChunk
-    if (this._copyBufPos) {
-      const m = this._copyBuf.subarray(0, this._copyBufPos);
-      await this._pushChunk('copies', null, [], this._rowsChunk, m);
-      this._copyBufPos = 0;
-      this._rowsChunk = [];
-      // TODO bench reuse single _copyBuf vs new _copyBuf for each chunk
-      // Be carefull when commenting next line because awaiting responseRx.push
-      // does not awaits until _copyBuf is consumed and ready to resuse
-      this._copyBuf = new Uint8Array(this._copyBuf.length);
-    }
-    if (this._rowsChunk.length) {
-      await this._pushChunk('rows', null, this._rowsChunk);
-      this._rowsChunk = [];
-    }
+  async _flushCopyDatas() {
+    if (!this._copies.length) return;
+    const copyChunk = new PgResponseChunk(this._copybuf.buffer, this._copybuf.byteOffset, this._copybufn);
+    copyChunk.tag = 'CopyData';
+    copyChunk.copies = this._copies;
+    this._copybuf = this._copybuf.subarray(this._copybufn);
+    this._copybufn = 0;
+    this._copies = [];
+    await this._currResponseChannel.push(copyChunk);
+  }
+  async _flushDataRows() {
+    if (!this._rows.length) return;
+    const rowsChunk = new PgResponseChunk();
+    rowsChunk.tag = 'DataRow';
+    rowsChunk.rows = this._rows;
+    this._rows = [];
+    await this._currResponseChannel.push(rowsChunk);
   }
   async _recvCopyInResponse(m) {
     await this._fwdBackendMessage(m);
@@ -924,7 +915,6 @@ class PgConnection {
   async _startResponse(m) {
     this._currResponseChannel = this._queuedResponseChannels[0];
     // TODO assert this._currResponseChan is not null
-    // this._pushChunk('wake');
     await this._fwdBackendMessage(m);
   }
   async _endResponse() {
@@ -942,7 +932,7 @@ class PgConnection {
     // TODO dispatchEvent for nonquery NoticeResponse
   }
   _recvParameterStatus(_, { parameter, value }) {
-    this._parameters[parameter] = value;
+    this.parameters[parameter] = value;
     // TODO emit event ?
   }
   _recvBackendKeyData(_, backendKeyData) {
@@ -953,21 +943,27 @@ class PgConnection {
     Promise.resolve(payload).then(this.onnotification);
   }
   async _fwdBackendMessage({ tag, payload }) {
-    await this._flushData();
-    await this._pushChunk(tag, payload);
+    await this._flushDataRows();
+    await this._flushCopyDatas();
+    const chunk = new PgResponseChunk();
+    chunk.tag = tag;
+    chunk.payload = payload;
+    await this._currResponseChannel.push(chunk);
   }
   _wake() {
     if (!this._currResponseChannel?.drained) return;
     if (this._lastPullTime + this._wakeInterval > Date.now()) return;
-    this._pushChunk('wake');
+    const wakeChunk = new PgResponseChunk();
+    wakeChunk.tag = 'wake';
+    this._currResponseChannel.push(wakeChunk);
   }
-  _pushChunk(tag, payload = null, rows = [], copies = [], m = new Uint8Array(0)) {
-    m.tag = tag;
-    m.payload = payload;
-    m.rows = rows;
-    m.copies = copies;
-    return this._currResponseChannel.push(m);
-  }
+}
+
+class PgResponseChunk extends Uint8Array {
+  tag;
+  payload = null;
+  rows = [];
+  copies = [];
 }
 
 function warnError(err) {
@@ -1636,7 +1632,7 @@ class BackendMessageReader extends MessageReader {
         // TODO batch DataRow here
         nparsed = inext;
       }
-      yield messages;
+      yield { nparsed, messages };
 
       if (nparsed) { // TODO check if copyWithin(0, 0) is noop
         buf.copyWithin(0, nparsed, nbuf); // move unconsumed bytes to begining of buffer
@@ -2267,8 +2263,9 @@ class Channel {
     this._resolveEnded = null;
     this._whenEnded = new Promise(resolve => this._resolveEnded = resolve);
   }
+  /** `true` if subsequent .push will immediately pass value to awaiting .next  */
   get drained() {
-    return this._qpush && !this._qpush.length;
+    return Boolean(this._qnext?.length);
   }
   async push(value) {
     if (!this._qnext) throw Error('push after ended');
