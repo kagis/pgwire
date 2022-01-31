@@ -20,44 +20,14 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
+/// <reference types="./mod.d.ts" />
+
 export async function pgconnect(...optionsChain) {
   const conn = new PgConnection(computeConnectionOptions(optionsChain));
   await conn.waitReady(); // TODO .start()
   return conn;
 }
 
-// export async function pgconnect(...options) {
-//   let { '.connectRetry': connectRetry, ...connOptions } = computeConnectionOptions(options);
-//   // const connectRetry = [1, '1', 'on', 'true', true].includes(connectRetryRaw);
-//   const startTime = Date.now();
-//   for (;;) {
-//     const conn = new Connection(connOptions);
-//     try {
-//       await conn.whenReady;
-//       return conn;
-//     } catch (err) {
-//       const elapsedTime = Date.now() - startTime;
-//       if (elapsedTime < connectRetry && (
-//         _networking.canReconnect(err) ||
-//         pgerrcode(err) == '57P03' // cannot_connect_now
-//       )) {
-//         await new Promise(resolve => setTimeout(resolve, 1000));
-//         continue;
-//       }
-
-//       // const { stack } = Object.assign(Error(), { name: '\n    ...' });
-//       // err.stack += stack;
-//       // console.log({ stack });
-//       // throw err;
-
-//       // wrap error to keep stacktrace
-//       // TODO fix PgError props
-//       throw Error(err.message, { cause: err });
-//     }
-//   }
-// }
-
-// /** @param  {...(string|URL|PGConnectOptions)} options */
 // export function pgconnect(...options) {
 //   const connection = new Connection(computeConnectionOptions(options));
 //   const p = Promise.resolve(connection.whenReady);
@@ -66,9 +36,6 @@ export async function pgconnect(...optionsChain) {
 //   return p;
 // }
 
-/**
- * @param  {...PgConnectOptions} optionsChain
- * @returns {PgPool} */
 export function pgpool(...optionsChain) {
   return new PgPool(computeConnectionOptions(optionsChain));
 }
@@ -112,60 +79,60 @@ function computeConnectionOptions([uriOrObj, ...rest]) {
   }
 }
 
-// TODO name
-export function pgerror(err) {
-  if (!err) return;
-  const result = err[PgError.kDetails];
-  if (result) return result;
-  return pgerror(err.cause);
-}
-
-// export function pgerrcode(err) {
-//   while (!err) {
-//     if (err[kErrorCode]) {
-//       return err[kErrorCode];
-//     }
-//     err = err.cause;
-//   }
-// }
-
 class PgError extends Error {
-  static kDetails = Symbol.for('pgwire.error');
-  static rethrow(err) {
-    return new PgError(err[PgError.kDetails]);
-  }
-  constructor(errorResponse) {
-    const { code, message, ...rest } = errorResponse || 0;
+  static kErrorResponse = Symbol.for('pg.ErrorResponse');
+  static kErrorCode = Symbol.for('pg.ErrorCode');
+  static fromErrorResponse(errorResponse) {
+    const { code, message: messageHead, ...rest } = errorResponse || 0;
     const propsfmt = (
       Object.entries(rest)
       .filter(([_, v]) => v != null)
       .map(([k, v]) => k + ' ' + JSON.stringify(v))
       .join(', ')
     );
-    super(message + `\n    (${propsfmt})`);
-    this.name = 'PgError.' + code;
-    this[PgError.kDetails] = errorResponse;
+    const message = `${messageHead}\n    (${propsfmt})`;
+    return new PgError({ message, code, errorResponse });
+  }
+  constructor({
+    cause,
+    message = cause?.message,
+    code = cause?.[PgError.kErrorCode],
+    errorResponse = cause?.[PgError.kErrorResponse],
+  }) {
+    super(message);
+    this.name = ['PgError', code].filter(Boolean).join('.');
+    this.cause = cause;
+    this[PgError.kErrorCode] = code;
+    this[PgError.kErrorResponse] = errorResponse;
   }
 }
 
 class PgPool {
-  constructor({ '.poolSize': poolSize, '.poolIdleTimeout': poolIdleTimeout, ...options }) {
+  // TODO whenEnded, pending
+  constructor(options) {
     this._connections = new Set();
-    this._ended = false;
+    this._endReason = null;
     this._options = options;
-    this._poolSize = Math.max(poolSize, 0);
+    this._poolSize = Math.max(options._poolSize, 0);
     // postgres v14 has `idle_session_timeout` option.
     // But if .query will be called when socket is closed by server
     // (but Connection is not yet deleted from pool)
     // then query will be rejected with error.
     // We should be ready to repeat query in this case
     // and this is more difficult to implement than client side timeout
-    this._poolIdleTimeout = Math.max(poolIdleTimeout, 0);
+    this._poolIdleTimeout = Math.max(options._poolIdleTimeout, 0);
   }
   query(...args) {
     return new PgResponse(this._queryIter(args));
   }
   async * _queryIter(args) {
+    if (this._endReason) {
+      throw new PgError({
+        message: 'Unable to do postgres query on ended pool',
+        code: 'conn_ended',
+        cause: this._endReason,
+      });
+    }
     const conn = this._getConnection();
     try {
       yield * conn.query(...args);
@@ -185,19 +152,26 @@ class PgPool {
     }
   }
   async end() {
-    this._ended = true;
+    // TODO should await all pending queries when _poolSize = 0 ?
+    if (this._endReason) return; // TODO await connections end
+    this._endReason = new PgError({ message: 'Postgres connection pool ended' });
     await Promise.all(Array.from(this._connections, conn => conn.end()));
   }
   destroy(destroyReason) {
-    this._ended = true;
+    // TODO should destroy connections when _poolSize = 0
+    if (!(destroyReason instanceof Error)) {
+      destroyReason = new PgError({
+        message: 'Postgres connection pool destroyed',
+        cause: destroyReason,
+      });
+    }
+    if (!this._endReason) {
+      this._endReason = destroyReason;
+    }
     this._connections.forEach(it => it.destroy(destroyReason));
-    // return destroyReason;
-    // TODO should keep and throw destroyReason when querying ?
+    return destroyReason;
   }
   _getConnection() {
-    if (this._ended) {
-      throw Error('pool is not usable anymore');
-    }
     if (!this._poolSize) {
       return new PgConnection(this._options);
     }
@@ -247,7 +221,10 @@ class PgPool {
       // But next query will be executed in explicit transaction
       // so modifications of next query will not be commited automaticaly.
       // Rather then next query does explicit COMMIT
-      throw conn.destroy(Error('pooled connection left in transaction'));
+      throw conn.destroy(new PgError({
+        message: 'Pooled postgres connection left in transaction',
+        code: 'left_in_txn',
+      }));
     }
 
     if (this._poolIdleTimeout && !conn.pending /* is idle */) {
@@ -260,12 +237,6 @@ class PgPool {
   _onConnectionEnded(conn) {
     clearTimeout(conn._poolTimeoutId);
     this._connections.delete(conn);
-  }
-  /** exports pgwire.pgerrcode for cases when Pool is injected as dependency
-   * and we dont want to import pgwire directly for error handling code */
-  errcode(...args) {
-    // TODO
-    // return pgerrcode(...args);
   }
 }
 
@@ -290,12 +261,12 @@ class PgPool {
 
 
 class PgConnection {
-  constructor({ hostname, port, password, '.debug': debug, ...startupOptions }) {
+  constructor({ hostname, port, password, ...options }) {
     this.onnotification = null;
     this.parameters = Object.create(null); // TODO retry init
-    this._debug = ['true', 'on', '1', 1, true].includes(debug);
+    this._debug = ['true', 'on', '1', 1, true].includes(options._debug);
     this._connectOptions = { hostname, port };
-    this._user = startupOptions['user'];
+    this._user = options.user;
     this._password = password;
     this._socket = null;
     this._backendKeyData = null;
@@ -304,8 +275,10 @@ class PgConnection {
     this._currResponseChannel = null;
     this._transactionStatus = null;
     this._lastPullTime = 0;
-    this._wakeInterval = 2000;
+    const { _wakeInterval = 2000 } = options;
+    this._wakeInterval = Math.max(_wakeInterval, 0);
     this._wakeTimer = 0;
+    this._wake = this._wake.bind(this);
     this._rowColumns = null; // last RowDescription
     this._rowTextDecoder = new TextDecoder('utf-8', { fatal: true });
     this._rows = [];
@@ -322,7 +295,12 @@ class PgConnection {
     this._whenReady = new Promise(this._whenReadyExecutor.bind(this));
     this._whenReady.catch(warnError);
     this._saslScramSha256 = null;
-    this._destroyReason = null;
+    this._endReason = null;
+    // remove underscored options
+    const startupOptions = Object.fromEntries(
+      Object.entries(options)
+      .filter(([k]) => !k.startsWith('_'))
+    );
     // run background message processing
     // create StartupMessage here to validate startupOptions in constructor call stack
     this._whenDestroyed = this._ioloop(new StartupMessage({
@@ -353,12 +331,7 @@ class PgConnection {
     try {
       await this._whenReady;
     } catch (cause) {
-      if (cause instanceof PgError) {
-        throw PgError.rethrow(cause);
-      }
-      const err = Error(cause.message);
-      err.cause = cause;
-      throw err;
+      throw new PgError({ cause });
     }
   }
   /** resolved when no quieries can be emitted and connection is about to terminate */
@@ -377,15 +350,11 @@ class PgConnection {
       this._transactionStatus == 0x54 // T
     ) && this._transactionStatus; // avoid T|E value erasure
   }
+  /** ID of postgres backend process. */
   get pid() {
     if (!this._backendKeyData) return null;
     return this._backendKeyData.pid;
   }
-  // TODO accept abortSignal to abort nonstream queries.
-  // If abortSignal is set then we can block tx (disable pipelining)
-  // to make query abortable in case of concurent queries queued.
-  // We can provide .setAbortSignal method on PgResponse .
-  // Is it ok to not follow AbortController convention?
   // TODO executemany?
   // Parse
   // Describe(portal)
@@ -394,42 +363,49 @@ class PgConnection {
   // Bind
   // Execute
   query(...args) {
-    // TODO need to invent a way to accept abortSignal
-    return new PgResponse(this._queryIter(args, null /*signal*/));
+    return new PgResponse(this._queryIter(args));
   }
-  async * _queryIter(args, signal) {
+  async * _queryIter(args) {
     // Stack trace is broken if error occures in initial generator tick.
     // Spent many hours to understand why, but I can't.
     // Seems that this is payment for Thenable satan magic in PgResponse.
-    await null;
     // `at PgResponse.then` is the lowest line of stack trace when no `await null`.
     // but if do `await null` then stack trace is proper.
+    // TODO does it disorder queries?
+    await null;
     // console.trace()
 
-    if (signal?.aborted) {
-      const err = Error('postgres query aborted');
-      err.cause = signal.reason;
-      throw err;
-    }
     if (!this._tx) {
-      const err = Error('connection destroyed');
-      err.cause = this._destroyReason;
-      throw err;
+      throw new PgError({
+        message: 'Unable to do postgres query on ended connection',
+        code: 'conn_ended',
+        cause: this._endReason,
+      });
     }
     // TODO(test) ordered queue .query() and .end() calls
     // .query after .end should throw stable error ? what if auth failed after .end
 
     const stdinSignal = { aborted: false, reason: Error('aborted') };
     const responseEndLock = new Channel();
-    // Collect outgoing messages into intermediate array
-    // to allow errors occur before any message enqueued.
-    const frontendMessages = [];
-    if (typeof args[0] == 'string') {
-      simpleQuery(frontendMessages, args[0], args[1], stdinSignal, responseEndLock);
-    } else {
-      extendedQuery(frontendMessages, args, stdinSignal);
-    }
     const responseChannel = new Channel();
+    // Collect outgoing messages into intermediate array
+    // to let errors occur before any message enqueued.
+    const frontendMessages = [];
+    let signal;
+    if (typeof args[0] == 'string') {
+      const [simpleSql, simpleOptions] = args;
+      signal = simpleOptions?.signal;
+      simpleQuery(frontendMessages, stdinSignal, simpleSql, simpleOptions, responseEndLock);
+    } else if (Array.isArray(args[0])) {
+      const [extendedBlocks, extendedOptions] = args;
+      signal = extendedOptions?.signal;
+      extendedQuery(frontendMessages, stdinSignal, extendedBlocks, extendedOptions);
+    } else {
+      extendedQuery(frontendMessages, stdinSignal, args);
+    }
+    this._throwIfQueryAborted(signal);
+    // TODO if next two steps throw then abort handler will not be removed.
+    signal?.addEventListener('abort', this._wake);
 
     // TODO This two steps should be executed atomiсally.
     // If one fails then connection instance
@@ -437,36 +413,23 @@ class PgConnection {
     // But I see no cases when this can throw error.
     frontendMessages.forEach(this._tx.push, this._tx);
     this._queuedResponseChannels.push(responseChannel);
+
     try {
       for (;;) {
         // Important to call responseChannel.next() as first step of try block
-        // to maximize chance that finally block will be executed when
+        // to maximize chance that finally block will be executed after
         // query is received by server. So CancelRequest will be emited
         // in case of error, and skip-waiting duration will be minimized.
         const { value, done } = await responseChannel.next();
-        if (signal?.aborted) {
-          const err = Error('postgres query aborted');
-          err.cause = signal.reason;
-          throw err;
-        }
-        if (!done) {
-          yield value;
-          // We will send 'wake' message if _lastPullTime is older
-          // than _wakeInterval, so user have a chance to break loop
-          // when response is stuck.
-          // perfomance.now is more suitable, but nodejs incompatible
-          this._lastPullTime = Date.now();
-          continue;
-        }
-        if (value instanceof Error) {
-          const err = Error('postgres query failed');
-          err.cause = value;
-          throw err;
-        }
-        if (value) {
-          throw new PgError(value);
-        }
-        break;
+        if (done && value) throw new PgError({ cause: value });
+        if (done) break;
+        this._throwIfQueryAborted(signal);
+        yield value;
+        // We will send 'wake' message if _lastPullTime is older
+        // than _wakeInterval, so user have a chance to break loop
+        // when response is stuck.
+        // perfomance.now is more suitable, but nodejs incompatible
+        this._lastPullTime = Date.now();
       }
     } catch (err) {
       stdinSignal.reason = err;
@@ -501,7 +464,16 @@ class PgConnection {
       // wait ReadyForQuery
       await responseChannel.return();
       responseEndLock.end();
+      signal?.removeEventListener('abort', this._wake);
     }
+  }
+  _throwIfQueryAborted(signal) {
+    if (!signal?.aborted) return;
+    throw new PgError({
+      code: 'aborted',
+      message: 'Postgres query aborted',
+      cause: signal.reason,
+    });
   }
 
   // should immediately close connection for new queries
@@ -511,6 +483,7 @@ class PgConnection {
 
   /** terminates connection gracefully if possible and waits until termination complete */
   async end() {
+    // TODO implement options.timeout ?
     if (this._tx) {
       // TODO
       // if (pgbouncer) {
@@ -521,14 +494,14 @@ class PgConnection {
       this._tx.push(new Terminate());
       this._tx.end();
       this._tx = null;
+      this._endReason = new PgError({ message: 'Postgres connection ended' });
+      this._rejectReady(this._endReason);
     }
-    this._rejectReady(Error('connection ended'));
 
     // TODO _net.close can throw
     await this._whenDestroyed;
   }
   destroy(destroyReason) {
-    this._rejectReady(destroyReason || Error('connection destroyed'));
     clearInterval(this._wakeTimer);
     if (this._socket) {
       _net.close(this._socket); // TODO can throw
@@ -539,20 +512,26 @@ class PgConnection {
       this._startTx.end();
       this._startTx = null;
     }
+    if (!(destroyReason instanceof Error)) {
+      destroyReason = new PgError({
+        message: 'Postgres connection destroyed',
+        cause: destroyReason,
+      });
+    }
     if (this._tx) {
       this._tx.end();
       this._tx = null;
-      // accept destroyReason only if .destroy() called before .end()
+      // save destroyReason only if .destroy() called before .end()
       // so new queries will be rejected with the same error before
       // and after whenReady settled
-      this._destroyReason = destroyReason;
+      this._endReason = destroyReason;
+      this._rejectReady(destroyReason);
     }
     // TODO await _flushData
-    const responseEndReason = destroyReason || Error('incomplete response');
-    while (this._queuedResponseChannels.length) {
-      this._queuedResponseChannels.shift().end(responseEndReason);
-    }
     this._currResponseChannel = null;
+    while (this._queuedResponseChannels.length) {
+      this._queuedResponseChannels.shift().end(destroyReason);
+    }
     // TODO do CancelRequest to wake stuck connection which can continue executing ?
     return destroyReason; // user code can call .destroy and throw destroyReason in one line
   }
@@ -577,7 +556,10 @@ class PgConnection {
   async _cancelRequest() {
     // await this._whenReady; // wait for backendkey
     if (!this._backendKeyData) {
-      throw Error('CancelRequest attempt before BackendKeyData received');
+      throw new PgError({
+        message: 'CancelRequest attempt before BackendKeyData received',
+        code: 'misuse',
+      });
     }
     const socket = await this._createSocket();
     try {
@@ -592,7 +574,7 @@ class PgConnection {
     try {
       this._socket = await this._createSocket();
       this._startTx.push(startupmsg);
-      await Promise.all([ // allSettled ?
+      await Promise.all([
         // TODO при досрочном завершении одной из функций как будем завершать вторую ?
         // _sendMessages надо завершать потому что она может пайпить stdin,
         // а недокушаный stdin надо прибить
@@ -605,6 +587,7 @@ class PgConnection {
         // TODO this._socket.closeWrite when _pipeMessages complete
         this._pipeMessages(this._startTx),
       ]);
+      // TODO destroy(Error('socket closed by server'))
     } catch (err) {
       caughtError = err;
     }
@@ -622,7 +605,7 @@ class PgConnection {
       }
       if (this._tls == 'require') {
         // TODO error message
-        throw Error('postgres refuses secure connection');
+        throw new PgError({ message: 'Postgres refuses SSL connection', code: 'nossl' });
       }
       return socket;
     } catch (err) {
@@ -667,30 +650,37 @@ class PgConnection {
     await _net.write(this._socket, serializeFrontendMessage(m));
   }
   async _recvMessages() {
-    for await (const { nparsed, messages } of BackendMessageReader.iterBackendMessages(this._socket)) {
-      // Use last backend messages chunk size as _copybuf size hint.
-      this._copybufSize = nparsed;
-      this._copybuf = null;
-      this._copybufn = 0;
-      for (const m of messages) {
-        if (this._debug) {
-          console.log(... m.payload === undefined
-            ? ['-> %s', m.tag]
-            : ['-> %s %o', m.tag, m.payload],
-          );
+    try {
+      for await (const { nparsed, messages } of BackendMessageReader.iterBackendMessages(this._socket)) {
+        // Use last backend messages chunk size as _copybuf size hint.
+        this._copybufSize = nparsed;
+        this._copybuf = null;
+        this._copybufn = 0;
+        for (const m of messages) {
+          if (this._debug) {
+            console.log(... m.payload === undefined
+              ? ['-> %s', m.tag]
+              : ['-> %s %o', m.tag, m.payload],
+            );
+          }
+          // TODO check if connection is destroyed to prevent errors in _recvMessage?
+          const maybePromise = this._recvMessage(m);
+          // avoid await for DataRow and CopyData messages for perfomance
+          if (maybePromise) {
+            await maybePromise;
+          }
         }
-        // TODO check if connection is destroyed to prevent errors in _recvMessage?
-        const maybePromise = this._recvMessage(m);
-        // avoid await for DataRow and CopyData messages for perfomance
-        if (maybePromise) {
-          await maybePromise;
-        }
+        await this._flushDataRows();
+        await this._flushCopyDatas();
       }
-      await this._flushDataRows();
-      await this._flushCopyDatas();
-    }
-    if (this._lastErrorResponse) {
-      throw new PgError(this._lastErrorResponse);
+    } finally {
+      // If we have _lastResponseError when socket ends,
+      // then we should throw it regardless of tcp error,
+      // because it will contain more usefull information about
+      // socket destroy reason.
+      if (this._lastErrorResponse) {
+        throw PgError.fromErrorResponse(this._lastErrorResponse);
+      }
     }
     // TODO handle unexpected connection close when _pipeMessages still working.
     // if _pipeMessages(this._startTx) is not resolved yet
@@ -822,14 +812,20 @@ class PgConnection {
   }
   _recvAuthenticationCleartextPassword() {
     if (this._password == null) {
-      throw Error('password required (clear)');
+      throw new PgError({
+        message: 'Postgres requires authentication, but no password provided',
+        code: 'nopwd_clear',
+      });
     }
     // should be always encoded as utf8 even when server_encoding is win1251
     this._startTx.push(new PasswordMessage(this._password));
   }
   _recvAuthenticationMD5Password(_, { salt }) {
     if (this._password == null) {
-      throw Error('password required (md5)');
+      throw new PgError({
+        message: 'Postgres requires authentication, but no password provided',
+        code: 'nopwd_md5',
+      });
     }
     // should use server_encoding, but there is
     // no way to know server_encoding before authentication.
@@ -846,8 +842,7 @@ class PgConnection {
   }
   async _recvAuthenticationSASL(_, { mechanism }) {
     if (mechanism != 'SCRAM-SHA-256') {
-      // TODO gracefull terminate (send Terminate before socket close) ?
-      throw Error(`unsupported SASL mechanism ${mechanism}`);
+      throw new PgError({ message: 'Unsupported SASL mechanism ' + JSON.stringify(mechanism) });
     }
     this._saslScramSha256 = new SaslScramSha256();
     const firstmsg = await this._saslScramSha256.start();
@@ -859,7 +854,10 @@ class PgConnection {
   }
   async _recvAuthenticationSASLContinue(_, data) {
     if (this._password == null) {
-      throw Error('password required (scram-sha-256)');
+      throw new PgError({
+        message: 'Postgres requires authentication, but no password provided',
+        code: 'nopwd_sha256',
+      });
     }
     const utf8enc = new TextEncoder();
     const utf8dec = new TextDecoder();
@@ -910,17 +908,20 @@ class PgConnection {
     this._startTx.end();
     this._startTx = null;
     this._resolveReady();
-    this._wakeTimer = setInterval(this._wake.bind(this), this._wakeInterval);
+    if (this._wakeInterval) {
+      this._wakeTimer = setInterval(this._wakeThrottled.bind(this), this._wakeInterval);
+    }
   }
   async _startResponse(m) {
     this._currResponseChannel = this._queuedResponseChannels[0];
     // TODO assert this._currResponseChan is not null
     await this._fwdBackendMessage(m);
   }
-  async _endResponse() {
-    // await this._fwdBackendMessage(m);
+  async _endResponse(m) {
+    await this._fwdBackendMessage(m);
+    const error = this._lastErrorResponse && PgError.fromErrorResponse(this._lastErrorResponse);
     this._queuedResponseChannels.shift();
-    this._currResponseChannel.end(this._lastErrorResponse);
+    this._currResponseChannel.end(error);
     this._currResponseChannel = null;
     this._lastErrorResponse = null;
   }
@@ -939,7 +940,7 @@ class PgConnection {
     this._backendKeyData = backendKeyData;
   }
   _recvNotificationResponse(_, payload) {
-    // if onnotification throw error in _ioloop then error will be swallowed
+    // Detach onnotification call from _ioloop to avoid error swallowing.
     Promise.resolve(payload).then(this.onnotification);
   }
   async _fwdBackendMessage({ tag, payload }) {
@@ -950,9 +951,12 @@ class PgConnection {
     chunk.payload = payload;
     await this._currResponseChannel.push(chunk);
   }
+  _wakeThrottled() {
+    if (this._lastPullTime + this._wakeInterval > Date.now()) return;
+    this._wake();
+  }
   _wake() {
     if (!this._currResponseChannel?.drained) return;
-    if (this._lastPullTime + this._wakeInterval > Date.now()) return;
     const wakeChunk = new PgResponseChunk();
     wakeChunk.tag = 'wake';
     this._currResponseChannel.push(wakeChunk);
@@ -970,7 +974,7 @@ function warnError(err) {
   // console.error('warning', err);
 }
 
-function simpleQuery(out, script, { stdin, stdins = [] } = {}, stdinSignal, responseEndLock) {
+function simpleQuery(out, stdinSignal, script, { stdin, stdins = [] } = 0, responseEndLock) {
   // To cancel query we should send CancelRequest _after_
   // query is received by server and started executing.
   // But we cannot wait for first chunk because postgres can hold it
@@ -1002,10 +1006,10 @@ function simpleQuery(out, script, { stdin, stdins = [] } = {}, stdinSignal, resp
   if (/^\s*(CREATE_REPLICATION_SLOT|START_REPLICATION)\b/.test(script)) {
     out.push(responseEndLock);
   } else {
-    out.push(new CopyFail('missing copy upstream'));
+    out.push(new CopyFail('no stdin provided'));
   }
 }
-function extendedQuery(out, blocks, stdinSignal) {
+function extendedQuery(out, stdinSignal, blocks) {
   out.push(new Sync()); // see top comment in simpleQuery
   for (const m of blocks) {
     switch (m.message) {
@@ -1019,7 +1023,10 @@ function extendedQuery(out, blocks, stdinSignal) {
       case 'DescribePortal': extendedQueryDescribePortal(out, m); break;
       case 'ClosePortal': extendedQueryClosePortal(out, m); break;
       case 'Flush': out.push(new Flush()); break;
-      default: throw Error('unknown extended message ' + JSON.stringify(m.message));
+      default: throw new PgError({
+        message: 'Unknown extended message ' + JSON.stringify(m.message),
+        code: 'misuse',
+      });
     }
   }
   out.push(new Sync());
@@ -1064,7 +1071,7 @@ function extendedQueryExecute(out, { portal, stdin, limit, noBuffer }, stdinSign
   } else {
     // CopyFail message ignored by postgres
     // if there is no COPY FROM statement
-    out.push(new CopyFail('missing copy upstream'));
+    out.push(new CopyFail('no stdin provided'));
   }
   // TODO nobuffer option
   // yield new Flush();
@@ -1104,11 +1111,9 @@ async function * wrapCopyData(source, signal) {
 }
 
 class PgResponse {
-  /** @type {Promise<PgResult>} */
-  _loadPromise;
-  _iter;
-
   constructor(iter) {
+    /** @type {Promise<PgResult>} */
+    this._loadPromise = null;
     this._iter = iter;
   }
   [Symbol.asyncIterator]() {
@@ -1228,7 +1233,6 @@ class ReplicationStream {
     this._ackmsgAppliedLsn = new DataView(this._ackmsg.buffer, 17, 8);
     this._iter = this._iterate(); // TODO can use `this` before all props inited? (hidden class optimization)
   }
-  /** @returns {AsyncIterable<PgoChunk>} */
   pgoutputDecode() {
     return PgoutputReader.decodeStream(this);
   }
@@ -1723,7 +1727,6 @@ class BackendMessageReader extends MessageReader {
     const columns = this._array(this.readInt16(), _ => ({
       binary: this.readInt16(),
     }));
-    // TODO names
     return { binary, columns };
   }
   _readRowDescription() {
@@ -1905,7 +1908,7 @@ class PgoutputReader extends MessageReader {
     Object.assign(col, this._typeCache.get(col.typeOid));
     return col;
   }
-  _upgradeMsgChange(out, tag, readN) {
+  _upgradeMsgChange(out, tag, readUntilN) {
     const relid = this.readInt32();
     const relation = this._relationCache.get(relid);
     const actionKON = this.readUint8();
@@ -1915,7 +1918,7 @@ class PgoutputReader extends MessageReader {
     if (actionKON == 0x4e /*N*/) {
       after = before;
       before = null;
-    } else if (readN) {
+    } else if (readUntilN) {
       const actionN = this.readUint8();
       // TODO assert actionN == 'N'
       after = this._readTuple(relation, false, before);

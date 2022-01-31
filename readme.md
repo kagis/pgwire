@@ -1,3 +1,46 @@
+# PgResult
+
+```js
+const pgresult = await conn.query(` SELECT 'hello', 'world' `);
+
+// PgResult is Iterable, which iterates over values
+// of first row of last statement which can return rows.
+const [hello, world] = pgresult;
+console.assert(hello == 'hello');
+console.assert(world == 'world');
+
+const { rows } = pgresult;
+assertEquals(rows, [["hello", "world"]]);
+
+const { status } = pgresult;
+assertEquals(status, 'SELECT 1');
+
+const { columns } = pgresult;
+for (const column of columns) {
+  column.name;
+  column.binary;
+  column.typeOid;
+  column.typeMod;
+  column.typeSize;
+  column.tableSchema;
+  column.tableColumn;
+}
+
+for (const sub of pgresult.results) {
+  sub.rows;
+  sub.status;
+
+  // see pgresult.columns above
+  sub.columns;
+}
+
+for (const notice of out.notices) {
+  notice.severity;
+  notice.message;
+}
+
+```
+
 # pgoutput messages
 
 
@@ -61,28 +104,28 @@ for await (const chunk of replstream.pgoutputDecode()) {
         // ('default' | 'nothing'| 'full' | 'index')
         // https://www.postgresql.org/docs/14/sql-altertable.html#SQL-ALTERTABLE-REPLICA-IDENTITY
         pgomsg.replicaIdentity;
-        // (string[]) Array of key attribute names (attr.flags & 0b1)
-        pgomsg.keyNames;
-        // (object[]) Relation attributes (table columns) descriptions
-        for (const attr of pgomsg.attrs) {
-          // (number) 0b1 if attribute is part of replica identity
-          attr.flags;
+        // (string[]) Array of key columns names (column.flags & 0b1)
+        pgomsg.keyColumns;
+        // (object[]) Relation columns descriptions
+        for (const column of pgomsg.columns) {
+          // (number) 0b1 if column is part of replica identity
+          column.flags;
           // (string)
-          attr.name;
+          column.name;
           // (number)
-          attr.typeOid;
+          column.typeOid;
           // (number)
-          attr.typeMod;
+          column.typeMod;
           // (string | null)
-          attr.typeName;
+          column.typeName;
           // (string | null)
-          attr.typeSchema;
+          column.typeSchema;
         }
 
       case 'insert':
         // (object) Associated relation.
         pgomsg.relation;
-        // (object) Key attributes values.
+        // (object)
         pgomsg.key;
         // (object) Inserted row values.
         pgomsg.after;
@@ -90,7 +133,7 @@ for await (const chunk of replstream.pgoutputDecode()) {
       case 'update':
         // (object) Associated relation.
         pgomsg.relation;
-        // (object) Key attributes values.
+        // (object)
         pgomsg.key;
         // (object | null) If pgomsg.relation.replicaIdentity == 'full'
         // then gets row values before update, otherwise gets null
@@ -104,7 +147,7 @@ for await (const chunk of replstream.pgoutputDecode()) {
       case 'delete':
         // (object) Associated relation.
         pgomsg.relation;
-        // (object) Key attributes values.
+        // (object)
         pgomsg.key;
         // (object | null) If pgomsg.relation.replicaIdentity == 'full'
         // then gets deleted row values, otherwise gets null

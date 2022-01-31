@@ -239,12 +239,6 @@ export function setup({
 //   );
 // });
 
-test('connection end idempotent', async _ => {
-  const conn = await pgconnect('postgres://postgres:qwerty@postgres:5432/postgres');
-  await Promise.all([conn.end(), conn.end()]);
-  await conn.end();
-});
-
 // test('pgliteral', async () => {
 //   assert.deepStrictEqual(pgwire.pgliteral(`foo`), `'foo'`);
 //   assert.deepStrictEqual(pgwire.pgliteral(`'foo'`), `'''foo'''`);
@@ -258,11 +252,8 @@ test('connection end idempotent', async _ => {
 // });
 
   test('connect with unexisting user', async _ => {
-    const [q] = await Promise.allSettled([
-      pgconnect('postgres://unknown@postgres:5432/postgres'),
-    ]);
-    assertEquals(q.status, 'rejected');
-    if (!(q.reason?.name == 'PgError.28000')) throw q.reason;
+    const caughtError = await pgconnect('postgres://unknown@postgres:5432/postgres').catch(Object);
+    assertError(caughtError, 'PgError.28000');
   });
 
   test('copy from stdin extended', async _ => {
@@ -286,12 +277,11 @@ test('connection end idempotent', async _ => {
   test('copy from stdin extended missing', async _ => {
     const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
     try {
-      const [q] = await Promise.allSettled([conn.query(
+      const caughtError = await conn.query(
         { statement: /*sql*/ `create temp table test(foo int, bar text)` },
         { statement: /*sql*/ `copy test from stdin` },
-      )]);
-      assertEquals(q.status, 'rejected');
-      if (!(q.reason?.name == 'PgError.57014')) throw q.reason;
+      ).catch(Object);
+      assertError(caughtError, 'PgError.57014');
     } finally {
       await conn.end();
     }
@@ -347,7 +337,7 @@ test('connection end idempotent', async _ => {
   test('copy from stdin simple missing', async _ => {
     const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
     try {
-      const [q] = await Promise.allSettled([conn.query(/*sql*/ `
+      const caughtError = await conn.query(/*sql*/ `
         create temp table test(foo int, bar text);
         copy test from stdin;
         select 'hello';
@@ -359,9 +349,8 @@ test('connection end idempotent', async _ => {
           ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode),
           // here should be third one
         ],
-      })]);
-      assertEquals(q.status, 'rejected');
-      if (!(q.reason?.name == 'PgError.57014')) throw q.reason;
+      }).catch(Object);
+      assertError(caughtError, 'PgError.57014');
     } finally {
       await conn.end();
     }
@@ -631,7 +620,7 @@ test('connection end idempotent', async _ => {
       assertEquals(mrel.schema, 'public');
       assertEquals(mrel.name, 'pgo1rel');
       assertEquals(mrel.replicaIdentity, 'default');
-      assertEquals(mrel.attrs, [
+      assertEquals(mrel.columns, [
         { flags: 1, typeOid: 23, typeMod: -1, typeSchema: null, typeName: null, name: 'id' },
         { flags: 0, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'val' },
         { flags: 0, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'note' },
@@ -681,7 +670,7 @@ test('connection end idempotent', async _ => {
       assertEquals(mrel2.schema, 'public');
       assertEquals(mrel2.name, 'pgo1rel');
       assertEquals(mrel2.replicaIdentity, 'full');
-      assertEquals(mrel2.attrs, [
+      assertEquals(mrel2.columns, [
         { flags: 1, typeOid: 23, typeMod: -1, typeSchema: null, typeName: null, name: 'id' },
         { flags: 1, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'val' },
         { flags: 1, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'note' },
@@ -722,7 +711,7 @@ test('connection end idempotent', async _ => {
       assertEquals(mrel3.schema, 'public');
       assertEquals(mrel3.name, 'pgo1rel');
       assertEquals(mrel3.replicaIdentity, 'full');
-      assertEquals(mrel3.attrs, [
+      assertEquals(mrel3.columns, [
         { flags: 1, typeOid: 23, typeMod: -1, typeSchema: null, typeName: null, name: 'id' },
         { flags: 1, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'val' },
         { flags: 1, typeOid: 25, typeMod: -1, typeSchema: null, typeName: null, name: 'note' },
@@ -877,24 +866,41 @@ test('connection end idempotent', async _ => {
     assertEquals(scalar, 1);
   });
 
-  _test('reject pending responses when connection close', async _ => {
-    let caughtError;
-    const conn = await pgconnect('postgres://postgres:secret@postgres:5432/postgres');
-    try {
-      await Promise.all([
-        conn.query(/*sql*/ `select pg_terminate_backend(pg_backend_pid())`).catch(Boolean),
-        conn.query(/*sql*/ `select`),
-      ]);
-    } catch (err) {
-      caughtError = err;
-    } finally {
-      await conn.end();
-    }
-    if (!caughtError) throw Error('Error expected');
-    // TODO find a way to set and get client error kind
-    if (!(caughtError.message == 'ololo')) throw caughtError;
+  test('connection end', async _ => {
+    const conn = await pgconnect('postgres://postgres:qwerty@postgres:5432/postgres');
+    const [[hello],,, caughtError] = await Promise.all([
+      // check that connection is working
+      conn.query(/*sql*/ `select 'hello'`),
+      // enqueue connection end
+      conn.end(),
+       // concurent .end calls should be no-op,
+       // but still wait until connection terminated
+      conn.end(),
+      // connection should be closed for new queries immediately
+      conn.query(/*sql*/ `select`).catch(Object),
+    ]);
+    assertEquals(hello, 'hello');
+    assertError(caughtError, 'PgError.conn_ended');
+    // subsequent .end calls should be no-op
+    await conn.end();
   });
 
+  test('pending queries should be rejected when server closes connection', async _ => {
+    let conn, conn1;
+    try {
+      conn = await pgconnect('postgres://postgres@postgres:5432/postgres?_debug=0');
+      conn1 = await pgconnect('postgres://postgres@postgres:5432/postgres');
+      const pid = conn.pid;
+      const [caughtError] = await Promise.all([
+        conn.query(/*sql*/ `select pg_sleep(5)`).catch(Object),
+        conn1.query(/*sql*/ `select pg_terminate_backend(${pid}) from pg_sleep(0.1)`),
+      ]);
+      assertError(caughtError, 'PgError.57P01');
+    } finally {
+      await conn?.end();
+      await conn1?.end();
+    }
+  });
 
 // test('pgbouncer', async () => {
 //   const pool = pgwire.pool(process.env.POSTGRES_PGBOUNCER);
@@ -903,12 +909,8 @@ test('connection end idempotent', async _ => {
 // });
 
   test('auth clear', async _ => {
-    const [q] = await Promise.allSettled([
-      pgconnect('postgres://pwduser@postgres:5432/postgres'),
-    ]);
-    assertEquals(q.status, 'rejected');
-    if (!/password required \(clear\)/.test(q.reason.message)) throw q.reason;
-
+    const caughtError = await pgconnect('postgres://pwduser@postgres:5432/postgres').catch(Object);
+    assertError(caughtError, 'PgError.nopwd_clear');
     const conn = await pgconnect('postgres://pwduser:secret@postgres:5432/postgres');
     try {
       const [username] = await conn.query(/*sql*/ `select current_user`);
@@ -919,12 +921,8 @@ test('connection end idempotent', async _ => {
   });
 
   test('auth md5', async _ => {
-    const [q] = await Promise.allSettled([
-      pgconnect('postgres://md5user@postgres:5432/postgres'),
-    ]);
-    assertEquals(q.status, 'rejected');
-    if (!/password required \(md5\)/.test(q.reason.message)) throw q.reason;
-
+    const caughtError = await pgconnect('postgres://md5user@postgres:5432/postgres').catch(Object);
+    assertError(caughtError, 'PgError.nopwd_md5');
     const conn = await pgconnect('postgres://md5user:secret@postgres:5432/postgres');
     try {
       const [username] = await conn.query(/*sql*/ `select current_user`);
@@ -935,12 +933,8 @@ test('connection end idempotent', async _ => {
   });
 
   test('auth scram-sha-256', async _ => {
-    const [q] = await Promise.allSettled([
-      pgconnect('postgres://sha256user@postgres:5432/postgres'),
-    ]);
-    assertEquals(q.status, 'rejected');
-    if (!/password required \(scram-sha-256\)/.test(q.reason.message)) throw q.reason;
-
+    const caughtError = await pgconnect('postgres://sha256user@postgres:5432/postgres').catch(Object);
+    assertError(caughtError, 'PgError.nopwd_sha256');
     const conn = await pgconnect('postgres://sha256user:secret@postgres:5432/postgres');
     try {
       const [username] = await conn.query(/*sql*/ `select current_user`);
@@ -948,16 +942,6 @@ test('connection end idempotent', async _ => {
     } finally {
       await conn.end();
     }
-  });
-
-  test('write after end', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
-    await conn.end();
-    const [q] = await Promise.allSettled([
-      conn.query(/*sql*/ `select`),
-    ]);
-    assertEquals(q.status, 'rejected');
-    if (!(q.reason?.message == 'connection destroyed')) throw q.reason;
   });
 
   // test('write after end 2', async () => {
@@ -968,7 +952,7 @@ test('connection end idempotent', async _ => {
   // });
 
   test('pool should reuse connection', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?.poolSize=1');
+    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1');
     try {
       const [pid1] = await pool.query(/*sql*/ `select pg_backend_pid()`);
       const [pid2] = await pool.query(/*sql*/ `select pg_backend_pid()`);
@@ -991,20 +975,16 @@ test('connection end idempotent', async _ => {
   });
 
   test('pool should prevent idle in trasaction', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?.poolSize=1');
+    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1');
     try {
-      const [q1, q2] = await Promise.allSettled([
+      const [caughtError1, caughtError2] = await Promise.all([
         // emit bad query with explicit transaction
-        pool.query(/*sql*/ `begin;`),
+        pool.query(/*sql*/ `begin;`).catch(Object),
         // then enqueue good innocent query in the same connection as previous query
-        pool.query(/*sql*/ `select 1;`)
+        pool.query(/*sql*/ `select 1;`).catch(Object)
       ]);
-
-      assertEquals(q1.status, 'rejected');
-      assertEquals(q1.reason.message, 'pooled connection left in transaction');
-      assertEquals(q2.status, 'rejected');
-      assertEquals(q2.reason.message, 'postgres query failed')
-
+      assertError(caughtError1, 'PgError.left_in_txn');
+      assertError(caughtError2, 'PgError.left_in_txn');
       // poisoned connection should be already destroyed and forgotten
       // in this event loop iteration and fresh connection should be created
       // so no errors expected
@@ -1017,7 +997,7 @@ test('connection end idempotent', async _ => {
 
   // TODO it fails
   _test('pool should auto rollback', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?.poolSize=1');
+    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1');
     try {
       // emit bad query with explicit transaction
       const q1 = Promise.resolve(pool.query(/*sql*/ `
@@ -1057,7 +1037,7 @@ test('connection end idempotent', async _ => {
   // });
 
   test('pool idle timeout', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?.poolSize=1&.poolIdleTimeout=1000');
+    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1&_poolIdleTimeout=1000');
     try {
       const [pid] = await pool.query(/*sql*/ `select pg_backend_pid()`);
       assertEquals(typeof pid, 'number');
@@ -1073,7 +1053,7 @@ test('connection end idempotent', async _ => {
 
   test('pool async error', async _ => {
     // use pool with single connection
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?.poolSize=1');
+    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1');
     const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
     try {
       // new pooled connection should be created
@@ -1090,6 +1070,31 @@ test('connection end idempotent', async _ => {
       assertEquals(hello, 'hello');
     } finally {
       await pool.end();
+      await conn.end();
+    }
+  });
+
+  _test('pool should destroy ephemeral conns when _poolSize=0', async _ => {
+    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=0');
+    const [loid] = await pool.query(/*sql*/ `select lo_from_bytea(0, 'initial')`);
+    // assertEquals(typeof loid, 'number'); // TODO register oid type
+    const resp = pool.query(/*sql*/ `
+      select lo_put(${loid}, 0, 'started'); commit;
+      select lo_put(${loid}, 0, 'completed') from pg_sleep(5);
+    `);
+    try {
+      for await (const _ of resp) {
+        pool.destroy();
+      }
+    } catch (err) {
+      // console.error(err);
+    }
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    try {
+      const [lo] = await conn.query(/*sql*/ `select convert_from(lo_get(${loid}), 'sql_ascii')`);
+      // destroyed query should be started but not completed
+      assertEquals(lo, 'started');
+    } finally {
       await conn.end();
     }
   });
@@ -1114,46 +1119,103 @@ test('connection end idempotent', async _ => {
     }
   });
 
-  _test('stream', async _ => {
-    const client = pgwire.pool(process.env.POSTGRES);
-    const resp = client.query(/*sql*/ `select 'hello' col`);
-    const chunks = await readAllChunks(resp);
-    assert.deepStrictEqual(chunks.shift().boundary, {
-      tag: 'RowDescription',
-      fields: [{
-        name: 'col',
-        tableid: 0,
-        column: 0,
-        typeid: 25,
-        typelen: -1,
-        typemod: -1,
-        binary: 0,
-      }],
-    });
-    assert.deepStrictEqual(chunks.shift(), ['hello']);
-    assert.deepStrictEqual(chunks.shift().boundary, {
-      tag: 'CommandComplete',
-      command: 'SELECT 1',
-    });
-    assert.deepStrictEqual(chunks.shift().boundary, {
-      tag: 'ReadyForQuery',
-      transactionStatus: 73,
-    });
-    assert.deepStrictEqual(chunks.shift(), undefined);
+  _test('streaming', async _ => {
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    try {
+      const resp = conn.query(/*sql*/ `select 'hello' col`);
+      for await (const chunk of resp) {
+        console.log(chunk);
+      }
+    } finally {
+      await conn.end();
+    }
   });
 
-  test('cancel', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?replication=database');
+  test('cancel by break', async _ => {
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
     try {
-      const response = conn.query(/*sql*/ `select pg_sleep(10)`);
-      const startTime = Date.now();
+      const response = conn.query(/*sql*/ `
+        select set_config('x.canceltest_query_started', '+', false); commit;
+        select set_config('x.canceltest_query_completed', '+', false) from pg_sleep(10);
+      `);
       for await (const _ of response) {
+        await delay(100); // make window to set 'x.canceltest_query_started'
         break;
       }
-      const duration = Date.now() - startTime;
-      if (duration > 1000) {
-        throw Error(`cancel is too slow (${duration}ms), seems that cancel has no effect`);
-      }
+      const [report] = await conn.query(/*sql*/ `
+        select jsonb_build_object(
+          'started', current_setting('x.canceltest_query_started', true) is not null,
+          'completed', current_setting('x.canceltest_query_completed', true) is not null
+        )
+      `);
+      assertEquals(report, { started: true, completed: false });
+      // connection should be usable
+      const [hello] = await conn.query(/*sql*/ `select 'hello'`);
+      assertEquals(hello, 'hello');
+    } finally {
+      await conn.end();
+    }
+  });
+
+  test('cancel simple by signal', async _ => {
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres', {
+      // disable wake timer to test that connection wakes on .abort()
+      _wakeInterval: 99000,
+    });
+    try {
+      const abortCtl = new PoormanAbortController();
+      const abortReason = Error('cause we can');
+      setTimeout(_ => abortCtl.abort(abortReason), 1000);
+      const caughtError = await (
+        conn.query(/*sql*/ `
+          select set_config('x.canceltest_query_started', '+', false); commit;
+          select set_config('x.canceltest_query_completed', '+', false) from pg_sleep(10);
+        `, { signal: abortCtl.signal })
+        .catch(Object)
+      );
+      assertError(caughtError, 'PgError.aborted');
+      assertEquals(caughtError.cause == abortReason, true);
+      const [report] = await conn.query(/*sql*/ `
+        select jsonb_build_object(
+          'started', current_setting('x.canceltest_query_started', true) is not null,
+          'completed', current_setting('x.canceltest_query_completed', true) is not null
+        )
+      `);
+      assertEquals(report, { started: true, completed: false });
+      // connection should be usable
+      const [hello] = await conn.query(/*sql*/ `select 'hello'`);
+      assertEquals(hello, 'hello');
+    } finally {
+      await conn.end();
+    }
+  });
+
+  test('cancel extended by signal', async _ => {
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres', {
+      // disable wake timer to test that connection wakes on .abort()
+      _wakeInterval: 99000,
+    });
+    try {
+      const abortCtl = new PoormanAbortController();
+      const abortReason = Error('cause we can');
+      setTimeout(_ => abortCtl.abort(abortReason), 1000);
+      const caughtError = await (
+        conn.query([
+          { statement: /*sql*/ `select set_config('x.canceltest_query_started', '+', false)` },
+          { statement: /*sql*/ `commit` },
+          { statement: /*sql*/ `select set_config('x.canceltest_query_completed', '+', false) from pg_sleep(10)` },
+        ], { signal: abortCtl.signal })
+        .catch(Object)
+      );
+      assertError(caughtError, 'PgError.aborted');
+      assertEquals(caughtError.cause == abortReason, true);
+      const [report] = await conn.query(/*sql*/ `
+        select jsonb_build_object(
+          'started', current_setting('x.canceltest_query_started', true) is not null,
+          'completed', current_setting('x.canceltest_query_completed', true) is not null
+        )
+      `);
+      assertEquals(report, { started: true, completed: false });
       // connection should be usable
       const [hello] = await conn.query(/*sql*/ `select 'hello'`);
       assertEquals(hello, 'hello');
@@ -1163,7 +1225,7 @@ test('connection end idempotent', async _ => {
   });
 
   _test('wake', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?.debug=0');
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?_debug=0');
     console.log('-');
     try {
       const stream = conn.query(
@@ -1207,7 +1269,7 @@ test('connection end idempotent', async _ => {
 
   test('notifications', async _ => {
     const actual = [];
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?.debug=0');
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?_debug=0');
     const pid = conn.pid;
     try {
       conn.onnotification = n => actual.push(n);
@@ -1226,7 +1288,7 @@ test('connection end idempotent', async _ => {
   });
 
   _test('notifications handler should not swallow errors', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?.debug=1');
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?_debug=1');
     try {
       conn.onnotification = onnotification;
       await conn.query(/*sql*/ `listen test_chan`);
@@ -1238,7 +1300,6 @@ test('connection end idempotent', async _ => {
       throw Error('boom');
     }
   });
-
 }
 
 // mute
@@ -1246,4 +1307,35 @@ function _test() {}
 
 async function delay(duration) {
   return new Promise(resolve => setTimeout(resolve, duration));
+}
+
+function assertError(actualError, expectedName) {
+  if (actualError instanceof Error) {
+    if (actualError.name == expectedName) {
+      return;
+    }
+    throw actualError;
+  }
+  console.error('%s expected, but got %o', expectedName, actualError);
+  throw Error('Error expected');
+}
+
+class PoormanAbortController {
+  signal = new PoormanAbortSignal();
+  abort(reason) {
+    this.signal.aborted = true;
+    this.signal.reason = reason;
+    this.signal._listeners.forEach(queueMicrotask);
+  }
+}
+class PoormanAbortSignal {
+  aborted;
+  reason;
+  _listeners = new Set();
+  addEventListener(_event, handler) {
+    this._listeners.add(handler);
+  }
+  removeEventListener(_event, handler) {
+    this._listeners.delete(handler);
+  }
 }
