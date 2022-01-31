@@ -868,21 +868,29 @@ export function setup({
 
   test('connection end', async _ => {
     const conn = await pgconnect('postgres://postgres:qwerty@postgres:5432/postgres');
-    const [[hello],,, caughtError] = await Promise.all([
-      // check that connection is working
-      conn.query(/*sql*/ `select 'hello'`),
-      // enqueue connection end
-      conn.end(),
-       // concurent .end calls should be no-op,
-       // but still wait until connection terminated
-      conn.end(),
-      // connection should be closed for new queries immediately
-      conn.query(/*sql*/ `select`).catch(Object),
-    ]);
-    assertEquals(hello, 'hello');
-    assertError(caughtError, 'PgError.conn_ended');
-    // subsequent .end calls should be no-op
-    await conn.end();
+    try {
+      const [[health],,,, immediateQueryAfterEnd] = await Promise.all([
+        // check that connection is working
+        conn.query(/*sql*/ `select 'ok'`),
+        // enqueue connection end
+        conn.end(),
+        // ensure connection is still alive
+        assertEquals(Boolean(conn.pid), true),
+         // concurent .end calls should be no-op,
+         // but still wait until connection terminated
+        conn.end().then(_ => assertEquals(Boolean(conn.pid), false)),
+        // connection should be closed for new queries immediately
+        conn.query(/*sql*/ `select 'impossible'`).catch(Object),
+      ]);
+      assertEquals(health, 'ok');
+      assertError(immediateQueryAfterEnd, 'PgError.conn_ended');
+      // connection should still be closed for new queries
+      const seqQueryAfterEnd = await conn.query(/*sql*/ `select 'impossible'`).catch(Object);
+      assertError(seqQueryAfterEnd, 'PgError.conn_ended');
+    } finally {
+      // subsequent .end calls should be no-op
+      await conn.end();
+    }
   });
 
   test('pending queries should be rejected when server closes connection', async _ => {
@@ -979,9 +987,9 @@ export function setup({
     try {
       const [caughtError1, caughtError2] = await Promise.all([
         // emit bad query with explicit transaction
-        pool.query(/*sql*/ `begin;`).catch(Object),
+        pool.query(/*sql*/ `begin`).catch(Object),
         // then enqueue good innocent query in the same connection as previous query
-        pool.query(/*sql*/ `select 1;`).catch(Object)
+        pool.query(/*sql*/ `select 1`).catch(Object)
       ]);
       assertError(caughtError1, 'PgError.left_in_txn');
       assertError(caughtError2, 'PgError.left_in_txn');
@@ -995,29 +1003,41 @@ export function setup({
     }
   });
 
-  // TODO it fails
-  _test('pool should auto rollback', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1');
+  // TODO it works, but I'm not sure that I know why.
+  // Seems that postgres fails to `commit` because
+  // we not consume all backend messages before connection destroy.
+  // Can we rely on this behavior?
+  test('pool should auto rollback', async _ => {
+    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1&_debug=0');
     try {
-      // emit bad query with explicit transaction
-      const q1 = Promise.resolve(pool.query(/*sql*/ `
-        begin;
-        create table this_table_should_not_be_created(a text);
-      `));
-      q1.catch(Boolean);
-
-      // then enqueue `commit` in the same connection as previous query
-      const q2 = Promise.resolve(pool.query(/*sql*/ `commit;`));
-      q2.catch(Boolean);
-
-      await assertRejects(_ => q1, Error, 'pooled connection left in transaction');
-      await assertRejects(_ => q2, Error, 'postgres query failed');
-
+      const [caughtError1, caughtError2] = await Promise.all([
+        // emit bad query with explicit transaction
+        pool.query(/*sql*/ `begin; create table this_table_should_not_be_created();`).catch(Object),
+        // then enqueue `commit` in the same connection as previous query
+        pool.query(/*sql*/ `commit`).catch(Object),
+      ]);
+      assertError(caughtError1, 'PgError.left_in_txn');
+      assertError(caughtError2, 'PgError.left_in_txn');
+      assertEquals(caughtError2.cause == caughtError1, true);
+      // console.log(caughtError1);
+      // console.log(caughtError2);
       // if first query was not rollbacked then next query will fail
-      await pool.query(/*sql*/ `
-        create table this_table_should_not_be_created(a text);
-        rollback;
-      `);
+      await pool.query(/*sql*/ `create temp table this_table_should_not_be_created()`);
+    } finally {
+      await pool.end();
+    }
+  });
+
+  test('pool should keep reason of left_in_txn', async _ => {
+    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1&_debug=0');
+    try {
+      const caughtError = await (
+        pool.query(/*sql*/ `begin; select 1 / 0; commit;`)
+        .catch(Object)
+      );
+      assertError(caughtError, 'PgError.left_in_txn');
+      assertError(caughtError.cause, 'PgError.22012'); // division by zero
+      // console.log(caughtError);
     } finally {
       await pool.end();
     }

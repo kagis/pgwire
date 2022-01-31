@@ -133,22 +133,25 @@ class PgPool {
         cause: this._endReason,
       });
     }
+    let caughtError;
     const conn = this._getConnection();
     try {
       yield * conn.query(...args);
-      // const response = activateIterator(conn.query(...args));
-      // const discard = Promise.resolve(conn.query(`discard all`));
+      // const response = conn.query(...args);
+      // const discard = conn.query(`discard all`);
       // discard.catch(Boolean);
       // try {
       //   yield * response;
       // } finally {
       //   await discard;
       // }
+    } catch (err) {
+      // Keep error for cases when _recycleConnection throws PgError.left_in_txn.
+      // We will report it as cause of PgError.left_in_txn.
+      caughtError = err;
+      throw err;
     } finally {
-      // TODO error can be thrown here when connection left in transaction.
-      // But left-in-transaction can be caused by another error which
-      // should be nested into left-in-transaction
-      await this._recycleConnection(conn);
+      await this._recycleConnection(conn, caughtError);
     }
   }
   async end() {
@@ -192,7 +195,7 @@ class PgPool {
     newConn.whenEnded.then(this._onConnectionEnded.bind(this, newConn));
     return newConn;
   }
-  async _recycleConnection(conn) {
+  async _recycleConnection(conn, queryError) {
     if (!this._poolSize) {
       // TODO not wait
       // but pgbouncer does not allow async Terminate anyway.
@@ -224,6 +227,7 @@ class PgPool {
       throw conn.destroy(new PgError({
         message: 'Pooled postgres connection left in transaction',
         code: 'left_in_txn',
+        cause: queryError,
       }));
     }
 
@@ -239,26 +243,6 @@ class PgPool {
     this._connections.delete(conn);
   }
 }
-
-
-// function activateIterator(iterable) {
-//   const iterator = iterable[Symbol.asyncIterator]();
-//   const first = iterator.next();
-//   first.catch(Boolean);
-//   return wrapper();
-
-//   async function * wrapper() {
-//     try {
-//       const { done, value } = await first;
-//       if (done) return;
-//       yield value;
-//       yield * iterator;
-//     } finally {
-//       await iterator.return();
-//     }
-//   }
-// }
-
 
 class PgConnection {
   constructor({ hostname, port, password, ...options }) {
@@ -366,15 +350,6 @@ class PgConnection {
     return new PgResponse(this._queryIter(args));
   }
   async * _queryIter(args) {
-    // Stack trace is broken if error occures in initial generator tick.
-    // Spent many hours to understand why, but I can't.
-    // Seems that this is payment for Thenable satan magic in PgResponse.
-    // `at PgResponse.then` is the lowest line of stack trace when no `await null`.
-    // but if do `await null` then stack trace is proper.
-    // TODO does it disorder queries?
-    await null;
-    // console.trace()
-
     if (!this._tx) {
       throw new PgError({
         message: 'Unable to do postgres query on ended connection',
@@ -497,7 +472,6 @@ class PgConnection {
       this._endReason = new PgError({ message: 'Postgres connection ended' });
       this._rejectReady(this._endReason);
     }
-
     // TODO _net.close can throw
     await this._whenDestroyed;
   }
@@ -638,8 +612,8 @@ class PgConnection {
     }
     if (this._debug) {
       console.log(... m.payload === undefined
-        ? ['<- %c%s%c', 'font-weight: bold; color: magenta', m.tag, '']
-        : ['<- %c%s%c %o', 'font-weight: bold; color: magenta', m.tag, '', m.payload],
+        ? ['%s<- %c%s%c', this.pid || 'n', 'font-weight: bold; color: magenta', m.tag, '']
+        : ['%s<- %c%s%c %o', this.pid || 'n', 'font-weight: bold; color: magenta', m.tag, '', m.payload],
       );
     }
     // TODO serializeFrontendMessage creates new Uint8Array
@@ -659,8 +633,8 @@ class PgConnection {
         for (const m of messages) {
           if (this._debug) {
             console.log(... m.payload === undefined
-              ? ['-> %s', m.tag]
-              : ['-> %s %o', m.tag, m.payload],
+              ? ['%s-> %s', this.pid || 'n', m.tag]
+              : ['%s-> %s %o', this.pid || 'n', m.tag, m.payload],
             );
           }
           // TODO check if connection is destroyed to prevent errors in _recvMessage?
@@ -1111,19 +1085,36 @@ async function * wrapCopyData(source, signal) {
 }
 
 class PgResponse {
-  constructor(iter) {
+  constructor(stream) {
     /** @type {Promise<PgResult>} */
     this._loadPromise = null;
-    this._iter = iter;
+    this._stream = stream[Symbol.asyncIterator]();
+    // Activate stream eagerly to make query emition order predictable.
+    // This makes possible to enqueue concurent .query and .end calls.
+    // This also helps to keep stack trace proper when error occurs
+    // in initial generator tick.
+    // See 'connection end' test
+    this._peek = this._stream.next();
   }
   [Symbol.asyncIterator]() {
-    // TODO activate iterator (emit query)?
-    // it can be handy when we need to enqueue .end after .query immediately
-    // or if need to enqueue .query('discard all') after user .query in pool
-    return this._iter[Symbol.asyncIterator]();
+    return this;
+  }
+  next(value) {
+    if (this._peek) {
+      const peek = this._peek;
+      this._peek = null;
+      return peek;
+    }
+    return this._stream.next(value);
+  }
+  return(value) {
+    if (this._peek) {
+      this._peek.catch(Boolean);
+      this._peek = null;
+    }
+    return this._stream.return(value);
   }
 
-  // make PgResponse behave like lazy promise
   then(...args) { return this._loadOnce().then(...args); }
   catch(...args) { return this._loadOnce().catch(...args); }
   finally(...args) { return this._loadOnce().finally(...args); }
@@ -1133,7 +1124,7 @@ class PgResponse {
     const notices = [];
     const results = [];
     let result = new PgSubResult();
-    for await (const chunk of this._iter) {
+    for await (const chunk of this) {
       result.rows.push(...chunk.rows);
       // lastResult.copies.push(...chunk.copies); // TODO chunk.copies
       switch (chunk.tag) {

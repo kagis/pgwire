@@ -60,7 +60,7 @@ export interface PgExtendedQueryOptions {
   readonly signal?: AbortSignal;
 }
 
-export type PgResponse = PromiseLike<PgResult> & AsyncIterable<PgResponseChunk>;
+export type PgResponse = PromiseLike<PgResult> & AsyncIterableIterator<PgResponseChunk>;
 
 export interface PgResult extends Iterable<any> {
   /**
