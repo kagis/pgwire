@@ -287,7 +287,7 @@ class PgConnection {
     );
     // run background message processing
     // create StartupMessage here to validate startupOptions in constructor call stack
-    this._whenDestroyed = this._ioloop(new StartupMessage({
+    this._whenDestroyed = this._ioloop(new FrontendMessage.StartupMessage({
       ...startupOptions,
       'client_encoding': 'UTF8', // TextEncoder supports UTF8 only, so hardcode and force UTF8
       // client_encoding: 'win1251',
@@ -466,7 +466,7 @@ class PgConnection {
       //   this._whenIdle.then(_ => lock.end());
       //   this._tx.push(lock);
       // }
-      this._tx.push(new Terminate());
+      this._tx.push(new FrontendMessage.Terminate());
       this._tx.end();
       this._tx = null;
       this._endReason = new PgError({ message: 'Postgres connection ended' });
@@ -523,7 +523,7 @@ class PgConnection {
     }
     const socket = await this._createSocket();
     try {
-      const m = new CancelRequest(this._backendKeyData);
+      const m = new FrontendMessage.CancelRequest(this._backendKeyData);
       await _net.write(socket, serializeFrontendMessage(m));
     } finally {
       _net.close(socket);
@@ -778,7 +778,7 @@ class PgConnection {
       });
     }
     // should be always encoded as utf8 even when server_encoding is win1251
-    this._startTx.push(new PasswordMessage(this._password));
+    this._startTx.push(new FrontendMessage.PasswordMessage(this._password));
   }
   _recvAuthenticationMD5Password(_, { salt }) {
     if (this._password == null) {
@@ -795,7 +795,7 @@ class PgConnection {
     const userb = this._user instanceof Uint8Array ? this._user : utf8enc.encode(this._user);
     const a = utf8enc.encode(hexEncode(md5(Uint8Array.of(...passwordb, ...userb))));
     const b = 'md5' + hexEncode(md5(Uint8Array.of(...a, ...salt)));
-    this._startTx.push(new PasswordMessage(b));
+    this._startTx.push(new FrontendMessage.PasswordMessage(b));
     function hexEncode(/** @type {Uint8Array} */ bytes) {
       return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
     }
@@ -807,7 +807,7 @@ class PgConnection {
     this._saslScramSha256 = new SaslScramSha256();
     const firstmsg = await this._saslScramSha256.start();
     const utf8enc = new TextEncoder();
-    this._startTx.push(new SASLInitialResponse({
+    this._startTx.push(new FrontendMessage.SASLInitialResponse({
       mechanism: 'SCRAM-SHA-256',
       data: utf8enc.encode(firstmsg),
     }));
@@ -825,7 +825,7 @@ class PgConnection {
       utf8dec.decode(data),
       this._password,
     );
-    this._startTx.push(new SASLResponse(utf8enc.encode(finmsg)));
+    this._startTx.push(new FrontendMessage.SASLResponse(utf8enc.encode(finmsg)));
   }
   _recvAuthenticationSASLFinal(_, data) {
     const utf8dec = new TextDecoder();
@@ -939,8 +939,8 @@ function simpleQuery(out, stdinSignal, script, { stdin, stdins = [] } = 0, respo
   // query execution, when async messages can be received. Need more source digging)
   // Seems that this is ok to do Sync during simple protocol
   // even when replication=database.
-  out.push(new Sync());
-  out.push(new Query(script));
+  out.push(new FrontendMessage.Sync());
+  out.push(new FrontendMessage.Query(script));
   // TODO handle case when number of stdins is unknown
   // should block tx and wait for CopyInResponse/CopyBothResponse
   if (stdin) {
@@ -958,11 +958,11 @@ function simpleQuery(out, stdinSignal, script, { stdin, stdins = [] } = 0, respo
   if (/^\s*(CREATE_REPLICATION_SLOT|START_REPLICATION)\b/.test(script)) {
     out.push(responseEndLock);
   } else {
-    out.push(new CopyFail('no stdin provided'));
+    out.push(new FrontendMessage.CopyFail('no stdin provided'));
   }
 }
 function extendedQuery(out, stdinSignal, blocks) {
-  out.push(new Sync()); // see top comment in simpleQuery
+  out.push(new FrontendMessage.Sync()); // see top comment in simpleQuery
   for (const m of blocks) {
     switch (m.message) {
       case undefined:
@@ -974,14 +974,14 @@ function extendedQuery(out, stdinSignal, blocks) {
       case 'CloseStatement': extendedQueryCloseStatement(out, m); break;
       case 'DescribePortal': extendedQueryDescribePortal(out, m); break;
       case 'ClosePortal': extendedQueryClosePortal(out, m); break;
-      case 'Flush': out.push(new Flush()); break;
+      case 'Flush': out.push(new FrontendMessage.Flush()); break;
       default: throw new PgError({
         message: 'Unknown extended message ' + JSON.stringify(m.message),
         code: 'misuse',
       });
     }
   }
-  out.push(new Sync());
+  out.push(new FrontendMessage.Sync());
 }
 function extendedQueryStatement(out, { statement, params = [], limit, binary, stdin, noBuffer }, stdinSignal) {
   const paramTypes = params.map(({ type }) => type);
@@ -994,11 +994,11 @@ function extendedQueryStatement(out, { statement, params = [], limit, binary, st
 }
 function extendedQueryParse(out, { statement, statementName, paramTypes = [] }) {
   const paramTypeOids = paramTypes.map(typeResolve);
-  out.push(new Parse({ statement, statementName, paramTypeOids }));
+  out.push(new FrontendMessage.Parse({ statement, statementName, paramTypeOids }));
 }
 function extendedQueryBind(out, { portal, statementName, binary, params = [] }) {
   params = params.map(encodeParam);
-  out.push(new Bind({ portal, statementName, binary, params }));
+  out.push(new FrontendMessage.Bind({ portal, statementName, binary, params }));
 
   function encodeParam({ value, type}) {
     // treat Uint8Array values as already encoded,
@@ -1013,8 +1013,8 @@ function extendedQueryExecute(out, { portal, stdin, limit, noBuffer }, stdinSign
   // TODO write test to explain why
   // we need unconditional DescribePortal
   // before Execute
-  out.push(new DescribePortal(portal));
-  out.push(new Execute({ portal, limit }));
+  out.push(new FrontendMessage.DescribePortal(portal));
+  out.push(new FrontendMessage.Execute({ portal, limit }));
   // if (noBuffer) {
   //   out.push(new Flush());
   // }
@@ -1023,22 +1023,22 @@ function extendedQueryExecute(out, { portal, stdin, limit, noBuffer }, stdinSign
   } else {
     // CopyFail message ignored by postgres
     // if there is no COPY FROM statement
-    out.push(new CopyFail('no stdin provided'));
+    out.push(new FrontendMessage.CopyFail('no stdin provided'));
   }
   // TODO nobuffer option
   // yield new Flush();
 }
 function extendedQueryDescribeStatement(out, { statementName }) {
-  out.push(new DescribeStatement(statementName));
+  out.push(new FrontendMessage.DescribeStatement(statementName));
 }
 function extendedQueryCloseStatement(out, { statementName }) {
-  out.push(new CloseStatement(statementName));
+  out.push(new FrontendMessage.CloseStatement(statementName));
 }
 function extendedQueryDescribePortal(out, { portal }) {
-  out.push(new DescribePortal(portal));
+  out.push(new FrontendMessage.DescribePortal(portal));
 }
 function extendedQueryClosePortal({ portal }) {
-  out.push(new ClosePortal(portal));
+  out.push(new FrontendMessage.ClosePortal(portal));
 }
 async function * wrapCopyData(source, signal) {
   // TODO dry
@@ -1050,15 +1050,15 @@ async function * wrapCopyData(source, signal) {
       if (signal.aborted) {
         throw signal.reason;
       }
-      yield new CopyData(chunk);
+      yield new FrontendMessage.CopyData(chunk);
     }
-    yield new CopyDone();
+    yield new FrontendMessage.CopyDone();
   } catch (err) {
     // TODO err.stack lost
     // store err
     // do CopyFail (copy_error_key)
     // rethrow stored err when ErrorResponse received
-    yield new CopyFail(String(err));
+    yield new FrontendMessage.CopyFail(String(err));
   }
 }
 
@@ -1262,199 +1262,180 @@ class FrontendMessage {
   writeTo(messageWriter) {
     this._write(messageWriter, this.size, this.payload);
   }
-}
 
-class StartupMessage extends FrontendMessage {
-  _write(w, size, options) {
-    w.writeInt32BE(size);
-    w.writeInt32BE(0x00030000);
-    for (const [key, val] of Object.entries(options)) {
-      w.writeString(key);
-      w.writeString(val);
-    }
-    w.writeUint8(0);
-  }
-}
-
-class CancelRequest extends FrontendMessage {
-  _write(w, _size, { pid, secretKey }) {
-    w.writeInt32BE(16);
-    w.writeInt32BE(80877102); // (1234 << 16) | 5678
-    w.writeInt32BE(pid);
-    w.writeInt32BE(secretKey);
-  }
-}
-
-class SSLRequest extends FrontendMessage {
-  _write(w) {
-    w.writeInt32BE(8);
-    w.writeInt32BE(80877102); // (1234 << 16) | 5678
-  }
-}
-
-class PasswordMessage extends FrontendMessage {
-  _write(w, size, payload) {
-    w.writeUint8(0x70); // p
-    w.writeInt32BE(size - 1);
-    w.writeString(payload);
-  }
-}
-
-class SASLInitialResponse extends FrontendMessage {
-  _write(w, size, { mechanism, data }) {
-    w.writeUint8(0x70); // p
-    w.writeInt32BE(size - 1);
-    w.writeString(mechanism);
-    if (data) {
-      w.writeInt32BE(data.byteLength);
-      w.write(data);
-    } else {
-      w.writeInt32BE(-1);
-    }
-  }
-}
-
-class SASLResponse extends FrontendMessage {
-  _write(w, size, data) {
-    w.writeUint8(0x70); // p
-    w.writeInt32BE(size - 1);
-    w.write(data);
-  }
-}
-
-class Query extends FrontendMessage {
-  _write(w, size) {
-    w.writeUint8(0x51); // Q
-    w.writeInt32BE(size - 1);
-    w.writeString(this.payload);
-  }
-}
-
-class Parse extends FrontendMessage {
-  _write(w, size, { statement, statementName = '', paramTypeOids = [] }) {
-    w.writeUint8(0x50); // P
-    w.writeInt32BE(size - 1);
-    w.writeString(statementName);
-    w.writeString(statement);
-    w.writeInt16BE(paramTypeOids.length);
-    for (const typeOid of paramTypeOids) {
-      w.writeUint32BE(typeOid || 0);
-    }
-  }
-}
-
-class Bind extends FrontendMessage {
-  _write(w, size, { portal = '', statementName = '', params = [], binary = [] }) {
-    w.writeUint8(0x42); // B
-    w.writeInt32BE(size - 1);
-    w.writeString(portal);
-    w.writeString(statementName);
-    w.writeInt16BE(params.length);
-    for (const p of params) {
-      w.writeInt16BE(Number(p instanceof Uint8Array));
-    }
-    w.writeInt16BE(params.length);
-    for (const p of params) {
-      if (p == null) {
-        w.writeInt32BE(-1);
-        continue;
+  static StartupMessage = class extends FrontendMessage {
+    _write(w, size, options) {
+      w.writeInt32BE(size);
+      w.writeInt32BE(0x00030000);
+      for (const [key, val] of Object.entries(options)) {
+        w.writeString(key);
+        w.writeString(val);
       }
-      w.writeBindParam(p);
-    }
-    w.writeInt16BE(binary.length);
-    for (const fmt of binary) {
-      w.writeInt16BE(fmt);
+      w.writeUint8(0);
     }
   }
-}
-
-class Execute extends FrontendMessage {
-  _write(w, size, { portal = '', limit = 0 }) {
-    w.writeUint8(0x45); // E
-    w.writeInt32BE(size - 1);
-    w.writeString(portal);
-    w.writeUint32BE(limit);
+  static CancelRequest = class extends FrontendMessage {
+    _write(w, _size, { pid, secretKey }) {
+      w.writeInt32BE(16);
+      w.writeInt32BE(80877102); // (1234 << 16) | 5678
+      w.writeInt32BE(pid);
+      w.writeInt32BE(secretKey);
+    }
   }
-}
-
-class DescribeStatement extends FrontendMessage {
-  _write(w, size, statementName = '') {
-    w.writeUint8(0x44); // D
-    w.writeInt32BE(size - 1);
-    w.writeUint8(0x53); // S
-    w.writeString(statementName);
+  static SSLRequest = class extends FrontendMessage {
+    _write(w) {
+      w.writeInt32BE(8);
+      w.writeInt32BE(80877102); // (1234 << 16) | 5678
+    }
   }
-}
-
-class DescribePortal extends FrontendMessage {
-  _write(w, size, portal = '') {
-    w.writeUint8(0x44); // D
-    w.writeInt32BE(size - 1);
-    w.writeUint8(0x50); // P
-    w.writeString(portal);
+  static PasswordMessage = class extends FrontendMessage {
+    _write(w, size, payload) {
+      w.writeUint8(0x70); // p
+      w.writeInt32BE(size - 1);
+      w.writeString(payload);
+    }
   }
-}
-
-class ClosePortal extends FrontendMessage {
-  _write(w, size, portal = '') {
-    w.writeUint8(2); // C
-    w.writeInt32BE(size - 1);
-    w.writeUint8(0x50); // P
-    w.writeString(portal);
+  static SASLInitialResponse = class extends FrontendMessage {
+    _write(w, size, { mechanism, data }) {
+      w.writeUint8(0x70); // p
+      w.writeInt32BE(size - 1);
+      w.writeString(mechanism);
+      if (data) {
+        w.writeInt32BE(data.byteLength);
+        w.write(data);
+      } else {
+        w.writeInt32BE(-1);
+      }
+    }
   }
-}
-
-class CloseStatement extends FrontendMessage {
-  _write(w, size, statementName = '') {
-    w.writeUint8(2); // C
-    w.writeInt32BE(size - 1);
-    w.writeUint8(0x53); // S
-    w.writeString(statementName);
+  static SASLResponse = class extends FrontendMessage {
+    _write(w, size, data) {
+      w.writeUint8(0x70); // p
+      w.writeInt32BE(size - 1);
+      w.write(data);
+    }
   }
-}
-
-class Sync extends FrontendMessage {
-  _write(w) {
-    w.writeUint8(0x53); // S
-    w.writeInt32BE(4);
+  static Query = class extends FrontendMessage {
+    _write(w, size) {
+      w.writeUint8(0x51); // Q
+      w.writeInt32BE(size - 1);
+      w.writeString(this.payload);
+    }
   }
-}
-
-// unused
-class Flush extends FrontendMessage {
-  _write(w) {
-    w.writeUint8(0x48); // H
-    w.writeInt32BE(4);
+  static Parse = class extends FrontendMessage {
+    _write(w, size, { statement, statementName = '', paramTypeOids = [] }) {
+      w.writeUint8(0x50); // P
+      w.writeInt32BE(size - 1);
+      w.writeString(statementName);
+      w.writeString(statement);
+      w.writeInt16BE(paramTypeOids.length);
+      for (const typeOid of paramTypeOids) {
+        w.writeUint32BE(typeOid || 0);
+      }
+    }
   }
-}
-
-class CopyData extends FrontendMessage {
-  _write(w, size, data) {
-    w.writeUint8(0x64); // d
-    w.writeInt32BE(size - 1);
-    w.write(data);
+  static Bind = class extends FrontendMessage {
+    _write(w, size, { portal = '', statementName = '', params = [], binary = [] }) {
+      w.writeUint8(0x42); // B
+      w.writeInt32BE(size - 1);
+      w.writeString(portal);
+      w.writeString(statementName);
+      w.writeInt16BE(params.length);
+      for (const p of params) {
+        w.writeInt16BE(Number(p instanceof Uint8Array));
+      }
+      w.writeInt16BE(params.length);
+      for (const p of params) {
+        if (p == null) {
+          w.writeInt32BE(-1);
+          continue;
+        }
+        w.writeBindParam(p);
+      }
+      w.writeInt16BE(binary.length);
+      for (const fmt of binary) {
+        w.writeInt16BE(fmt);
+      }
+    }
   }
-}
-
-class CopyDone extends FrontendMessage {
-  _write(w) {
-    w.writeUint8(0x63); // c
-    w.writeInt32BE(4);
+  static Execute = class extends FrontendMessage {
+    _write(w, size, { portal = '', limit = 0 }) {
+      w.writeUint8(0x45); // E
+      w.writeInt32BE(size - 1);
+      w.writeString(portal);
+      w.writeUint32BE(limit);
+    }
   }
-}
-
-class CopyFail extends FrontendMessage {
-  _write(w, size, cause) {
-    w.writeUint8(0x66); // f
-    w.writeInt32BE(size - 1);
-    w.writeString(cause);
+  static DescribeStatement = class extends FrontendMessage {
+    _write(w, size, statementName = '') {
+      w.writeUint8(0x44); // D
+      w.writeInt32BE(size - 1);
+      w.writeUint8(0x53); // S
+      w.writeString(statementName);
+    }
   }
-}
-
-class Terminate extends FrontendMessage {
-  _write(w) {
-    w.writeUint8(0x58); // X
-    w.writeInt32BE(4);
+  static DescribePortal = class extends FrontendMessage {
+    _write(w, size, portal = '') {
+      w.writeUint8(0x44); // D
+      w.writeInt32BE(size - 1);
+      w.writeUint8(0x50); // P
+      w.writeString(portal);
+    }
+  }
+  static ClosePortal = class extends FrontendMessage {
+    _write(w, size, portal = '') {
+      w.writeUint8(2); // C
+      w.writeInt32BE(size - 1);
+      w.writeUint8(0x50); // P
+      w.writeString(portal);
+    }
+  }
+  static CloseStatement = class extends FrontendMessage {
+    _write(w, size, statementName = '') {
+      w.writeUint8(2); // C
+      w.writeInt32BE(size - 1);
+      w.writeUint8(0x53); // S
+      w.writeString(statementName);
+    }
+  }
+  static Sync = class extends FrontendMessage {
+    _write(w) {
+      w.writeUint8(0x53); // S
+      w.writeInt32BE(4);
+    }
+  }
+  // unused
+  static Flush = class extends FrontendMessage {
+    _write(w) {
+      w.writeUint8(0x48); // H
+      w.writeInt32BE(4);
+    }
+  }
+  static CopyData = class extends FrontendMessage {
+    _write(w, size, data) {
+      w.writeUint8(0x64); // d
+      w.writeInt32BE(size - 1);
+      w.write(data);
+    }
+  }
+  static CopyDone = class extends FrontendMessage {
+    _write(w) {
+      w.writeUint8(0x63); // c
+      w.writeInt32BE(4);
+    }
+  }
+  static CopyFail = class extends FrontendMessage {
+    _write(w, size, cause) {
+      w.writeUint8(0x66); // f
+      w.writeInt32BE(size - 1);
+      w.writeString(cause);
+    }
+  }
+  static Terminate = class extends FrontendMessage {
+    _write(w) {
+      w.writeUint8(0x58); // X
+      w.writeInt32BE(4);
+    }
   }
 }
 
