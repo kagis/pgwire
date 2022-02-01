@@ -362,7 +362,7 @@ export function setup({
   test('copy to stdout', async _ => {
     const conn = await pgconnect('postgres://postgres:qwerty@postgres:5432/postgres');
     try {
-      const stdout = conn.query(/*sql*/ `copy (values (1, 'hello'), (2, 'world')) to stdout`);
+      const stdout = conn.stream(/*sql*/ `copy (values (1, 'hello'), (2, 'world')) to stdout`);
       const dump = await readAll(stdout)
       const dumps = new TextDecoder().decode(dump);
       assertEquals(dumps, '1\thello\n2\tworld\n');
@@ -374,7 +374,7 @@ export function setup({
   test('copy to stdout multi', async _ => {
     const conn = await pgconnect('postgres://postgres:qwerty@postgres:5432/postgres');
     try {
-      const stdout = conn.query(/*sql*/ `
+      const stdout = conn.stream(/*sql*/ `
         copy (values (1, 'hello'), (2, 'world')) to stdout;
         copy (values (3, 'foo'), (4, 'bar')) to stdout;
       `);
@@ -519,7 +519,7 @@ export function setup({
 // });
 
   _test('logical replication', async _ => {
-    const conn = await pgconnect('postgres://postgres:secret@postgres:5432/postgres?replication=database');
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?replication=database');
     try {
       await conn.query(/*sql*/ `
         select pg_create_logical_replication_slot('test_2b265aa1', 'test_decoding', temporary:=true)
@@ -553,7 +553,7 @@ export function setup({
   });
 
   test('logical replication pgoutput', async _ => {
-    const conn = await pgconnect('postgres://postgres:secret@postgres:5432/postgres?replication=database');
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?replication=database');
     try {
       await Promise.all([
         conn.query(/*sql*/ `create table pgo1rel(id int not null primary key, val text, note text)`),
@@ -759,6 +759,19 @@ export function setup({
     }
   });
 
+  test('logical replication invalid startLsn', async _ => {
+    let caughtError;
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?replication=database&_debug=0');
+    const replicationStream = conn.logicalReplication({ slot: 'test', startLsn: 'invalid/lsn' });
+    try {
+      for await (const _ of replicationStream);
+    } catch (err) {
+      caughtError = err;
+    } finally {
+      await conn.end();
+    }
+    assertError(caughtError, 'PgError.invalid_lsn');
+  });
 
 // test('logical replication ack', async () => {
 //   psql(/*sql*/ `
@@ -951,13 +964,6 @@ export function setup({
       await conn.end();
     }
   });
-
-  // test('write after end 2', async () => {
-  //   const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
-  //   conn.end();
-  //   await new Promise(resolve => setImmediate(resolve, 0));
-  //   await assert.rejects(conn.query(/*sql*/ `SELECT`));
-  // });
 
   test('pool should reuse connection', async _ => {
     const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1');
@@ -1152,26 +1158,22 @@ export function setup({
   });
 
   test('cancel by break', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres', {
+      'x.state': 'initial',
+    });
     try {
-      const response = conn.query(/*sql*/ `
-        select set_config('x.canceltest_query_started', '+', false); commit;
-        select set_config('x.canceltest_query_completed', '+', false) from pg_sleep(10);
+      const response = conn.stream(/*sql*/ `
+        set x.state = 'started';
+        commit;
+        select from pg_sleep(10);
+        set x.state = 'completed';
       `);
       for await (const _ of response) {
-        await delay(100); // make window to set 'x.canceltest_query_started'
+        await delay(100); // make window to set 'x.state'
         break;
       }
-      const [report] = await conn.query(/*sql*/ `
-        select jsonb_build_object(
-          'started', current_setting('x.canceltest_query_started', true) is not null,
-          'completed', current_setting('x.canceltest_query_completed', true) is not null
-        )
-      `);
-      assertEquals(report, { started: true, completed: false });
-      // connection should be usable
-      const [hello] = await conn.query(/*sql*/ `select 'hello'`);
-      assertEquals(hello, 'hello');
+      const [state] = await conn.query(/*sql*/ `show x.state`);
+      assertEquals(state, 'started');
     } finally {
       await conn.end();
     }
@@ -1180,7 +1182,8 @@ export function setup({
   test('cancel simple by signal', async _ => {
     const conn = await pgconnect('postgres://postgres@postgres:5432/postgres', {
       // disable wake timer to test that connection wakes on .abort()
-      _wakeInterval: 99000,
+      _wakeInterval: 0,
+      'x.state': 'initial',
     });
     try {
       const abortCtl = new PoormanAbortController();
@@ -1188,23 +1191,17 @@ export function setup({
       setTimeout(_ => abortCtl.abort(abortReason), 1000);
       const caughtError = await (
         conn.query(/*sql*/ `
-          select set_config('x.canceltest_query_started', '+', false); commit;
-          select set_config('x.canceltest_query_completed', '+', false) from pg_sleep(10);
+          set x.state = 'started';
+          commit;
+          select from pg_sleep(10);
+          set x.state = 'completed';
         `, { signal: abortCtl.signal })
         .catch(Object)
       );
       assertError(caughtError, 'PgError.aborted');
       assertEquals(caughtError.cause == abortReason, true);
-      const [report] = await conn.query(/*sql*/ `
-        select jsonb_build_object(
-          'started', current_setting('x.canceltest_query_started', true) is not null,
-          'completed', current_setting('x.canceltest_query_completed', true) is not null
-        )
-      `);
-      assertEquals(report, { started: true, completed: false });
-      // connection should be usable
-      const [hello] = await conn.query(/*sql*/ `select 'hello'`);
-      assertEquals(hello, 'hello');
+      const [state] = await conn.query(/*sql*/ `show x.state`);
+      assertEquals(state, 'started');
     } finally {
       await conn.end();
     }
@@ -1213,7 +1210,8 @@ export function setup({
   test('cancel extended by signal', async _ => {
     const conn = await pgconnect('postgres://postgres@postgres:5432/postgres', {
       // disable wake timer to test that connection wakes on .abort()
-      _wakeInterval: 99000,
+      _wakeInterval: 0,
+      'x.state': 'initial',
     });
     try {
       const abortCtl = new PoormanAbortController();
@@ -1221,24 +1219,17 @@ export function setup({
       setTimeout(_ => abortCtl.abort(abortReason), 1000);
       const caughtError = await (
         conn.query([
-          { statement: /*sql*/ `select set_config('x.canceltest_query_started', '+', false)` },
+          { statement: /*sql*/ `set x.state = 'started'` },
           { statement: /*sql*/ `commit` },
-          { statement: /*sql*/ `select set_config('x.canceltest_query_completed', '+', false) from pg_sleep(10)` },
+          { statement: /*sql*/ `select from pg_sleep(10)` },
+          { statement: /*sql*/ `set x.state = 'completed'` },
         ], { signal: abortCtl.signal })
         .catch(Object)
       );
       assertError(caughtError, 'PgError.aborted');
       assertEquals(caughtError.cause == abortReason, true);
-      const [report] = await conn.query(/*sql*/ `
-        select jsonb_build_object(
-          'started', current_setting('x.canceltest_query_started', true) is not null,
-          'completed', current_setting('x.canceltest_query_completed', true) is not null
-        )
-      `);
-      assertEquals(report, { started: true, completed: false });
-      // connection should be usable
-      const [hello] = await conn.query(/*sql*/ `select 'hello'`);
-      assertEquals(hello, 'hello');
+      const [state] = await conn.query(/*sql*/ `show x.state`);
+      assertEquals(state, 'started');
     } finally {
       await conn.end();
     }
@@ -1330,14 +1321,12 @@ async function delay(duration) {
 }
 
 function assertError(actualError, expectedName) {
-  if (actualError instanceof Error) {
-    if (actualError.name == expectedName) {
-      return;
-    }
-    throw actualError;
-  }
+  if (
+    actualError instanceof Error &&
+    actualError.name == expectedName
+  ) return;
   console.error('%s expected, but got %o', expectedName, actualError);
-  throw Error('Error expected');
+  throw Error('assertError failed');
 }
 
 class PoormanAbortController {

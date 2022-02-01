@@ -19,11 +19,20 @@ export interface PgConnectKnownOptions {
 
 export interface PgClient {
   /** Simple query protocol. */
-  query(script: string, options?: PgSimpleQueryOptions): PgResponse;
+  query(script: string, options?: PgSimpleQueryOptions): Promise<PgResult>;
+  /** Simple query protocol. */
+  stream(script: string, options?: PgSimpleQueryOptions): AsyncIterableIterator<PgChunk>;
+
   /** Extended query protocol. */
-  query(statements: Statement[], options?: PgExtendedQueryOptions): PgResponse;
+  query(statements: Statement[], options?: PgExtendedQueryOptions): Promise<PgResult>;
   /** Extended query protocol. */
-  query(...statements: Statement[]): PgResponse;
+  stream(statements: Statement[], options?: PgExtendedQueryOptions): AsyncIterableIterator<PgChunk>;
+
+  /** Extended query protocol. */
+  query(...statements: Statement[]): Promise<PgResult>;
+  /** Extended query protocol. */
+  stream(...statements: Statement[]): AsyncIterableIterator<PgChunk>;
+
   /** Terminates client gracefully if possible and waits until pending queries complete.
    * New queries will be rejected. Has no effect if client already ended or destroyed. */
   end(): Promise<void>;
@@ -60,8 +69,6 @@ export interface PgExtendedQueryOptions {
   readonly signal?: AbortSignal;
 }
 
-export type PgResponse = PromiseLike<PgResult> & AsyncIterableIterator<PgResponseChunk>;
-
 export interface PgResult extends Iterable<any> {
   /**
    * @deprecated Use iterator instead.
@@ -90,28 +97,28 @@ export interface PgSubResult {
   readonly status: string | 'PortalSuspended' | 'EmptyQueryResponse';
 }
 
-export type PgResponseChunk = (
-  | PgResponseDataRow
-  | PgResponseCopyData
-  | PgResponseCommandComplete
-  | PgResponseRowDescription
+export type PgChunk = (
+  | PgChunkDataRow
+  | PgChunkCopyData
+  | PgChunkCommandComplete
+  | PgChunkRowDescription
 );
 
-export interface PgResponseDataRow extends Uint8Array {
+export interface PgChunkDataRow extends Uint8Array {
   readonly tag: 'DataRow';
   readonly rows: any[][];
   readonly copies: [];
   readonly payload: null;
 }
 
-export interface PgResponseCopyData extends Uint8Array  {
+export interface PgChunkCopyData extends Uint8Array  {
   readonly tag: 'CopyData';
   readonly rows: [];
   readonly copies: Uint8Array[];
   readonly payload: null;
 }
 
-export interface PgResponseCommandComplete extends Uint8Array  {
+export interface PgChunkCommandComplete extends Uint8Array  {
   readonly tag: 'CommandComplete';
   readonly rows: [];
   readonly copies: [];
@@ -119,7 +126,7 @@ export interface PgResponseCommandComplete extends Uint8Array  {
   readonly payload: string;
 }
 
-export interface PgResponseRowDescription extends Uint8Array  {
+export interface PgChunkRowDescription extends Uint8Array  {
   readonly tag: 'RowDescription';
   readonly rows: [];
   readonly copies: [];

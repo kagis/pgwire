@@ -123,9 +123,9 @@ class PgPool {
     this._poolIdleTimeout = Math.max(options._poolIdleTimeout, 0);
   }
   query(...args) {
-    return new PgResponse(this._queryIter(args));
+    return PgResult.fromStream(this.stream(...args));
   }
-  async * _queryIter(args) {
+  async * stream(...args) {
     if (this._endReason) {
       throw new PgError({
         message: 'Unable to do postgres query on ended pool',
@@ -136,7 +136,7 @@ class PgPool {
     let caughtError;
     const conn = this._getConnection();
     try {
-      yield * conn.query(...args);
+      yield * conn.stream(...args);
       // const response = conn.query(...args);
       // const discard = conn.query(`discard all`);
       // discard.catch(Boolean);
@@ -347,9 +347,9 @@ class PgConnection {
   // Bind
   // Execute
   query(...args) {
-    return new PgResponse(this._queryIter(args));
+    return PgResult.fromStream(this.stream(...args));
   }
-  async * _queryIter(args) {
+  async * stream(...args) {
     if (!this._tx) {
       throw new PgError({
         message: 'Unable to do postgres query on ended connection',
@@ -510,22 +510,8 @@ class PgConnection {
     return destroyReason; // user code can call .destroy and throw destroyReason in one line
   }
 
-  logicalReplication({ slot, startLsn = '0/0', options = {}, ackInterval = 10e3 }) {
-    const optionsSql = (
-      Object.entries(options)
-      // TODO fix option key is injectable
-      .map(([k, v]) => k + ' ' + pgliteral(v))
-      .join(',')
-      .replace(/.+/, '($&)')
-    );
-    // TODO get wal_sender_timeout
-    const startReplSql = `START_REPLICATION SLOT ${pgident(slot)} LOGICAL ${startLsn} ${optionsSql}`;
-    const tx = new Channel();
-    const q = this.query(startReplSql, { stdins: [tx] });
-    const rx = q[Symbol.asyncIterator]();
-    const stream = new ReplicationStream(rx, tx, ackInterval);
-    stream.ack(startLsn); // set initial lsn and also validate lsn
-    return stream;
+  logicalReplication(options) {
+    return new ReplicationStream(this, options);
   }
   async _cancelRequest() {
     // await this._whenReady; // wait for backendkey
@@ -730,7 +716,7 @@ class PgConnection {
   }
   async _flushCopyDatas() {
     if (!this._copies.length) return;
-    const copyChunk = new PgResponseChunk(this._copybuf.buffer, this._copybuf.byteOffset, this._copybufn);
+    const copyChunk = new PgChunk(this._copybuf.buffer, this._copybuf.byteOffset, this._copybufn);
     copyChunk.tag = 'CopyData';
     copyChunk.copies = this._copies;
     this._copybuf = this._copybuf.subarray(this._copybufn);
@@ -740,7 +726,7 @@ class PgConnection {
   }
   async _flushDataRows() {
     if (!this._rows.length) return;
-    const rowsChunk = new PgResponseChunk();
+    const rowsChunk = new PgChunk();
     rowsChunk.tag = 'DataRow';
     rowsChunk.rows = this._rows;
     this._rows = [];
@@ -857,14 +843,6 @@ class PgConnection {
   _recvErrorResponse(_, payload) {
     this._lastErrorResponse = payload;
     this._copyingOut = false;
-
-    // TODO ErrorResponse is associated with query only when followed by ReadyForQuery
-    // ErrorResonse can be received when socket closed by server, and .query can be
-    // called just before socket closed
-    // if (!this._fwdBackendMessage(m)) {
-    //   // TODO wait until socket close and check for _lastErrorResponse
-    //   // throw new PgError(m.payload);
-    // }
   }
   async _recvReadyForQuery(m, { transactionStatus }) {
     this._transactionStatus = transactionStatus;
@@ -920,7 +898,7 @@ class PgConnection {
   async _fwdBackendMessage({ tag, payload }) {
     await this._flushDataRows();
     await this._flushCopyDatas();
-    const chunk = new PgResponseChunk();
+    const chunk = new PgChunk();
     chunk.tag = tag;
     chunk.payload = payload;
     await this._currResponseChannel.push(chunk);
@@ -931,13 +909,13 @@ class PgConnection {
   }
   _wake() {
     if (!this._currResponseChannel?.drained) return;
-    const wakeChunk = new PgResponseChunk();
+    const wakeChunk = new PgChunk();
     wakeChunk.tag = 'wake';
     this._currResponseChannel.push(wakeChunk);
   }
 }
 
-class PgResponseChunk extends Uint8Array {
+class PgChunk extends Uint8Array {
   tag;
   payload = null;
   rows = [];
@@ -1076,7 +1054,7 @@ async function * wrapCopyData(source, signal) {
     }
     yield new CopyDone();
   } catch (err) {
-    // FIXME err.stack lost
+    // TODO err.stack lost
     // store err
     // do CopyFail (copy_error_key)
     // rethrow stored err when ErrorResponse received
@@ -1084,47 +1062,12 @@ async function * wrapCopyData(source, signal) {
   }
 }
 
-class PgResponse {
-  constructor(stream) {
-    /** @type {Promise<PgResult>} */
-    this._loadPromise = null;
-    this._stream = stream[Symbol.asyncIterator]();
-    // Activate stream eagerly to make query emition order predictable.
-    // This makes possible to enqueue concurent .query and .end calls.
-    // This also helps to keep stack trace proper when error occurs
-    // in initial generator tick.
-    // See 'connection end' test
-    this._peek = this._stream.next();
-  }
-  [Symbol.asyncIterator]() {
-    return this;
-  }
-  next(value) {
-    if (this._peek) {
-      const peek = this._peek;
-      this._peek = null;
-      return peek;
-    }
-    return this._stream.next(value);
-  }
-  return(value) {
-    if (this._peek) {
-      this._peek.catch(Boolean);
-      this._peek = null;
-    }
-    return this._stream.return(value);
-  }
-
-  then(...args) { return this._loadOnce().then(...args); }
-  catch(...args) { return this._loadOnce().catch(...args); }
-  finally(...args) { return this._loadOnce().finally(...args); }
-  _loadOnce() { return this._loadPromise || (this._loadPromise = this._load()); }
-
-  async _load() {
+class PgResult {
+  static async fromStream(stream) {
     const notices = [];
     const results = [];
     let result = new PgSubResult();
-    for await (const chunk of this) {
+    for await (const chunk of stream) {
       result.rows.push(...chunk.rows);
       // lastResult.copies.push(...chunk.copies); // TODO chunk.copies
       switch (chunk.tag) {
@@ -1134,34 +1077,27 @@ class PgResponse {
 
         case 'NoticeResponse':
           notices.push(chunk.payload);
-          continue;
+          break;
         // case 'CopyOutResponse':
         // case 'CopyBothResponse':
         //   lastResult.columns = chunk.payload.columns;
         //   break;
         case 'RowDescription':
           result.columns = chunk.payload;
-          continue;
-        default:
-          continue;
+          break;
 
         // statement result boundaries
         case 'CommandComplete':
-          result.status = chunk.payload;
-          break;
         case 'PortalSuspended':
         case 'EmptyQueryResponse':
-          result.status = chunk.tag;
+          result.status = chunk.payload || chunk.tag;
+          results.push(result);
+          result = new PgSubResult();
           break;
       }
-      results.push(result);
-      result = new PgSubResult();
     }
     return new PgResult(results, notices);
   }
-}
-
-class PgResult {
   constructor(results, notices) {
     /** @type {PgSubResult[]} */
     this.results = results;
@@ -1205,11 +1141,8 @@ class PgSubResult {
 }
 
 class ReplicationStream {
-  constructor(rx, tx, ackInterval) {
-    this._rx = rx;
-    /** @type {Channel} */
-    this._tx = tx;
-    this._ackInterval = ackInterval;
+  constructor(conn, options) {
+    this._tx = new Channel();
     this._ackingLsn = '00000000/00000000';
     this._ackmsg = Uint8Array.of(
       0x72, // r
@@ -1222,22 +1155,35 @@ class ReplicationStream {
     this._ackmsgWrittenLsn = new DataView(this._ackmsg.buffer, 1, 8);
     this._ackmsgFlushedLsn = new DataView(this._ackmsg.buffer, 9, 8);
     this._ackmsgAppliedLsn = new DataView(this._ackmsg.buffer, 17, 8);
-    this._iter = this._iterate(); // TODO can use `this` before all props inited? (hidden class optimization)
+    this._iterator = this._start(conn, options);
   }
   pgoutputDecode() {
     return PgoutputReader.decodeStream(this);
   }
   [Symbol.asyncIterator]() {
-    return this._iter;
+    return this._iterator;
   }
-  async * _iterate() {
-    let ackTimer;
+  async * _start(conn, { slot, startLsn = '0/0', options = {}, ackInterval = 10e3 }) {
+    this.ack(startLsn);
+
+    const optionsSql = (
+      Object.entries(options)
+      // TODO fix option key is injectable
+      .map(([k, v]) => k + ' ' + pgliteral(v))
+      .join(',')
+      .replace(/.+/, '($&)')
+    );
+    // TODO get wal_sender_timeout
+    const startReplSql = `START_REPLICATION SLOT ${pgident(slot)} LOGICAL ${startLsn} ${optionsSql}`;
+    const rx = conn.stream(startReplSql, { stdin: this._tx });
+
+    const msgreader = new ReplicationMessageReader();
+    const ackTimer = setInterval(this._ackImmediate.bind(this), ackInterval);
+    let lastLsn = '00000000/00000000';
+    let lastTime = 0n;
     try {
-      const msgreader = new ReplicationMessageReader();
-      let lastLsn = '';
-      let lastTime = 0n;
       for (;;) {
-        const { value: chunk, done } = await this._rx.next();
+        const { value: chunk, done } = await rx.next();
         if (done) break;
         const messages = [];
         let shouldAck = false;
@@ -1259,26 +1205,19 @@ class ReplicationStream {
         if (shouldAck) {
           this._ackImmediate();
         }
-        // Start yielding messages only when replication started succesfully.
-        // First message on successful start will be PrimaryKeepaliveMessage.
-        // Skip CopyBothResponse, seems that there is no usefull information.
-        // TODO but we loose ability to break loop if replication initialization is stuck.
-        if (lastLsn) {
-          ackTimer = ackTimer || setInterval(this._ackImmediate.bind(this), this._ackInterval);
-          yield { lastLsn, lastTime, messages };
-        }
+        yield { lastLsn, lastTime, messages };
       }
     } finally {
       clearInterval(ackTimer);
       this._ackImmediate();
       this._tx.end();
       // TODO handle errors?
-      for await (const _ of this._rx); // drain rx until end
+      for await (const _ of rx); // drain rx until end
     }
   }
   ack(lsn) {
     if (!/^[0-9a-f]{1,8}[/][0-9a-f]{1,8}$/i.test(lsn)) {
-      throw TypeError('invalid lsn');
+      throw new PgError({ message: 'Invalid lsn', code: 'invalid_lsn' });
     }
     lsn = lsnMakeComparable(lsn);
     if (lsn > this._ackingLsn) {
@@ -1286,7 +1225,11 @@ class ReplicationStream {
     }
     let nlsn = BigInt('0x' + this._ackingLsn.replace('/', ''));
     nlsn += 1n;
+    // https://github.com/postgres/postgres/blob/0526f2f4c38cb50d3e2a6e0aa5d51354158df6e3/src/backend/replication/logical/worker.c#L2473-L2478
+    // https://github.com/postgres/postgres/blob/0526f2f4c38cb50d3e2a6e0aa5d51354158df6e3/src/backend/replication/walsender.c#L2021-L2023
     // TODO accept { written, flushed, applied, immediate }
+    // Comments say that flushed/written are used for synchronous replication.
+    // What walsender does with flushed/written?
     this._ackmsgWrittenLsn.setBigUint64(0, nlsn);
     this._ackmsgFlushedLsn.setBigUint64(0, nlsn);
     this._ackmsgAppliedLsn.setBigUint64(0, nlsn);
