@@ -79,34 +79,6 @@ function computeConnectionOptions([uriOrObj, ...rest]) {
   }
 }
 
-class PgError extends Error {
-  static kErrorResponse = Symbol.for('pg.ErrorResponse');
-  static kErrorCode = Symbol.for('pg.ErrorCode');
-  static fromErrorResponse(errorResponse) {
-    const { code, message: messageHead, ...rest } = errorResponse || 0;
-    const propsfmt = (
-      Object.entries(rest)
-      .filter(([_, v]) => v != null)
-      .map(([k, v]) => k + ' ' + JSON.stringify(v))
-      .join(', ')
-    );
-    const message = `${messageHead}\n    (${propsfmt})`;
-    return new PgError({ message, code, errorResponse });
-  }
-  constructor({
-    cause,
-    message = cause?.message,
-    code = cause?.[PgError.kErrorCode],
-    errorResponse = cause?.[PgError.kErrorResponse],
-  }) {
-    super(message);
-    this.name = ['PgError', code].filter(Boolean).join('.');
-    this.cause = cause;
-    this[PgError.kErrorCode] = code;
-    this[PgError.kErrorResponse] = errorResponse;
-  }
-}
-
 class PgPool {
   // TODO whenEnded, pending
   constructor(options) {
@@ -922,6 +894,34 @@ class PgChunk extends Uint8Array {
   copies = [];
 }
 
+class PgError extends Error {
+  static kErrorResponse = Symbol.for('pg.ErrorResponse');
+  static kErrorCode = Symbol.for('pg.ErrorCode');
+  static fromErrorResponse(errorResponse) {
+    const { code, message: messageHead, ...rest } = errorResponse || 0;
+    const propsfmt = (
+      Object.entries(rest)
+      .filter(([_, v]) => v != null)
+      .map(([k, v]) => k + ' ' + JSON.stringify(v))
+      .join(', ')
+    );
+    const message = `${messageHead}\n    (${propsfmt})`;
+    return new PgError({ message, code, errorResponse });
+  }
+  constructor({
+    cause,
+    message = cause?.message,
+    code = cause?.[PgError.kErrorCode],
+    errorResponse = cause?.[PgError.kErrorResponse],
+  }) {
+    super(message);
+    this.name = ['PgError', code].filter(Boolean).join('.');
+    this.cause = cause;
+    this[PgError.kErrorCode] = code;
+    this[PgError.kErrorResponse] = errorResponse;
+  }
+}
+
 function warnError(err) {
   // console.error('warning', err);
 }
@@ -1140,106 +1140,6 @@ class PgSubResult {
   get scalar() { return this.rows[0]?.[0]; }
 }
 
-class ReplicationStream {
-  constructor(conn, options) {
-    this._tx = new Channel();
-    this._ackingLsn = '00000000/00000000';
-    this._ackmsg = Uint8Array.of(
-      0x72, // r
-      0, 0, 0, 0, 0, 0, 0, 0, // 1 - written lsn
-      0, 0, 0, 0, 0, 0, 0, 0, // 9 - flushed lsn
-      0, 0, 0, 0, 0, 0, 0, 0, // 17 - applied lsn
-      0, 0, 0, 0, 0, 0, 0, 0, // 25 - time
-      0, // 33 - should reply
-    );
-    this._ackmsgWrittenLsn = new DataView(this._ackmsg.buffer, 1, 8);
-    this._ackmsgFlushedLsn = new DataView(this._ackmsg.buffer, 9, 8);
-    this._ackmsgAppliedLsn = new DataView(this._ackmsg.buffer, 17, 8);
-    this._iterator = this._start(conn, options);
-  }
-  pgoutputDecode() {
-    return PgoutputReader.decodeStream(this);
-  }
-  [Symbol.asyncIterator]() {
-    return this._iterator;
-  }
-  async * _start(conn, { slot, startLsn = '0/0', options = {}, ackInterval = 10e3 }) {
-    this.ack(startLsn);
-
-    const optionsSql = (
-      Object.entries(options)
-      // TODO fix option key is injectable
-      .map(([k, v]) => k + ' ' + pgliteral(v))
-      .join(',')
-      .replace(/.+/, '($&)')
-    );
-    // TODO get wal_sender_timeout
-    const startReplSql = `START_REPLICATION SLOT ${pgident(slot)} LOGICAL ${startLsn} ${optionsSql}`;
-    const rx = conn.stream(startReplSql, { stdin: this._tx });
-
-    const msgreader = new ReplicationMessageReader();
-    const ackTimer = setInterval(this._ackImmediate.bind(this), ackInterval);
-    let lastLsn = '00000000/00000000';
-    let lastTime = 0n;
-    try {
-      for (;;) {
-        const { value: chunk, done } = await rx.next();
-        if (done) break;
-        const messages = [];
-        let shouldAck = false;
-        for (const copyData of chunk.copies) {
-          msgreader.reset(copyData);
-          const msg = msgreader.readReplicationMessage();
-          switch (msg.tag) {
-            case 'XLogData':
-              messages.push(msg);
-              break;
-            case 'PrimaryKeepaliveMessage':
-              shouldAck = shouldAck || msg.shouldReply;
-              break;
-          }
-          if (lastLsn < msg.lsn) lastLsn = msg.lsn;
-          if (lastLsn < msg.endLsn) lastLsn = msg.endLsn;
-          if (lastTime < msg.time) lastTime = msg.time;
-        }
-        if (shouldAck) {
-          this._ackImmediate();
-        }
-        yield { lastLsn, lastTime, messages };
-      }
-    } finally {
-      clearInterval(ackTimer);
-      this._ackImmediate();
-      this._tx.end();
-      // TODO handle errors?
-      for await (const _ of rx); // drain rx until end
-    }
-  }
-  ack(lsn) {
-    if (!/^[0-9a-f]{1,8}[/][0-9a-f]{1,8}$/i.test(lsn)) {
-      throw new PgError({ message: 'Invalid lsn', code: 'invalid_lsn' });
-    }
-    lsn = lsnMakeComparable(lsn);
-    if (lsn > this._ackingLsn) {
-      this._ackingLsn = lsn;
-    }
-    let nlsn = BigInt('0x' + this._ackingLsn.replace('/', ''));
-    nlsn += 1n;
-    // https://github.com/postgres/postgres/blob/0526f2f4c38cb50d3e2a6e0aa5d51354158df6e3/src/backend/replication/logical/worker.c#L2473-L2478
-    // https://github.com/postgres/postgres/blob/0526f2f4c38cb50d3e2a6e0aa5d51354158df6e3/src/backend/replication/walsender.c#L2021-L2023
-    // TODO accept { written, flushed, applied, immediate }
-    // Comments say that flushed/written are used for synchronous replication.
-    // What walsender does with flushed/written?
-    this._ackmsgWrittenLsn.setBigUint64(0, nlsn);
-    this._ackmsgFlushedLsn.setBigUint64(0, nlsn);
-    this._ackmsgAppliedLsn.setBigUint64(0, nlsn);
-  }
-  _ackImmediate() {
-    if (!this._tx.drained) return;
-    this._tx.push(this._ackmsg);
-  }
-}
-
 function serializeFrontendMessage(message) {
   // FIXME reuse buffer
   const bytes = new Uint8Array(message.size);
@@ -1449,23 +1349,23 @@ class MessageReader {
   static defaultTextDecoder = new TextDecoder();
   _textDecoder = MessageReader.defaultTextDecoder;
 
-  reset(/** @type {Uint8Array} */ b) {
+  _reset(/** @type {Uint8Array} */ b) {
     this._b = b;
     this._p = 0;
   }
-  readUint8() {
+  _readUint8() {
     this._checkSize(1);
     return this._b[this._p++];
   }
-  readInt16() {
+  _readInt16() {
     this._checkSize(2);
     return this._b[this._p++] << 8 | this._b[this._p++];
   }
-  readInt32() {
+  _readInt32() {
     this._checkSize(4);
     return this._b[this._p++] << 24 | this._b[this._p++] << 16 | this._b[this._p++] << 8 | this._b[this._p++];
   }
-  readString() {
+  _readString() {
     const endIdx = this._b.indexOf(0x00, this._p);
     if (endIdx < 0) {
       throw Error('unexpected end of message');
@@ -1474,11 +1374,11 @@ class MessageReader {
     this._p = endIdx + 1;
     return this._textDecoder.decode(strbuf);
   }
-  read(n) {
+  _read(n) {
     this._checkSize(n);
     return this._b.subarray(this._p, this._p += n);
   }
-  readToEnd() {
+  _readToEnd() {
     const p = this._p;
     this._p = this._b.length;
     return this._b.subarray(p);
@@ -1496,23 +1396,23 @@ class MessageReader {
     return Array.from({ length }, fn, this);
   }
   // replication helpers
-  readLsn() {
-    const h = this.readUint32(), l = this.readUint32();
+  _readLsn() {
+    const h = this._readUint32(), l = this._readUint32();
     if (h == 0 && l == 0) return null;
     return (
       h.toString(16).padStart(8, '0') + '/' +
       l.toString(16).padStart(8, '0')
     ).toUpperCase();
   }
-  readTime() {
+  _readTime() {
     // (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY == 946684800000000
-    return this.readUint64() + 946684800000000n;
+    return this._readUint64() + 946684800000000n;
   }
-  readUint64() {
-    return BigInt(this.readUint32()) << 32n | BigInt(this.readUint32());
+  _readUint64() {
+    return BigInt(this._readUint32()) << 32n | BigInt(this._readUint32());
   }
-  readUint32() {
-    return this.readInt32() >>> 0;
+  _readUint32() {
+    return this._readInt32() >>> 0;
   }
 }
 
@@ -1546,7 +1446,7 @@ class BackendMessageReader extends MessageReader {
         const inext = isize + size;
         // TODO use grow hint
         if (nbuf < inext) break; // incomplete message
-        msgreader.reset(buf.subarray(ipayload, inext));
+        msgreader._reset(buf.subarray(ipayload, inext));
         const message = msgreader._readBackendMessage(buf[itag]);
         messages.push(message);
         // TODO batch DataRow here
@@ -1585,7 +1485,7 @@ class BackendMessageReader extends MessageReader {
       case 0x63 /*c*/: return m('CopyDone');
       case 0x54 /*T*/: return m('RowDescription', this._readRowDescription());
       case 0x74 /*t*/: return m('ParameterDescription', this._readParameterDescription());
-      case 0x43 /*C*/: return m('CommandComplete', this.readString());
+      case 0x43 /*C*/: return m('CommandComplete', this._readString());
       case 0x31 /*1*/: return m('ParseComplete');
       case 0x32 /*2*/: return m('BindComplete');
       case 0x33 /*3*/: return m('CloseComplete');
@@ -1596,77 +1496,77 @@ class BackendMessageReader extends MessageReader {
       case 0x6e /*n*/: return m('NoData');
       case 0x41 /*A*/: return m('NotificationResponse', this._readNotificationResponse());
 
-      case 0x52 /*R*/: switch (this.readInt32()) {
+      case 0x52 /*R*/: switch (this._readInt32()) {
         case 0       : return m('AuthenticationOk');
         case 2       : return m('AuthenticationKerberosV5');
         case 3       : return m('AuthenticationCleartextPassword');
-        case 5       : return m('AuthenticationMD5Password', { salt: this.read(4) });
+        case 5       : return m('AuthenticationMD5Password', { salt: this._read(4) });
         case 6       : return m('AuthenticationSCMCredential');
         case 7       : return m('AuthenticationGSS');
-        case 8       : return m('AuthenticationGSSContinue', this.readToEnd());
+        case 8       : return m('AuthenticationGSSContinue', this._readToEnd());
         case 9       : return m('AuthenticationSSPI');
-        case 10      : return m('AuthenticationSASL', { mechanism: this.readString() });
-        case 11      : return m('AuthenticationSASLContinue', this.readToEnd());
-        case 12      : return m('AuthenticationSASLFinal', this.readToEnd());
+        case 10      : return m('AuthenticationSASL', { mechanism: this._readString() });
+        case 11      : return m('AuthenticationSASLContinue', this._readToEnd());
+        case 12      : return m('AuthenticationSASLFinal', this._readToEnd());
         default      : throw Error('unknown auth message');
       }
       default: throw Error(`unsupported backend message ${asciiTag}`);
     }
   }
   _readDataRow() {
-    const nfields = this.readInt16()
+    const nfields = this._readInt16()
     const row = Array(nfields);
     for (let i = 0; i < nfields; i++) {
-      const valsize = this.readInt32();
-      row[i] = valsize < 0 ? null : this.read(valsize);
+      const valsize = this._readInt32();
+      row[i] = valsize < 0 ? null : this._read(valsize);
     }
     return row;
   }
   _readNegotiateProtocolVersion() {
-    const version = this.readInt32();
-    const unrecognizedOptions = this._array(this.readInt32(), this.readString);
+    const version = this._readInt32();
+    const unrecognizedOptions = this._array(this._readInt32(), this._readString);
     return { version, unrecognizedOptions };
   }
   _readParameterDescription() {
-    return this._array(this.readInt16(), this.readInt32);
+    return this._array(this._readInt16(), this._readInt32);
   }
   _readBackendKeyData() {
-    const pid = this.readInt32();
-    const secretKey = this.readInt32();
+    const pid = this._readInt32();
+    const secretKey = this._readInt32();
     return { pid, secretKey };
   }
   _readReadyForQuery() {
-    return { transactionStatus: this.readUint8() };
+    return { transactionStatus: this._readUint8() };
   }
   _readCopyResponse() {
-    const binary = this.readUint8();
-    const columns = this._array(this.readInt16(), _ => ({
-      binary: this.readInt16(),
+    const binary = this._readUint8();
+    const columns = this._array(this._readInt16(), _ => ({
+      binary: this._readInt16(),
     }));
     return { binary, columns };
   }
   _readRowDescription() {
-    return this._array(this.readInt16(), _ => ({
-      name: this.readString(),
-      tableOid: this.readInt32(),
-      tableColumn: this.readInt16(),
-      typeOid: this.readInt32(),
-      typeSize: this.readInt16(),
-      typeMod: this.readInt32(),
-      binary: this.readInt16(),
+    return this._array(this._readInt16(), _ => ({
+      name: this._readString(),
+      tableOid: this._readInt32(),
+      tableColumn: this._readInt16(),
+      typeOid: this._readInt32(),
+      typeSize: this._readInt16(),
+      typeMod: this._readInt32(),
+      binary: this._readInt16(),
     }));
   }
   _readParameterStatus() {
-    const parameter = this.readString();
-    const value = this.readString();
+    const parameter = this._readString();
+    const value = this._readString();
     return { parameter, value };
   }
   _readErrorOrNotice() {
     const fields = Array(256);
     for (;;) {
-      const fieldCode = this.readUint8();
+      const fieldCode = this._readUint8();
       if (!fieldCode) break;
-      fields[fieldCode] = this.readString();
+      fields[fieldCode] = this._readString();
     }
     return {
       severity: fields[0x53], // S
@@ -1689,17 +1589,118 @@ class BackendMessageReader extends MessageReader {
     };
   }
   _readNotificationResponse() {
-    const pid = this.readInt32();
-    const channel = this.readString();
-    const payload = this.readString();
+    const pid = this._readInt32();
+    const channel = this._readString();
+    const payload = this._readString();
     return { pid, channel, payload };
   }
 }
 
 // https://www.postgresql.org/docs/14/protocol-replication.html#id-1.10.5.9.7.1.5.1.8
-class ReplicationMessageReader extends MessageReader {
-  readReplicationMessage() {
-    const tag = this.readUint8();
+class ReplicationStream extends MessageReader {
+  constructor(conn, options) {
+    super();
+    this._tx = new Channel();
+    this._ackingLsn = '00000000/00000000';
+    this._ackmsg = Uint8Array.of(
+      0x72, // r
+      0, 0, 0, 0, 0, 0, 0, 0, // 1 - written lsn
+      0, 0, 0, 0, 0, 0, 0, 0, // 9 - flushed lsn
+      0, 0, 0, 0, 0, 0, 0, 0, // 17 - applied lsn
+      0, 0, 0, 0, 0, 0, 0, 0, // 25 - time
+      0, // 33 - should reply
+    );
+    this._ackmsgWrittenLsn = new DataView(this._ackmsg.buffer, 1, 8);
+    this._ackmsgFlushedLsn = new DataView(this._ackmsg.buffer, 9, 8);
+    this._ackmsgAppliedLsn = new DataView(this._ackmsg.buffer, 17, 8);
+    this._iterator = this._start(conn, options);
+  }
+  pgoutputDecode() {
+    return PgoutputReader.decodeStream(this);
+  }
+  [Symbol.asyncIterator]() {
+    return this._iterator;
+  }
+  async * _start(conn, { slot, startLsn = '0/0', options = {}, ackInterval = 10e3 }) {
+    this.ack(startLsn);
+
+    const optionsSql = (
+      Object.entries(options)
+      // TODO fix option key is injectable
+      .map(([k, v]) => k + ' ' + pgliteral(v))
+      .join(',')
+      .replace(/.+/, '($&)')
+    );
+    // TODO get wal_sender_timeout
+    const startReplSql = `START_REPLICATION SLOT ${pgident(slot)} LOGICAL ${startLsn} ${optionsSql}`;
+    const rx = conn.stream(startReplSql, { stdin: this._tx });
+
+    const ackTimer = setInterval(this._ackImmediate.bind(this), ackInterval);
+    let lastLsn = '00000000/00000000';
+    let lastTime = 0n;
+    try {
+      for (;;) {
+        const { value: chunk, done } = await rx.next();
+        if (done) break;
+        const messages = [];
+        let shouldAck = false;
+        for (const copyData of chunk.copies) {
+          const msg = this._decodeReplicationMessage(copyData);
+          switch (msg.tag) {
+            case 'XLogData':
+              messages.push(msg);
+              break;
+            case 'PrimaryKeepaliveMessage':
+              shouldAck = shouldAck || msg.shouldReply;
+              break;
+          }
+          if (lastLsn < msg.lsn) lastLsn = msg.lsn;
+          if (lastLsn < msg.endLsn) lastLsn = msg.endLsn;
+          if (lastTime < msg.time) lastTime = msg.time;
+        }
+        if (shouldAck) {
+          this._ackImmediate();
+        }
+        yield { lastLsn, lastTime, messages };
+      }
+    } finally {
+      clearInterval(ackTimer);
+      this._ackImmediate();
+      this._tx.end();
+      // TODO handle errors?
+      for await (const _ of rx); // drain rx until end
+    }
+  }
+  ack(lsn) {
+    if (!/^[0-9a-f]{1,8}[/][0-9a-f]{1,8}$/i.test(lsn)) {
+      throw new PgError({ message: 'Invalid lsn', code: 'invalid_lsn' });
+    }
+    lsn = lsnMakeComparable(lsn);
+    if (lsn > this._ackingLsn) {
+      this._ackingLsn = lsn;
+    }
+    let nlsn = BigInt('0x' + this._ackingLsn.replace('/', ''));
+    nlsn += 1n;
+    // https://github.com/postgres/postgres/blob/0526f2f4c38cb50d3e2a6e0aa5d51354158df6e3/src/backend/replication/logical/worker.c#L2473-L2478
+    // https://github.com/postgres/postgres/blob/0526f2f4c38cb50d3e2a6e0aa5d51354158df6e3/src/backend/replication/walsender.c#L2021-L2023
+    // TODO accept { written, flushed, applied, immediate }
+    // Comments say that flushed/written are used for synchronous replication.
+    // What walsender does with flushed/written?
+    this._ackmsgWrittenLsn.setBigUint64(0, nlsn);
+    this._ackmsgFlushedLsn.setBigUint64(0, nlsn);
+    this._ackmsgAppliedLsn.setBigUint64(0, nlsn);
+  }
+  _ackImmediate() {
+    if (!this._tx.drained) return;
+    this._tx.push(this._ackmsg);
+  }
+
+  _decodeReplicationMessage(copyData) {
+    this._reset(copyData);
+    return this._readReplicationMessage();
+  }
+  _readReplicationMessage() {
+    const tag = this._readUint8();
     switch (tag) {
       case 0x77 /*w*/: return this._readXLogData();
       case 0x6b /*k*/: return this._readPrimaryKeepaliveMessage();
@@ -1709,22 +1710,22 @@ class ReplicationMessageReader extends MessageReader {
   _readXLogData() {
     return {
       tag: /** @type {const} */ ('XLogData'),
-      lsn: this.readLsn(),
+      lsn: this._readLsn(),
       // `endLsn` is always the same as `lsn` in case of logical replication.
       // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/walsender.c#L1240
-      endLsn: this.readLsn(),
+      endLsn: this._readLsn(),
       // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/walsender.c#L1270-L1271
-      time: this.readTime(),
-      data: this.readToEnd(),
+      time: this._readTime(),
+      data: this._readToEnd(),
     };
   }
   _readPrimaryKeepaliveMessage() {
     return {
       tag: /** @type {const} */ ('PrimaryKeepaliveMessage'),
       lsn: null, // hidden class opt
-      endLsn: this.readLsn(),
-      time: this.readTime(),
-      shouldReply: this.readUint8(),
+      endLsn: this._readLsn(),
+      time: this._readTime(),
+      shouldReply: this._readUint8(),
     };
   }
 }
@@ -1735,7 +1736,7 @@ class PgoutputReader extends MessageReader {
     const pgoreader = new PgoutputReader();
     for await (const chunk of replstream) {
       for (const msg of chunk.messages) {
-        pgoreader.reset(msg.data);
+        pgoreader._reset(msg.data);
         pgoreader._upgradeMsg(msg);
         msg.data = null; // free XLogData buffer
       }
@@ -1748,7 +1749,7 @@ class PgoutputReader extends MessageReader {
   _relationCache = new Map();
 
   _upgradeMsg(out) {
-    const tag = this.readUint8();
+    const tag = this._readUint8();
     switch (tag) {
       case 0x42 /*B*/: return this._upgradeMsgBegin(out);
       case 0x4f /*O*/: return this._upgradeMsgOrigin(out);
@@ -1768,20 +1769,20 @@ class PgoutputReader extends MessageReader {
     // https://github.com/postgres/postgres/blob/85c61ba8920ba73500e1518c63795982ee455d14/src/backend/replication/pgoutput/pgoutput.c#L409
     out.tag = 'begin';
     // https://github.com/postgres/postgres/blob/27b77ecf9f4d5be211900eda54d8155ada50d696/src/include/replication/reorderbuffer.h#L275
-    out.commitLsn = this.readLsn();
-    out.commitTime = this.readTime();
-    out.xid = this.readInt32();
+    out.commitLsn = this._readLsn();
+    out.commitTime = this._readTime();
+    out.xid = this._readInt32();
   }
   _upgradeMsgOrigin(out) {
     out.tag = 'origin';
-    out.originLsn = this.readLsn();
-    out.originName = this.readString();
+    out.originLsn = this._readLsn();
+    out.originName = this._readString();
   }
   _upgradeMsgType(out) {
     out.tag = 'type';
-    out.typeOid = this.readInt32();
-    out.typeSchema = this.readString();
-    out.typeName = this.readString();
+    out.typeOid = this._readInt32();
+    out.typeSchema = this._readString();
+    out.typeName = this._readString();
     // mem leak not likely to happen because amount of types is usually small
     this._typeCache.set(out.typeOid, {
       typeSchema: out.typeSchema,
@@ -1792,18 +1793,18 @@ class PgoutputReader extends MessageReader {
     // lsn expected to be null
     // https://github.com/postgres/postgres/blob/27b77ecf9f4d5be211900eda54d8155ada50d696/src/backend/replication/walsender.c#L1342
     out.tag = 'relation';
-    out.relationOid = this.readInt32();
-    out.schema = this.readString();
-    out.name = this.readString();
+    out.relationOid = this._readInt32();
+    out.schema = this._readString();
+    out.name = this._readString();
     out.replicaIdentity = this._readRelationReplicaIdentity();
-    out.columns = this._array(this.readInt16(), this._readRelationColumn);
+    out.columns = this._array(this._readInt16(), this._readRelationColumn);
     out.keyColumns = out.columns.filter(it => it.flags & 0b1).map(it => it.name);
     // mem leak not likely to happen because amount of relations is usually small
     this._relationCache.set(out.relationOid, out);
   }
   _readRelationReplicaIdentity() {
     // https://www.postgresql.org/docs/14/catalog-pg-class.html
-    const relreplident = this.readUint8();
+    const relreplident = this._readUint8();
     switch (relreplident) {
       case 0x64 /*d*/: return 'default';
       case 0x6e /*n*/: return 'nothing';
@@ -1814,10 +1815,10 @@ class PgoutputReader extends MessageReader {
   }
   _readRelationColumn() {
     const col = {
-      flags: this.readUint8(),
-      name: this.readString(),
-      typeOid: this.readInt32(),
-      typeMod: this.readInt32(),
+      flags: this._readUint8(),
+      name: this._readString(),
+      typeOid: this._readInt32(),
+      typeMod: this._readInt32(),
       typeSchema: null,
       typeName: null, // TODO resolve builtin type names?
     }
@@ -1825,9 +1826,9 @@ class PgoutputReader extends MessageReader {
     return col;
   }
   _upgradeMsgChange(out, tag, readUntilN) {
-    const relid = this.readInt32();
+    const relid = this._readInt32();
     const relation = this._relationCache.get(relid);
-    const actionKON = this.readUint8();
+    const actionKON = this._readUint8();
     const keyOnly = actionKON == 0x4b /*K*/;
     let before = this._readTuple(relation, keyOnly);
     let after = null;
@@ -1835,7 +1836,7 @@ class PgoutputReader extends MessageReader {
       after = before;
       before = null;
     } else if (readUntilN) {
-      const actionN = this.readUint8();
+      const actionN = this._readUint8();
       // TODO assert actionN == 'N'
       after = this._readTuple(relation, false, before);
     }
@@ -1857,22 +1858,22 @@ class PgoutputReader extends MessageReader {
     out.after = after;
   }
   _readTuple({ columns }, keyOnly, unchangedToastFallback) {
-    const nfields = this.readInt16();
+    const nfields = this._readInt16();
     const tuple = Object.create(null);
     for (let i = 0; i < nfields; i++) {
       const { name, typeOid } = columns[i];
-      const kind = this.readUint8();
+      const kind = this._readUint8();
       switch (kind) {
         case 0x62 /*b*/: // binary
-          const bsize = this.readInt32();
-          const bval = this.read(bsize);
+          const bsize = this._readInt32();
+          const bval = this._read(bsize);
           // dont need to .slice() because new buffer
           // is created for each replication chunk
           tuple[name] = bval;
           break;
         case 0x74 /*t*/: // text
-          const valsize = this.readInt32();
-          const valbuf = this.read(valsize);
+          const valsize = this._readInt32();
+          const valbuf = this._read(valsize);
           // TODO lazy decode
           // https://github.com/kagis/pgwire/issues/16
           const valtext = this._textDecoder.decode(valbuf);
@@ -1899,27 +1900,27 @@ class PgoutputReader extends MessageReader {
     return tuple;
   }
   _upgradeMsgTruncate(out) {
-    const nrels = this.readInt32();
+    const nrels = this._readInt32();
     out.tag = 'truncate';
-    out.flags = this.readUint8();
+    out.flags = this._readUint8();
     out.cascade = Boolean(out.flags & 0b1);
     out.restartIdentity = Boolean(out.flags & 0b10);
-    out.relations = this._array(nrels, _ => this._relationCache.get(this.readInt32()));
+    out.relations = this._array(nrels, _ => this._relationCache.get(this._readInt32()));
   }
   _upgradeMsgMessage(out) {
     out.tag = 'message';
-    out.flags = this.readUint8();
+    out.flags = this._readUint8();
     out.transactional = Boolean(out.flags & 0b1);
-    out.messageLsn = this.readLsn();
-    out.prefix = this.readString();
-    out.content = this.read(this.readInt32());
+    out.messageLsn = this._readLsn();
+    out.prefix = this._readString();
+    out.content = this._read(this._readInt32());
   }
   _upgradeMsgCommit(out) {
     out.tag = 'commit';
-    out.flags = this.readUint8(); // reserved unused
+    out.flags = this._readUint8(); // reserved unused
     // should be the same as begin.commitLsn,
     // postgres somehow uses it to synchronize initial dump with slot position.
-    out.commitLsn = this.readLsn();
+    out.commitLsn = this._readLsn();
     // `out.commitEndLsn` is redundant because it always the same as `out.lsn` .
     // Here we see that ctx->write_location = txn->end_lsn
     // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/logical/logical.c#L819
@@ -1931,8 +1932,8 @@ class PgoutputReader extends MessageReader {
     // Seems that they include `out.commitEndLsn` into pgoutput message to simplify `apply_handle_commit` code
     // so it can be independent of `out.lsn`, which is lower level XLogData message field.
     // https://github.com/postgres/postgres/blob/0a455b8d61d8fc5a7d1fdc152667f9ba1fd27fda/src/backend/replication/logical/worker.c#L780
-    out.commitEndLsn = this.readLsn();
-    out.commitTime = this.readTime();
+    out.commitEndLsn = this._readLsn();
+    out.commitTime = this._readTime();
   }
 }
 
