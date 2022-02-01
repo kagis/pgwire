@@ -687,7 +687,7 @@ class PgConnection {
           // do not valbuf.slice() because nodejs Buffer .slice does not copy
           // TODO but we not going to receive Buffer here ?
           ? Uint8Array.prototype.slice.call(valbuf)
-          : typeDecode(this._rowTextDecoder.decode(valbuf), typeOid)
+          : PgType.decode(this._rowTextDecoder.decode(valbuf), typeOid)
       );
     }
     this._rows.push(row);
@@ -993,7 +993,7 @@ function extendedQueryStatement(out, { statement, params = [], limit, binary, st
   // }
 }
 function extendedQueryParse(out, { statement, statementName, paramTypes = [] }) {
-  const paramTypeOids = paramTypes.map(typeResolve);
+  const paramTypeOids = paramTypes.map(PgType.resolve, PgType);
   out.push(new FrontendMessage.Parse({ statement, statementName, paramTypeOids }));
 }
 function extendedQueryBind(out, { portal, statementName, binary, params = [] }) {
@@ -1006,7 +1006,7 @@ function extendedQueryBind(out, { portal, statementName, binary, params = [] }) 
     // from extended .query and pass it back as parameter
     // it also "encodes" bytea in efficient way instead of hex
     if (value instanceof Uint8Array) return value;
-    return typeEncode(value, typeResolve(type));
+    return PgType.encode(value, PgType.resolve(type));
   }
 }
 function extendedQueryExecute(out, { portal, stdin, limit, noBuffer }, stdinSignal) {
@@ -1247,6 +1247,7 @@ function serializeFrontendMessage(message) {
   return bytes;
 }
 
+// https://www.postgresql.org/docs/14/protocol-message-formats.html
 class FrontendMessage {
   constructor(payload) {
     this.payload = payload;
@@ -1875,7 +1876,7 @@ class PgoutputReader extends MessageReader {
           // TODO lazy decode
           // https://github.com/kagis/pgwire/issues/16
           const valtext = this._textDecoder.decode(valbuf);
-          tuple[name] = typeDecode(valtext, typeOid);
+          tuple[name] = PgType.decode(valtext, typeOid);
           break;
         case 0x6e /*n*/: // null
           if (keyOnly) {
@@ -2047,138 +2048,131 @@ class MessageSizer {
   }
 }
 
-///////// begin type codec
-
-function typeResolve(idOrName) {
-  if (typeof idOrName == 'number') {
-    return idOrName;
-  }
-  switch (idOrName) { // add line here when register new type
-    case 'text'    : return   25; case 'text[]'    : return 1009;
-    case 'uuid'    : return 2950; case 'uuid[]'    : return 2951;
-    case 'varchar' : return 1043; case 'varchar[]' : return 1015;
-    case 'bool'    : return   16; case 'bool[]'    : return 1000;
-    case 'bytea'   : return   17; case 'bytea[]'   : return 1001;
-    case 'int2'    : return   21; case 'int2[]'    : return 1005;
-    case 'int4'    : return   23; case 'int4[]'    : return 1007;
-    case 'float4'  : return  700; case 'float4[]'  : return 1021;
-    case 'float8'  : return  701; case 'float8[]'  : return 1022;
-    case 'int8'    : return   20; case 'int8[]'    : return 1016;
-    case 'json'    : return  114; case 'json[]'    : return  199;
-    case 'jsonb'   : return 3802; case 'jsonb[]'   : return 3807;
-    case 'pg_lsn'  : return 3220; case 'pg_lsn[]'  : return 3221;
-  }
-  throw Error('unknown builtin type name ' + JSON.stringify(idOrName));
-}
-
-function typeEncode(value, typeid) {
-  switch (typeid) { // add line here when register new type (optional)
-    case  114 /* json    */:
-    case 3802 /* jsonb   */: return JSON.stringify(value);
-    case   17 /* bytea   */: return typeEncodeBytea(value); // bytea encoder is used only for array element encoding
-  }
-  let elemTypeid = typeOfElem(typeid);
-  if (elemTypeid) {
-    return typeEncodeArray(value, elemTypeid);
-  }
-  return String(value);
-}
-
-function typeDecode(text, typeid) {
-  switch (typeid) { // add line here when register new type
-    case   25 /* text    */:
-    case 2950 /* uuid    */:
-    case 1043 /* varchar */: return text;
-    case   16 /* bool    */: return text == 't';
-    case   17 /* bytea   */: return typeDecodeBytea(text);
-    case   21 /* int2    */:
-    case   23 /* int4    */:
-    case  700 /* float4  */:
-    case  701 /* float8  */: return Number(text);
-    case   20 /* int8    */: return BigInt(text);
-    case  114 /* json    */:
-    case 3802 /* jsonb   */: return JSON.parse(text);
-    case 3220 /* pg_lsn  */: return lsnMakeComparable(text);
-  }
-  let elemTypeid = typeOfElem(typeid);
-  if (elemTypeid) {
-    return typeDecodeArray(text, elemTypeid);
-  }
-  return text; // unknown type
-}
-
-function typeOfElem(arrayTypeid) {
-  switch (arrayTypeid) { // add line here when register new type
-    case 1009: return   25; // text
-    case 1000: return   16; // bool
-    case 1001: return   17; // bytea
-    case 1005: return   21; // int2
-    case 1007: return   23; // int4
-    case 1016: return   20; // int8
-    case 1021: return  700; // float4
-    case 1022: return  701; // float8
-    case  199: return  114; // json
-    case 3807: return 3802; // jsonb
-    case 3221: return 3220; // pg_lsn
-    case 2951: return 2950; // uuid
-    case 1015: return 1043; // varchar
-  }
-}
-
-function typeDecodeArray(text, elemTypeid) {
-  text = text.replace(/^\[.+=/, ''); // skip dimensions
-  const jsonArray = text.replace(/{|}|,|"(?:[^"\\]|\\.)*"|[^,}]+/gy, token => (
-    token == '{' ? '[' :
-    token == '}' ? ']' :
-    token == 'NULL' ? 'null' :
-    token == ',' || token[0] == '"' ? token :
-    JSON.stringify(token)
-  ));
-  return JSON.parse(jsonArray, (_, elem) => (
-    typeof elem == 'string' ? typeDecode(elem, elemTypeid) : elem
-  ));
-}
-
-// TODO multi dimension
-// TODO array_nulls https://www.postgresql.org/docs/14/runtime-config-compatible.html#id-1.6.7.16.2.2.1.1.3
-function typeEncodeArray(arr, elemTypeid) {
-  return JSON.stringify(arr, function (_, elem) {
-    return this == arr && elem != null ? typeEncode(elem, elemTypeid) : elem;
-  }).replace(/^\[(.*)]$/, '{$1}');
-}
-
-function typeDecodeBytea(text) {
-  // https://www.postgresql.org/docs/9.6/datatype-binary.html#AEN5830
-  if (text.startsWith('\\x')) {
-    const hex = text.slice(2); // TODO check hex.length is even ?
-    const bytes = new Uint8Array(hex.length >> 1);
-    for (let i = 0, m = 4; i < hex.length; i++, m ^= 4) {
-      let d = hex.charCodeAt(i);
-      if (0x30 <= d && d <= 0x39) d -= 0x30; // 0-9
-      else if (0x41 <= d && d <= 0x46) d -= 0x41 - 0xa; // A-F
-      else if (0x61 <= d && d <= 0x66) d -= 0x61 - 0xa; // a-f
-      else throw Error(`invalid hex digit 0x${d}`);
-      bytes[i >> 1] |= d << m; // m==4 on even iter, m==0 on odd iter
+class PgType {
+  static resolve(oidOrName) {
+    if (typeof oidOrName == 'number') {
+      return oidOrName;
     }
-    return bytes;
+    switch (oidOrName) { // add line here when register new type
+      case 'text'    : return   25; case 'text[]'    : return 1009;
+      case 'uuid'    : return 2950; case 'uuid[]'    : return 2951;
+      case 'varchar' : return 1043; case 'varchar[]' : return 1015;
+      case 'bool'    : return   16; case 'bool[]'    : return 1000;
+      case 'bytea'   : return   17; case 'bytea[]'   : return 1001;
+      case 'int2'    : return   21; case 'int2[]'    : return 1005;
+      case 'int4'    : return   23; case 'int4[]'    : return 1007;
+      case 'oid'     : return   26; case 'oid[]'     : return 1028;
+      case 'float4'  : return  700; case 'float4[]'  : return 1021;
+      case 'float8'  : return  701; case 'float8[]'  : return 1022;
+      case 'int8'    : return   20; case 'int8[]'    : return 1016;
+      case 'json'    : return  114; case 'json[]'    : return  199;
+      case 'jsonb'   : return 3802; case 'jsonb[]'   : return 3807;
+      case 'pg_lsn'  : return 3220; case 'pg_lsn[]'  : return 3221;
+    }
+    throw Error('unknown builtin type name ' + JSON.stringify(oidOrName));
   }
-  return Uint8Array.from( // legacy escape format TODO no eval
-    Function(text.replace('"', '\\"').replace(/.*/, 'return "$&"')).call(),
-    x => x.charCodeAt(),
-  );
-}
-
-function typeEncodeBytea(bytes) {
-  return '\\x' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  static encode(value, typeOid) {
+    switch (typeOid) { // add line here when register new type (optional)
+      case  114 /* json    */:
+      case 3802 /* jsonb   */: return JSON.stringify(value);
+      case   17 /* bytea   */: return this._encodeBytea(value); // bytea encoder is used only for array element encoding
+    }
+    let elemTypeid = this._elemTypeOid(typeOid);
+    if (elemTypeid) {
+      return this._encodeArray(value, elemTypeid);
+    }
+    return String(value);
+  }
+  static decode(text, typeOid) {
+    switch (typeOid) { // add line here when register new type
+      case   25 /* text    */:
+      case 2950 /* uuid    */:
+      case 1043 /* varchar */: return text;
+      case   16 /* bool    */: return text == 't';
+      case   17 /* bytea   */: return this._decodeBytea(text);
+      case   21 /* int2    */:
+      case   23 /* int4    */:
+      case   26 /* oid     */:
+      case  700 /* float4  */:
+      case  701 /* float8  */: return Number(text);
+      case   20 /* int8    */: return BigInt(text);
+      case  114 /* json    */:
+      case 3802 /* jsonb   */: return JSON.parse(text);
+      case 3220 /* pg_lsn  */: return lsnMakeComparable(text);
+    }
+    let elemTypeid = this._elemTypeOid(typeOid);
+    if (elemTypeid) {
+      return this._decodeArray(text, elemTypeid);
+    }
+    return text; // unknown type
+  }
+  static _elemTypeOid(arrayTypeOid) {
+    switch (arrayTypeOid) { // add line here when register new type
+      case 1009: return   25; // text
+      case 1000: return   16; // bool
+      case 1001: return   17; // bytea
+      case 1005: return   21; // int2
+      case 1007: return   23; // int4
+      case 1028: return   26; // oid
+      case 1021: return  700; // float4
+      case 1022: return  701; // float8
+      case 1016: return   20; // int8
+      case  199: return  114; // json
+      case 3807: return 3802; // jsonb
+      case 3221: return 3220; // pg_lsn
+      case 2951: return 2950; // uuid
+      case 1015: return 1043; // varchar
+    }
+  }
+  static _decodeArray(text, elemTypeOid) {
+    text = text.replace(/^\[.+=/, ''); // skip dimensions
+    const jsonArray = text.replace(/{|}|,|"(?:[^"\\]|\\.)*"|[^,}]+/gy, token => (
+      token == '{' ? '[' :
+      token == '}' ? ']' :
+      token == 'NULL' ? 'null' :
+      token == ',' || token[0] == '"' ? token :
+      JSON.stringify(token)
+    ));
+    return JSON.parse(jsonArray, (_, elem) => (
+      typeof elem == 'string' ? this.decode(elem, elemTypeOid) : elem
+    ));
+  }
+  // TODO multi dimension
+  // TODO array_nulls https://www.postgresql.org/docs/14/runtime-config-compatible.html#id-1.6.7.16.2.2.1.1.3
+  static _encodeArray(arr, elemTypeOid) {
+    return JSON.stringify(arr, function (_, elem) {
+      return this == arr && elem != null ? PgType.encode(elem, elemTypeOid) : elem;
+    }).replace(/^\[(.*)]$/, '{$1}');
+  }
+  static _decodeBytea(text) {
+    // https://www.postgresql.org/docs/9.6/datatype-binary.html#AEN5830
+    if (text.startsWith('\\x')) {
+      const hex = text.slice(2); // TODO check hex.length is even ?
+      const bytes = new Uint8Array(hex.length >> 1);
+      for (let i = 0, m = 4; i < hex.length; i++, m ^= 4) {
+        let d = hex.charCodeAt(i);
+        if (0x30 <= d && d <= 0x39) d -= 0x30; // 0-9
+        else if (0x41 <= d && d <= 0x46) d -= 0x41 - 0xa; // A-F
+        else if (0x61 <= d && d <= 0x66) d -= 0x61 - 0xa; // a-f
+        else throw Error(`invalid hex digit 0x${d}`);
+        bytes[i >> 1] |= d << m; // m==4 on even iter, m==0 on odd iter
+      }
+      return bytes;
+    }
+    return Uint8Array.from( // legacy escape format TODO no eval
+      Function(text.replace('"', '\\"').replace(/.*/, 'return "$&"')).call(),
+      x => x.charCodeAt(),
+    );
+  }
+  static _encodeBytea(bytes) {
+    return '\\x' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  }
 }
 
 function lsnMakeComparable(text) {
   const [h, l] = text.split('/');
   return h.padStart(8, '0') + '/' + l.padStart(8, '0');
 }
-
-///////////// end type codec
-
 
 class Channel {
   constructor() {

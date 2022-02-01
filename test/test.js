@@ -415,6 +415,7 @@ export function setup({
       42::int8, -42::int8,
       36.6::float4, -36.6::float4,
       36.6::float8, -36.6::float8,
+      43::oid,
       jsonb_build_object('hello', 'world', 'num', 1),
       json_build_object('hello', 'world', 'num', 1),
       '1a/2b'::pg_lsn,
@@ -437,6 +438,7 @@ export function setup({
       42n, -42n,
       36.6, -36.6,
       36.6, -36.6,
+      43,
       { hello: 'world', num: 1 },
       { hello: 'world', num: 1 },
       '0000001A/0000002B',
@@ -448,7 +450,7 @@ export function setup({
       [[[1, 2, 3], [4, 5, 6]]],
       [1, null, 2],
     ]
-    const conn = await pgconnect('postgres://postgres:secret@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
     try {
       const [[...simple], [...ext]] = await Promise.all([
         conn.query(statement),
@@ -464,36 +466,63 @@ export function setup({
   test('type encode', async _ => {
     const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
     try {
-      const [...row] = await conn.query({
-        statement: /*sql*/ `
-          select
-          pg_typeof($1)::text, $1,
-          pg_typeof($2)::text, $2,
-          pg_typeof($3)::text, $3->>'key',
-          pg_typeof($4)::text, encode($4, 'hex'),
-          pg_typeof($5)::text, $5::text,
-          pg_typeof($6)::text, $6::text,
-          pg_typeof($7)::text, $7::varchar(100)
-        `,
-        params: [
-          { type: 'int4', value: 1 },
-          { type: 'bool', value: true },
-          { type: 'jsonb', value: { key: 'hello' } },
-          { type: 'bytea', value: Uint8Array.of(0xca, 0xfe, 0xba, 0xbe) },
-          { type: 'text[]', value: ['1', '2', '3', null] },
-          { type: 'bytea[]', value: [0xca, 0xfe, 0xba, 0xbe].map(x => Uint8Array.of(x)) },
-          { type: 'varchar', value: 'hello' },
-        ],
+      let typeName, text;
+      // int4
+      [typeName, text] = await conn.query({
+        statement: /*sql*/ `select pg_typeof($1)::text, $1::text`,
+        params: [{ type: 'int4', value: 1 }],
       });
-      assertEquals(row, [
-        'integer', 1,
-        'boolean', true,
-        'jsonb', 'hello',
-        'bytea', 'cafebabe',
-        'text[]', '{1,2,3,NULL}',
-        'bytea[]', '{"\\\\xca","\\\\xfe","\\\\xba","\\\\xbe"}',
-        'character varying', 'hello',
-      ]);
+      assertEquals(typeName, 'integer');
+      assertEquals(text, '1');
+      // bool
+      [typeName, text] = await conn.query({
+        statement: /*sql*/ `select pg_typeof($1)::text, $1::text`,
+        params: [{ type: 'bool', value: true }],
+      });
+      assertEquals(typeName, 'boolean');
+      assertEquals(text, 'true');
+      // jsonb
+      [typeName, text] = await conn.query({
+        statement: /*sql*/ `select pg_typeof($1)::text, $1->>'key'`,
+        params: [{ type: 'jsonb', value: { key: 'hello' } }],
+      });
+      assertEquals(typeName, 'jsonb');
+      assertEquals(text, 'hello');
+      // bytea
+      [typeName, text] = await conn.query({
+        statement: /*sql*/ `select pg_typeof($1)::text, encode($1, 'hex')`,
+        params: [{ type: 'bytea', value: Uint8Array.of(0xca, 0xfe, 0xba, 0xbe) }],
+      });
+      assertEquals(typeName, 'bytea');
+      assertEquals(text, 'cafebabe');
+      // text[]
+      [typeName, text] = await conn.query({
+        statement: /*sql*/ `select pg_typeof($1)::text, $1::text`,
+        params: [{ type: 'text[]', value: ['1', '2', '3', null] }],
+      });
+      assertEquals(typeName, 'text[]');
+      assertEquals(text, '{1,2,3,NULL}');
+      // bytea[]
+      [typeName, text] = await conn.query({
+        statement: /*sql*/ `select pg_typeof($1)::text, $1::text`,
+        params: [{ type: 'bytea[]', value: [0xca, 0xfe, 0xba, 0xbe].map(x => Uint8Array.of(x)) }],
+      });
+      assertEquals(typeName, 'bytea[]');
+      assertEquals(text, '{"\\\\xca","\\\\xfe","\\\\xba","\\\\xbe"}');
+      // varchar
+      [typeName, text] = await conn.query({
+        statement: /*sql*/ `select pg_typeof($1)::text, $1::text`,
+        params: [{ type: 'varchar', value: 'hello' }],
+      });
+      assertEquals(typeName, 'character varying');
+      assertEquals(text, 'hello');
+      // oid
+      [typeName, text] = await conn.query({
+        statement: /*sql*/ `select pg_typeof($1)::text, $1::text`,
+        params: [{ type: 'oid', value: 1 }],
+      });
+      assertEquals(typeName, 'oid');
+      assertEquals(text, '1');
     } finally {
       await conn.end();
     }
