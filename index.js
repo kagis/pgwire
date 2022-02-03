@@ -92,9 +92,11 @@ class SocketAdapter {
     // TODO assert Uint8Array
     // TODO need to copy data?
     if (this._error) throw this._error; // TODO callstack
-    if (this._socket.write(data)) return data.length;
-    await new Promise(this._writePauseAsync);
+    const p = new Promise(this._writePauseAsync);
+    this._socket.write(data, this._writeResume);
+    await p;
     if (this._error) throw this._error; // TODO callstack
+    return data.length;
   }
   // async closeWrite() {
   //   if (this._error) throw this._error; // TODO callstack
