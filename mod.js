@@ -23,18 +23,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 /// <reference types="./mod.d.ts" />
 
 export async function pgconnect(...optionsChain) {
-  const conn = new PgConnection(computeConnectionOptions(optionsChain));
-  await conn.waitReady(); // TODO .start()
+  const conn = pgconnection(...optionsChain);
+  await conn.start();
+  // await conn.query();
   return conn;
 }
 
-// export function pgconnect(...options) {
-//   const connection = new Connection(computeConnectionOptions(options));
-//   const p = Promise.resolve(connection.whenReady);
-//   p.connection = connection; // https://github.com/kagis/pgwire/issues/15
-//   p.catch(Boolean);
-//   return p;
-// }
+// https://github.com/kagis/pgwire/issues/15
+export function pgconnection(...optionsChain) {
+  return new PgConnection(computeConnectionOptions(optionsChain));
+}
 
 export function pgpool(...optionsChain) {
   return new PgPool(computeConnectionOptions(optionsChain));
@@ -105,7 +103,6 @@ class PgPool {
         cause: this._endReason,
       });
     }
-    let caughtError;
     const conn = this._getConnection();
     try {
       yield * conn.stream(...args);
@@ -118,13 +115,12 @@ class PgPool {
       //   await discard;
       // }
     } catch (err) {
-      // Keep error for cases when _recycleConnection throws PgError.left_in_txn.
-      // We will report it as cause of PgError.left_in_txn.
-      caughtError = err;
+      // Keep err for cases when _recycleConnection throws PgError.left_in_txn.
+      // We will report err as cause of PgError.left_in_txn.
+      await this._recycleConnection(conn, err);
       throw err;
-    } finally {
-      await this._recycleConnection(conn, caughtError);
     }
+    await this._recycleConnection(conn);
   }
   async end() {
     // TODO should await all pending queries when _poolSize = 0 ?
@@ -204,7 +200,7 @@ class PgPool {
     }
 
     if (this._poolIdleTimeout && !conn.pending /* is idle */) {
-      conn._poolTimeoutId = setTimeout(this._onConnectionTimeout, this._poolIdleTimeout, this, conn);
+      conn._poolTimeoutId = setTimeout(this._onConnectionTimeout, this._poolIdleTimeout * 1000, this, conn);
     }
   }
   _onConnectionTimeout(_self, conn) {
@@ -217,83 +213,84 @@ class PgPool {
 }
 
 class PgConnection {
-  constructor({ hostname, port, password, ...options }) {
+  constructor({
+    hostname, port, password, sslmode, sslrootcert,
+    _connectRetry = 0,
+    _wakeInterval = 2,
+    _debug = false,
+    ...options
+  }) {
     this.onnotification = null;
-    this.parameters = Object.create(null); // TODO retry init
-    this._debug = ['true', 'on', '1', 1, true].includes(options._debug);
+    this.parameters = Object.create(null);
+    this._debug = ['true', 'on', '1', 1, true].includes(_debug);
     this._connectOptions = { hostname, port };
     this._user = options.user;
     this._password = password;
+    this._sslmode = sslmode;
+    this._sslrootcert = sslrootcert;
+    this._ssl = null;
+    this._connectRetry = Math.max(_connectRetry, 0);
+    this._startTime = 0;
     this._socket = null;
     this._backendKeyData = null;
     this._lastErrorResponse = null;
     this._queuedResponseChannels = [];
     this._currResponseChannel = null;
     this._transactionStatus = null;
-    this._lastPullTime = 0;
-    const { _wakeInterval = 2000 } = options;
-    this._wakeInterval = Math.max(_wakeInterval, 0);
+    this._lastPullTime = 0; // TODO _wakeSupress
+    this._wakeInterval = Math.max(_wakeInterval, 0) * 1000;
     this._wakeTimer = 0;
-    this._wake = this._wake.bind(this);
     this._rowColumns = null; // last RowDescription
     this._rowTextDecoder = new TextDecoder('utf-8', { fatal: true });
-    this._rows = [];
     this._copyingOut = false;
-    this._copies = [];
-    this._copybuf = null;
-    this._copybufn = 0;
-    this._copybufSize = null;
-    this._tx = new Channel();
-    this._txReadable = this._tx; // _tx can be nulled after _tx.end(), but _txReadable will be available
-    this._startTx = new Channel(); // TODO retry init
+    this._femsgw = null;
+    this._femsgq = new Channel();
+    this._endReason = null;
     this._resolveReady = null;
     this._rejectReady = null;
-    this._whenReady = new Promise(this._whenReadyExecutor.bind(this));
-    this._whenReady.catch(warnError);
+    this._whenReady = new Promise((resolve, reject) => {
+      this._resolveReady = resolve;
+      this._rejectReady = reject;
+    });
+    this._whenReady.catch(Boolean);
     this._saslScramSha256 = null;
-    this._endReason = null;
-    // remove underscored options
-    const startupOptions = Object.fromEntries(
-      Object.entries(options)
-      .filter(([k]) => !k.startsWith('_'))
-    );
-    // run background message processing
+    this._authok = false;
     // create StartupMessage here to validate startupOptions in constructor call stack
-    this._whenDestroyed = this._ioloop(new FrontendMessage.StartupMessage({
-      ...startupOptions,
+    this._startupmsg = new FrontendMessage.StartupMessage({
+      // remove underscored options
+      ...Object.fromEntries(
+        Object.entries(options)
+        .filter(([k]) => !k.startsWith('_'))
+      ),
       'client_encoding': 'UTF8', // TextEncoder supports UTF8 only, so hardcode and force UTF8
       // client_encoding: 'win1251',
-    }));
+    })
+    this._pipeFemsgqPromise = null;
+    this._ioloopPromise = null;
   }
-  _whenReadyExecutor(resolve, reject) {
-    // When ready is resolved then it still can be rejected.
-    this._resolveReady = val => {
-      this._resolveReady = Boolean; // noop
-      this._rejectReady = err => {
-        this._whenReady = Promise.reject(err);
-        this._whenReady.catch(warnError);
-        this._rejectReady = Boolean; // noop
-      };
-      resolve(val);
-    };
-    // When ready is rejected then it cannot be resolved or rejected again.
-    this._rejectReady = err => {
-      this._resolveReady = Boolean; // noop
-      this._rejectReady = Boolean; // noop
-      reject(err);
-    };
-  }
-  async waitReady() {
+  async start() {
+    this._ensureIoloop();
     try {
       await this._whenReady;
     } catch (cause) {
       throw new PgError({ cause });
     }
   }
-  /** resolved when no quieries can be emitted and connection is about to terminate */
+  _ensureIoloop() {
+    if (this._endReason) {
+      throw new PgError({
+        message: 'Cannot start ended postgres connection',
+        code: 'conn_ended',
+        cause: this._endReason,
+      });
+    }
+    if (this._ioloopPromise) return;
+    this._ioloopPromise = this._ioloop();
+  }
+  /** resolved when no queries can be emitted and connection is about to terminate */
   get whenEnded() {
     // TODO private _whenEnded
-    return this._txReadable._whenEnded;
+    return this._femsgq._whenEnded;
   }
   /** number of pending queries */
   get pending() {
@@ -311,6 +308,9 @@ class PgConnection {
     if (!this._backendKeyData) return null;
     return this._backendKeyData.pid;
   }
+  get ssl() {
+    return this._ssl;
+  }
   // TODO executemany?
   // Parse
   // Describe(portal)
@@ -322,15 +322,14 @@ class PgConnection {
     return PgResult.fromStream(this.stream(...args));
   }
   async * stream(...args) {
-    if (!this._tx) {
+    if (this._endReason) {
       throw new PgError({
         message: 'Unable to do postgres query on ended connection',
         code: 'conn_ended',
         cause: this._endReason,
       });
     }
-    // TODO(test) ordered queue .query() and .end() calls
-    // .query after .end should throw stable error ? what if auth failed after .end
+    // TODO test .query after .end should throw stable error ? what if auth failed after .end
 
     const stdinSignal = { aborted: false, reason: Error('aborted') };
     const responseEndLock = new Channel();
@@ -351,16 +350,18 @@ class PgConnection {
       extendedQuery(frontendMessages, stdinSignal, args);
     }
     this._throwIfQueryAborted(signal);
+    const onabort = this._wake.bind(this);
     // TODO if next two steps throw then abort handler will not be removed.
-    signal?.addEventListener('abort', this._wake);
+    signal?.addEventListener('abort', onabort);
 
     // TODO This two steps should be executed atomiсally.
     // If one fails then connection instance
     // will be desyncronized and should be destroyed.
     // But I see no cases when this can throw error.
-    frontendMessages.forEach(this._tx.push, this._tx);
+    frontendMessages.forEach(this._femsgq.push, this._femsgq);
     this._queuedResponseChannels.push(responseChannel);
 
+    this._ensureIoloop();
     try {
       for (;;) {
         // Important to call responseChannel.next() as first step of try block
@@ -375,8 +376,7 @@ class PgConnection {
         // We will send 'wake' message if _lastPullTime is older
         // than _wakeInterval, so user have a chance to break loop
         // when response is stuck.
-        // perfomance.now is more suitable, but nodejs incompatible
-        this._lastPullTime = Date.now();
+        this._lastPullTime = _performance.now();
       }
     } catch (err) {
       stdinSignal.reason = err;
@@ -400,18 +400,23 @@ class PgConnection {
          // (to prevent miscancel of next queued query)
         this._queuedResponseChannels.length == 1
       ) {
-        // new queries should not be emitted during CancelRequest
-        this._tx?.push(responseEndLock);
+        if (!this._endReason) {
+          // new queries should not be emitted during CancelRequest
+          this._femsgq.push(responseEndLock);
+        }
         // TODO there is a small window between first Sync and Query message
         // when query is not actually executing, so there is small chance
         // that CancelRequest may be ignored. So need to repeat CancelRequest until
         // responseChannel.return() is resolved
-        await this._cancelRequest().catch(warnError);
+        await this._cancelRequest().catch(this._log);
       }
       // wait ReadyForQuery
       await responseChannel.return();
       responseEndLock.end();
-      signal?.removeEventListener('abort', this._wake);
+      // signal is user-provided object, so it can throw and override query error.
+      // TODO Its not clear how should we handle this errors, so just do this step
+      // at the end of function to minimize impact on code above.
+      signal?.removeEventListener('abort', onabort);
     }
   }
   _throwIfQueryAborted(signal) {
@@ -431,45 +436,39 @@ class PgConnection {
   /** terminates connection gracefully if possible and waits until termination complete */
   async end() {
     // TODO implement options.timeout ?
-    if (this._tx) {
+    if (!this._endReason) {
       // TODO
       // if (pgbouncer) {
       //   const lock = new Channel();
       //   this._whenIdle.then(_ => lock.end());
       //   this._tx.push(lock);
       // }
-      this._tx.push(new FrontendMessage.Terminate());
-      this._tx.end();
-      this._tx = null;
+      this._femsgq.push(new FrontendMessage.Terminate());
+      this._femsgq.end();
       this._endReason = new PgError({ message: 'Postgres connection ended' });
-      this._rejectReady(this._endReason);
+      // this._rejectReady(this._endReason);
     }
     // TODO _net.close can throw
-    await this._whenDestroyed;
+    await this._ioloopPromise;
   }
   destroy(destroyReason) {
     clearInterval(this._wakeTimer);
-    if (this._socket) {
-      _net.close(this._socket); // TODO can throw
-      this._socket = null;
-      this._backendKeyData = null;
-    }
-    if (this._startTx) {
-      this._startTx.end();
-      this._startTx = null;
-    }
+    // TODO it can be overwritten in ioloop.
+    // It used for PgConnection.pid wich is used to
+    // determine if connection is alive.
+    this._backendKeyData = null;
     if (!(destroyReason instanceof Error)) {
       destroyReason = new PgError({
         message: 'Postgres connection destroyed',
         cause: destroyReason,
       });
     }
-    if (this._tx) {
-      this._tx.end();
-      this._tx = null;
+    if (!this._endReason) {
+      this._log('connection destroyed', destroyReason);
+      this._femsgq.end();
       // save destroyReason only if .destroy() called before .end()
       // so new queries will be rejected with the same error before
-      // and after whenReady settled
+      // and after _whenReady settled
       this._endReason = destroyReason;
       this._rejectReady(destroyReason);
     }
@@ -478,6 +477,9 @@ class PgConnection {
     while (this._queuedResponseChannels.length) {
       this._queuedResponseChannels.shift().end(destroyReason);
     }
+    this._msgw = null;
+    _net.closeNullable(this._socket); // TODO can throw ?
+    this._socket = null;
     // TODO do CancelRequest to wake stuck connection which can continue executing ?
     return destroyReason; // user code can call .destroy and throw destroyReason in one line
   }
@@ -486,130 +488,108 @@ class PgConnection {
     return new ReplicationStream(this, options);
   }
   async _cancelRequest() {
-    // await this._whenReady; // wait for backendkey
     if (!this._backendKeyData) {
       throw new PgError({
         message: 'CancelRequest attempt before BackendKeyData received',
         code: 'misuse',
       });
     }
-    const socket = await this._createSocket();
+    let socket = await _net.connect(this._connectOptions);
     try {
-      const m = new FrontendMessage.CancelRequest(this._backendKeyData)
-      const msgbuf = new MessageWriter();
-      msgbuf.writeMessage(m);
-      await msgbuf.flush(socket);
+      // TODO ssl support
+      // if (this._ssl) {
+      //   socket = await this._sslNegotiate(socket);
+      // }
+      const m = new FrontendMessage.CancelRequest(this._backendKeyData);
+      this._logFemsg(m, null);
+      await MessageWriter.writeMessage(socket, m);
     } finally {
-      _net.close(socket);
+      _net.closeNullable(socket);
     }
   }
-  async _ioloop(startupmsg) {
-    let caughtError;
+  async _ioloop() {
+    this._startTime = _performance.now();
     try {
-      this._socket = await this._createSocket();
-      this._startTx.push(startupmsg);
-      await Promise.all([
-        // TODO при досрочном завершении одной из функций как будем завершать вторую ?
-        // _sendMessages надо завершать потому что она может пайпить stdin,
-        // а недокушаный stdin надо прибить
+      while (await this._ioloopAttempt());
+      // Connection should be already ended at this point,
+      // so destroyReason will not be propagated in normal case.
+      throw new PgError({
+        message: 'Postgres closed connection unexpectedly',
+        code: 'protocol_violation',
+      });
+    } catch (err) {
+      this.destroy(err);
+    } finally {
+      await this._pipeFemsgqPromise;
+    }
+  }
+  async _ioloopAttempt() {
+    this.parameters = Object.create(null);
+    this._lastErrorResponse = null;
+    this._ssl = null;
+    this._femsgw = null;
+    _net.closeNullable(this._socket);
+    this._socket = null;
 
-        // когда может обломаться recvMessages
-        // - сервер закрыл сокет
-        // - сервер прислал херню
-        // - pgwire не смог обработать авторизационные сообщения
-        this._recvMessages(),
-        // TODO this._socket.closeWrite when _sendMessages complete
-        this._sendMessages(this._startTx),
-      ]);
-      // TODO destroy(Error('socket closed by server'))
-    } catch (err) {
-      caughtError = err;
-    }
-    this.destroy(caughtError);
-  }
-  async _createSocket() {
-    const socket = await _net.connect(this._connectOptions);
-    if (!this._tls) return socket;
-    // TODO implement tls
     try {
-      await _net.write(socket, serializeFrontendMessage(new SSLRequest()));
-      const sslResp = await readByte(socket);
-      if (sslResp == 'S') {
-        return await _net.startTls(socket, { });
-      }
-      if (this._tls == 'require') {
-        // TODO error message
-        throw new PgError({ message: 'Postgres refuses SSL connection', code: 'nossl' });
-      }
-      return socket;
+      this._socket = await _net.connect(this._connectOptions);
     } catch (err) {
-      _net.close(socket);
+      if (
+        _net.reconnectable(err) &&
+        this._connectRetry * 1000 > _performance.now() - this._startTime
+      ) {
+        this._log(err);
+        this._log('retrying connection');
+        await this._connectRetryPause();
+        return true; // restart
+      }
       throw err;
     }
-  }
-  async _sendMessages(iterable, msgbuf = new MessageWriter()) {
-    const iterator = iterable[Symbol.asyncIterator]();
+
+    const shouldRetryNossl = await this._sslNegotiateIfNeed();
+    if (shouldRetryNossl) {
+      this._log('retrying connection without ssl');
+      this._sslmode = 'try_nossl';
+      return true; // restart
+    }
+
+    this._femsgw = new MessageWriter(this._socket);
+    await this._writeFemsg(this._startupmsg);
+
+    const msgr = new MessageReader(this._socket);
     try {
-      // we are going to buffer messages from source iterator until
-      // .next returns resolved promises, and then flush buffered
-      // messages when .next goes to do real asynchronous work.
-      const stub = { pending: true };
-      let pnext = iterator.next();
-      for (;;) {
-        const { pending, done, value } = await Promise.race([pnext, stub]);
-        if (pending || done) {
-          // console.log({ pending, done, count: msgbuf.count }), msgbuf.count = 0;
-          await msgbuf.flush(this._socket);
-          if (done) break;
-          await pnext;
-          continue;
-        }
-        if (value[Symbol.asyncIterator]) {
-          await this._sendMessages(value, msgbuf);
-        } else {
-          this._logFrontendMessage(value);
-          msgbuf.writeMessage(value);
-          // msgbuf.count = msgbuf.count + 1 || 1;
-        }
-        pnext = iterator.next();
+      for await (const chunk of msgr) {
+        await this._recvMessages(chunk);
       }
-    } catch (err) {
-      // need to destroy connection here to prevent deadlock.
-      // If writeMessage throw error than startTx.next() is still
-      // unresolved and waiting for server to respond or close connection.
-      // So iter.return() also will not be resolved
-      throw this.destroy(err);
-    } finally {
-      await iterator.return();
-    }
-  }
-  _logFrontendMessage({ tag, payload }) {
-    if (!this._debug) return;
-    const pid = this.pid || 'n';
-    const tagStyle = 'font-weight: bold; color: magenta';
-    if (typeof payload == 'undefined') {
-      return console.log('%s<- %c%s%c', pid, tagStyle, tag);
-    }
-    console.log('%s<- %c%s%c %o', pid, tagStyle, tag, '', payload);
-  }
-  async _recvMessages() {
-    try {
-      for await (const { nparsed, messages } of BackendMessageReader.iterBackendMessages(this._socket)) {
-        // Use last backend messages chunk size as _copybuf size hint.
-        this._copybufSize = nparsed;
-        this._copybuf = null;
-        this._copybufn = 0;
-        for (const m of messages) {
-          this._logBackendMessage(m);
-          // TODO check if connection is destroyed to prevent errors in _recvMessage?
-          const maybePromise = this._recvMessage(m);
-          // avoid await for DataRow and CopyData messages for perfomance
-          if (maybePromise) {
-            await maybePromise;
+
+      if (this._lastErrorResponse && !this._authok) {
+        if (
+          this._lastErrorResponse.code == '57P03' && // cannot_connect_now
+          this._connectRetry > _performance.now() - this._startTime
+        ) {
+          this._log('retrying connection');
+          await this._connectRetryPause();
+          this._lastErrorResponse = null; // prevent throw
+          return true; // restart
+        }
+        // if (loopState.retryReason) {
+        //   // TODO report _lastErrorResponse too?
+        //   throw loopState.retryReason;
+        // }
+        if (this._lastErrorResponse.code == '28000') { // invalid_authorization_specification
+          if (this._sslmode == 'prefer' && this._ssl) {
+            this._log('retrying connection without ssl');
+            this._lastErrorResponse = null; // prevent throw
+            this._sslmode = 'try_nossl';
+            return true; // restart
+          }
+          if (this._sslmode == 'allow' && !this._ssl) {
+            this._log('retrying connection with ssl');
+            this._lastErrorResponse = null; // prevent throw
+            this._sslmode = 'try_ssl';
+            return true; // restart
           }
         }
-        await this._flushDataRows();
-        await this._flushCopyDatas();
       }
     } finally {
       // If we have _lastResponseError when socket ends,
@@ -620,12 +600,144 @@ class PgConnection {
         throw PgError.fromErrorResponse(this._lastErrorResponse);
       }
     }
-    // TODO handle unexpected connection close when _pipeMessages still working.
-    // if _pipeMessages(this._startTx) is not resolved yet
-    // then _ioloop will not be resolved. But there no more active socket
-    // to keep process running
   }
-  _logBackendMessage({ tag, payload }) {
+  async _connectRetryPause() {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  async _sslNegotiateIfNeed() {
+    if (!['require', 'prefer', 'try_ssl'].includes(this._sslmode)) {
+      this._ssl = false;
+      return false; // continue without ssl
+    }
+    const sslreq = new FrontendMessage.SSLRequest();
+    this._logFemsg(sslreq, null);
+    await MessageWriter.writeMessage(this._socket, sslreq);
+    const sslok = await MessageReader.readSSLResponse(this._socket);
+    this._log('n-> ssl available %o', sslok);
+    if (!sslok) {
+      if (this._sslmode == 'prefer') {
+        this._ssl = false;
+        return false; // continue without ssl
+      }
+      // TODO handle try_nossl
+      throw new PgError({
+        message: 'SSL required but not supported',
+        code: 'nossl',
+      });
+    }
+    try {
+      this._socket = await _net.startTls(this._socket, {
+        hostname: this._connectOptions.hostname,
+        caCerts: this._sslrootcert && [].concat(this._sslrootcert),
+      });
+    } catch (err) {
+      if (this._sslmode == 'prefer') {
+        this._log(err);
+        return true; // retry without ssl
+      }
+      throw err;
+    }
+    this._ssl = true;
+    return false; // continue with ssl
+  }
+  async _recvMessages({ nparsed, messages }) {
+    // we are going to batch DataRows and CopyData synchronously
+    const batch = {
+      rows: [],
+      copies: [],
+      pos: 0,
+      buf: null,
+      // Use last backend messages chunk size as buf size hint.
+      bufsize: nparsed,
+    };
+    for (const m of messages) {
+      this._logBemsg(m);
+      // TODO check if connection is destroyed to prevent errors?
+      switch (m.tag) {
+        case 'DataRow': this._recvDataRow(m, m.payload, batch); continue;
+        case 'CopyData': this._recvCopyData(m, m.payload, batch); continue;
+      }
+      await this._flushBatch(batch);
+
+      switch (m.tag) {
+        case 'CopyInResponse': await this._recvCopyInResponse(m, m.payload); break;
+        case 'CopyOutResponse': await this._recvCopyOutResponse(m, m.payload); break;
+        case 'CopyBothResponse': await this._recvCopyBothResponse(m, m.payload); break;
+        case 'CopyDone': await this._recvCopyDone(m, m.payload); break;
+        case 'RowDescription': await this._recvRowDescription(m, m.payload); break;
+        case 'NoData': await this._recvNoData(m, m.payload); break;
+        case 'PortalSuspended': await this._recvPortalSuspended(m, m.payload); break;
+        case 'CommandComplete': await this._recvCommandComplete(m, m.payload); break;
+        case 'EmptyQueryResponse': await this._recvEmptyQueryResponse(m, m.payload); break;
+
+        case 'AuthenticationMD5Password': await this._recvAuthenticationMD5Password(m, m.payload); break;
+        case 'AuthenticationCleartextPassword': await this._recvAuthenticationCleartextPassword(m, m.payload); break;
+        case 'AuthenticationSASL': await this._recvAuthenticationSASL(m, m.payload); break;
+        case 'AuthenticationSASLContinue': await this._recvAuthenticationSASLContinue(m, m.payload); break;
+        case 'AuthenticationSASLFinal': await this._recvAuthenticationSASLFinal(m, m.payload); break;
+        // TODO throw unimplemented on other auth messages
+        case 'AuthenticationOk': await this._recvAuthenticationOk(m, m.payload); break;
+        case 'ParameterStatus': await this._recvParameterStatus(m, m.payload); break;
+        case 'BackendKeyData': await this._recvBackendKeyData(m, m.payload); break;
+        case 'NoticeResponse': await this._recvNoticeResponse(m, m.payload); break;
+        case 'ErrorResponse': await this._recvErrorResponse(m, m.payload); break;
+        case 'ReadyForQuery': await this._recvReadyForQuery(m, m.payload); break;
+        case 'NotificationResponse': this._recvNotificationResponse(m, m.payload); break;
+      }
+    }
+    await this._flushBatch(batch);
+  }
+  async _pipeFemsgq() {
+    const stack = [];
+    try {
+      // we are going to buffer messages from source iterator until
+      // .next returns resolved promises, and then flush buffered
+      // messages when .next goes to do real asynchronous work.
+      const stub = { pending: true };
+      for (let pnext = { value: this._femsgq };;) {
+        const { pending, done, value } = await Promise.race([pnext, stub]);
+        if (pending) {
+          await this._femsgw.flush();
+          await pnext;
+          continue;
+        }
+        if (done) {
+          await this._femsgw.flush();
+          await stack.shift().return();
+          if (!stack.length) break;
+        } else if (value[Symbol.asyncIterator]) {
+          stack.unshift(value[Symbol.asyncIterator]());
+        } else {
+          this._logFemsg(value);
+          // TODO flush if buffer size reached threshold
+          this._femsgw.writeMessage(value);
+          // msgbuf.count = msgbuf.count + 1 || 1;
+        }
+        pnext = stack[0].next();
+      }
+    } catch (err) {
+      // iterator.return() will wait until tx.end()
+      // so we need to destroy connection here to prevent deadlock.
+      this.destroy(err);
+    } finally {
+      await Promise.all(stack.map(it => it.return()));
+    }
+  }
+  async _writeFemsg(m) {
+    this._logFemsg(m);
+    this._femsgw.writeMessage(m);
+    await this._femsgw.flush();
+  }
+  _logFemsg({ tag, payload }, pid = this.pid) {
+    if (!this._debug) return;
+    pid = pid || 'n';
+    const tagStyle = 'font-weight: bold; color: magenta';
+    if (typeof payload == 'undefined') {
+      return console.log('%s<- %c%s', pid, tagStyle, tag);
+    }
+    console.log('%s<- %c%s%c %o', pid, tagStyle, tag, '', payload);
+  }
+  _logBemsg({ tag, payload }) {
     if (!this._debug) return;
     const pid = this.pid || 'n';
     if (typeof payload == 'undefined') {
@@ -633,36 +745,7 @@ class PgConnection {
     }
     console.log('%s-> %s %o', pid, tag, payload);
   }
-  _recvMessage(m) {
-    switch (m.tag) {
-      case 'DataRow': return this._recvDataRow(m, m.payload);
-      case 'CopyData': return this._recvCopyData(m, m.payload);
-      case 'CopyInResponse': return this._recvCopyInResponse(m, m.payload);
-      case 'CopyOutResponse': return this._recvCopyOutResponse(m, m.payload);
-      case 'CopyBothResponse': return this._recvCopyBothResponse(m, m.payload);
-      case 'CopyDone': return this._recvCopyDone(m, m.payload);
-      case 'RowDescription': return this._recvRowDescription(m, m.payload);
-      case 'NoData': return this._recvNoData(m, m.payload);
-      case 'PortalSuspended': return this._recvPortalSuspended(m, m.payload);
-      case 'CommandComplete': return this._recvCommandComplete(m, m.payload);
-      case 'EmptyQueryResponse': return this._recvEmptyQueryResponse(m, m.payload);
-
-      case 'AuthenticationMD5Password': return this._recvAuthenticationMD5Password(m, m.payload);
-      case 'AuthenticationCleartextPassword': return this._recvAuthenticationCleartextPassword(m, m.payload);
-      case 'AuthenticationSASL': return this._recvAuthenticationSASL(m, m.payload);
-      case 'AuthenticationSASLContinue': return this._recvAuthenticationSASLContinue(m, m.payload);
-      case 'AuthenticationSASLFinal': return this._recvAuthenticationSASLFinal(m, m.payload);
-      case 'AuthenticationOk': return this._recvAuthenticationOk(m, m.payload);
-      case 'ParameterStatus': return this._recvParameterStatus(m, m.payload);
-      case 'BackendKeyData': return this._recvBackendKeyData(m, m.payload);
-      case 'NoticeResponse': return this._recvNoticeResponse(m, m.payload);
-      case 'ErrorResponse': return this._recvErrorResponse(m, m.payload);
-      case 'ReadyForQuery': return this._recvReadyForQuery(m, m.payload);
-
-      case 'NotificationResponse': return this._recvNotificationResponse(m, m.payload);
-    }
-  }
-  _recvDataRow(_, /** @type {Array<Uint8Array>} */ row) {
+  _recvDataRow(_, /** @type {Array<Uint8Array>} */ row, batch) {
     for (let i = 0; i < this._rowColumns.length; i++) {
       const valbuf = row[i];
       if (valbuf == null) continue;
@@ -676,9 +759,9 @@ class PgConnection {
           : PgType.decode(this._rowTextDecoder.decode(valbuf), typeOid)
       );
     }
-    this._rows.push(row);
+    batch.rows.push(row);
   }
-  _recvCopyData(_, /** @type {Uint8Array} */ data) {
+  _recvCopyData(_, /** @type {Uint8Array} */ data, batch) {
     if (!this._copyingOut) {
       // postgres can send CopyData when not in copy out mode, steps to reproduce:
       //
@@ -693,45 +776,45 @@ class PgConnection {
       // -> CopyData keepalive message sometimes can be received here before RowDescription message
       return;
     }
-    if (!this._copybuf) {
-      this._copybuf = new Uint8Array(this._copybufSize);
+    if (!batch.buf) {
+      batch.buf = new Uint8Array(batch.bufsize);
     }
-    this._copybuf.set(data, this._copybufn);
-    this._copies.push(this._copybuf.subarray(this._copybufn, this._copybufn + data.length));
-    this._copybufn += data.length;
+    batch.buf.set(data, batch.pos);
+    batch.copies.push(batch.buf.subarray(batch.pos, batch.pos + data.length));
+    batch.pos += data.length;
   }
-  async _flushCopyDatas() {
-    if (!this._copies.length) return;
-    const copyChunk = new PgChunk(this._copybuf.buffer, this._copybuf.byteOffset, this._copybufn);
-    copyChunk.tag = 'CopyData';
-    copyChunk.copies = this._copies;
-    this._copybuf = this._copybuf.subarray(this._copybufn);
-    this._copybufn = 0;
-    this._copies = [];
-    await this._currResponseChannel.push(copyChunk);
-  }
-  async _flushDataRows() {
-    if (!this._rows.length) return;
-    const rowsChunk = new PgChunk();
-    rowsChunk.tag = 'DataRow';
-    rowsChunk.rows = this._rows;
-    this._rows = [];
-    await this._currResponseChannel.push(rowsChunk);
+  async _flushBatch(batch) {
+    if (batch.copies.length) {
+      const copyChunk = new PgChunk(batch.buf.buffer, batch.buf.byteOffset, batch.pos);
+      copyChunk.tag = 'CopyData';
+      copyChunk.copies = batch.copies;
+      batch.buf = batch.buf.subarray(batch.pos);
+      batch.pos = 0;
+      batch.copies = [];
+      await this._currResponseChannel.push(copyChunk);
+    }
+    if (batch.rows.length) {
+      const rowsChunk = new PgChunk();
+      rowsChunk.tag = 'DataRow';
+      rowsChunk.rows = batch.rows;
+      await this._currResponseChannel.push(rowsChunk);
+      batch.rows = [];
+    }
   }
   async _recvCopyInResponse(m) {
-    await this._fwdBackendMessage(m);
+    await this._fwdBemsg(m);
   }
   async _recvCopyOutResponse(m) {
     this._copyingOut = true;
-    await this._fwdBackendMessage(m);
+    await this._fwdBemsg(m);
   }
   async _recvCopyBothResponse(m) {
     this._copyingOut = true;
-    await this._fwdBackendMessage(m);
+    await this._fwdBemsg(m);
   }
   async _recvCopyDone(m) {
     this._copyingOut = false;
-    await this._fwdBackendMessage(m);
+    await this._fwdBemsg(m);
   }
   async _recvCommandComplete(m) {
     // when call START_REPLICATION second time then replication is not started,
@@ -741,22 +824,22 @@ class PgConnection {
     // https://github.com/postgres/postgres/blob/0266e98c6b865246c3031bbf55cb15f330134e30/src/backend/replication/walsender.c#L2307
     // streamingDoneReceiving and streamingDoneSending not reset to false before replication start
     this._copyingOut = false;
-    await this._fwdBackendMessage(m);
+    await this._fwdBemsg(m);
   }
   async _recvEmptyQueryResponse(m) {
-    await this._fwdBackendMessage(m);
+    await this._fwdBemsg(m);
   }
   async _recvPortalSuspended(m) {
-    await this._fwdBackendMessage(m);
+    await this._fwdBemsg(m);
   }
   async _recvNoData(m) {
-    await this._fwdBackendMessage(m);
+    await this._fwdBemsg(m);
   }
   async _recvRowDescription(m, columns) {
     this._rowColumns = columns;
-    await this._fwdBackendMessage(m);
+    await this._fwdBemsg(m);
   }
-  _recvAuthenticationCleartextPassword() {
+  async _recvAuthenticationCleartextPassword() {
     if (this._password == null) {
       throw new PgError({
         message: 'Postgres requires authentication, but no password provided',
@@ -764,9 +847,9 @@ class PgConnection {
       });
     }
     // should be always encoded as utf8 even when server_encoding is win1251
-    this._startTx.push(new FrontendMessage.PasswordMessage(this._password));
+    await this._writeFemsg(new FrontendMessage.PasswordMessage(this._password));
   }
-  _recvAuthenticationMD5Password(_, { salt }) {
+  async _recvAuthenticationMD5Password(_, { salt }) {
     if (this._password == null) {
       throw new PgError({
         message: 'Postgres requires authentication, but no password provided',
@@ -776,24 +859,30 @@ class PgConnection {
     // should use server_encoding, but there is
     // no way to know server_encoding before authentication.
     // So it should be possible to provide password as Uint8Array
-    const utf8enc = new TextEncoder();
-    const passwordb = this._password instanceof Uint8Array ? this._password : utf8enc.encode(this._password);
-    const userb = this._user instanceof Uint8Array ? this._user : utf8enc.encode(this._user);
-    const a = utf8enc.encode(hexEncode(md5(Uint8Array.of(...passwordb, ...userb))));
+    const pwduser = Uint8Array.of(...utf8Encode(this._password), ...utf8Encode(this._user));
+    const a = utf8Encode(hexEncode(md5(pwduser)));
     const b = 'md5' + hexEncode(md5(Uint8Array.of(...a, ...salt)));
-    this._startTx.push(new FrontendMessage.PasswordMessage(b));
+    await this._writeFemsg(new FrontendMessage.PasswordMessage(b));
+
     function hexEncode(/** @type {Uint8Array} */ bytes) {
       return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
     }
+    function utf8Encode(inp) {
+      if (inp instanceof Uint8Array) return inp;
+      return new TextEncoder().encode(inp);
+    }
   }
   async _recvAuthenticationSASL(_, { mechanism }) {
-    if (mechanism != 'SCRAM-SHA-256') {
-      throw new PgError({ message: 'Unsupported SASL mechanism ' + JSON.stringify(mechanism) });
-    }
+    // TODO mechanism is suggestion list:
+    // the server sends an AuthenticationSASL message.
+    // It includes a list of SASL authentication mechanisms that the server can accept, in the server's preferred order.
+    // if (mechanism != 'SCRAM-SHA-256') {
+    //   throw new PgError({ message: 'Unsupported SASL mechanism ' + JSON.stringify(mechanism) });
+    // }
     this._saslScramSha256 = new SaslScramSha256();
     const firstmsg = await this._saslScramSha256.start();
     const utf8enc = new TextEncoder();
-    this._startTx.push(new FrontendMessage.SASLInitialResponse({
+    await this._writeFemsg(new FrontendMessage.SASLInitialResponse({
       mechanism: 'SCRAM-SHA-256',
       data: utf8enc.encode(firstmsg),
     }));
@@ -811,7 +900,7 @@ class PgConnection {
       utf8dec.decode(data),
       this._password,
     );
-    this._startTx.push(new FrontendMessage.SASLResponse(utf8enc.encode(finmsg)));
+    await this._writeFemsg(new FrontendMessage.SASLResponse(utf8enc.encode(finmsg)));
   }
   _recvAuthenticationSASLFinal(_, data) {
     const utf8dec = new TextDecoder();
@@ -832,8 +921,9 @@ class PgConnection {
   }
   async _recvReadyForQuery(m, { transactionStatus }) {
     this._transactionStatus = transactionStatus;
-    if (this._startTx) {
-      return this._completeStartup();
+    if (!this._authok) {
+      this._authok = true;
+      return this._startupComplete();
     }
     if (this._currResponseChannel) {
       await this._endResponse(m);
@@ -841,11 +931,10 @@ class PgConnection {
       await this._startResponse(m);
     }
   }
-  _completeStartup() {
-    this._startTx.push(this._txReadable);
-    this._startTx.end();
-    this._startTx = null;
+  _startupComplete() {
+    // TODO we should check that server does not cheat with message order when SASL used
     this._resolveReady();
+    this._pipeFemsgqPromise = this._pipeFemsgq();
     if (this._wakeInterval) {
       this._wakeTimer = setInterval(this._wakeThrottled.bind(this), this._wakeInterval);
     }
@@ -853,10 +942,10 @@ class PgConnection {
   async _startResponse(m) {
     this._currResponseChannel = this._queuedResponseChannels[0];
     // TODO assert this._currResponseChan is not null
-    await this._fwdBackendMessage(m);
+    await this._fwdBemsg(m);
   }
   async _endResponse(m) {
-    await this._fwdBackendMessage(m);
+    await this._fwdBemsg(m);
     const error = this._lastErrorResponse && PgError.fromErrorResponse(this._lastErrorResponse);
     this._queuedResponseChannels.shift();
     this._currResponseChannel.end(error);
@@ -866,7 +955,7 @@ class PgConnection {
 
   async _recvNoticeResponse(m) {
     if (this._currResponseChannel) {
-      return this._fwdBackendMessage(m);
+      return this._fwdBemsg(m);
     }
     // TODO dispatchEvent for nonquery NoticeResponse
   }
@@ -881,16 +970,14 @@ class PgConnection {
     // Detach onnotification call from _ioloop to avoid error swallowing.
     Promise.resolve(payload).then(this.onnotification);
   }
-  async _fwdBackendMessage({ tag, payload }) {
-    await this._flushDataRows();
-    await this._flushCopyDatas();
+  async _fwdBemsg({ tag, payload }) {
     const chunk = new PgChunk();
     chunk.tag = tag;
     chunk.payload = payload;
     await this._currResponseChannel.push(chunk);
   }
   _wakeThrottled() {
-    if (this._lastPullTime + this._wakeInterval > Date.now()) return;
+    if (this._lastPullTime + this._wakeInterval > _performance.now()) return;
     this._wake();
   }
   _wake() {
@@ -898,6 +985,10 @@ class PgConnection {
     const wakeChunk = new PgChunk();
     wakeChunk.tag = 'wake';
     this._currResponseChannel.push(wakeChunk);
+  }
+  _log = (...args) => {
+    if (!this._debug) return;
+    console.error(...args);
   }
 }
 
@@ -934,10 +1025,6 @@ class PgError extends Error {
     this[PgError.kErrorCode] = code;
     this[PgError.kErrorResponse] = errorResponse;
   }
-}
-
-function warnError(err) {
-  // console.error('warning', err);
 }
 
 function simpleQuery(out, stdinSignal, script, { stdin, stdins = [] } = 0, responseEndLock) {
@@ -1154,13 +1241,13 @@ class PgSubResult {
 }
 
 // https://www.postgresql.org/docs/14/protocol-message-types.html
-class MessageReader {
+class BinaryReader {
   /** @type {Uint8Array} */
   _b = null;
   _p = 0;
   // should not use { fatal: true } because ErrorResponse can use invalid utf8 chars
   static defaultTextDecoder = new TextDecoder();
-  _textDecoder = MessageReader.defaultTextDecoder;
+  _textDecoder = BinaryReader.defaultTextDecoder;
 
   _reset(/** @type {Uint8Array} */ b) {
     this._b = b;
@@ -1181,6 +1268,7 @@ class MessageReader {
   _readString() {
     const endIdx = this._b.indexOf(0x00, this._p);
     if (endIdx < 0) {
+      // TODO PgError.protocol_violation
       throw Error('unexpected end of message');
     }
     const strbuf = this._b.subarray(this._p, endIdx);
@@ -1198,6 +1286,7 @@ class MessageReader {
   }
   _checkSize(n) {
     if (this._b.length < this._p + n) {
+      // TODO PgError.protocol_violation
       throw Error('unexpected end of message');
     }
   }
@@ -1230,9 +1319,15 @@ class MessageReader {
 }
 
 // https://www.postgresql.org/docs/14/protocol-message-formats.html
-class BackendMessageReader extends MessageReader {
-  static async * iterBackendMessages(socket) {
-    const msgreader = new BackendMessageReader();
+class MessageReader extends BinaryReader {
+  constructor(socket) {
+    super();
+    this._iterator = this._iterate(socket);
+  }
+  [Symbol.asyncIterator]() {
+    return this._iterator;
+  }
+  async * _iterate(socket) {
     let buf = new Uint8Array(16_640);
     let nbuf = 0;
     for (;;) {
@@ -1252,22 +1347,26 @@ class BackendMessageReader extends MessageReader {
         const isize = itag + 1;
         const ipayload = isize + 4;
         if (nbuf < ipayload) break; // incomplete message
+        // TODO MessageReader._getInt32
         const size = buf[isize] << 24 | buf[isize + 1] << 16 | buf[isize + 2] << 8 | buf[isize + 3];
         if (size < 4) {
-          throw Error('invalid backend message size');
+          throw new PgError({
+            message: 'Postgres sent message with invalid size (less than 4)',
+            code: 'protocol_violation',
+          });
         }
         const inext = isize + size;
         // TODO use grow hint
         if (nbuf < inext) break; // incomplete message
-        msgreader._reset(buf.subarray(ipayload, inext));
-        const message = msgreader._readBackendMessage(buf[itag]);
+        this._reset(buf.subarray(ipayload, inext));
+        const message = this._readBackendMessage(buf[itag]);
         messages.push(message);
         // TODO batch DataRow here
         nparsed = inext;
       }
-      yield { nparsed, messages };
 
-      if (nparsed) { // TODO check if copyWithin(0, 0) is noop
+      if (nparsed) {
+        yield { nparsed, messages };
         buf.copyWithin(0, nparsed, nbuf); // move unconsumed bytes to begining of buffer
         nbuf -= nparsed;
       }
@@ -1321,9 +1420,15 @@ class BackendMessageReader extends MessageReader {
         case 10      : return m('AuthenticationSASL', { mechanism: this._readString() });
         case 11      : return m('AuthenticationSASLContinue', this._readToEnd());
         case 12      : return m('AuthenticationSASLFinal', this._readToEnd());
-        default      : throw Error('unknown auth message');
+        default      : throw new PgError({
+          message: 'Postgres sent unknown auth message',
+          code: 'protocol_violation',
+        });
       }
-      default: throw Error(`unsupported backend message ${asciiTag}`);
+      default: throw new PgError({
+        message: `Postgres sent unknown message ${asciiTag}`,
+        code: 'protocol_violation',
+      });
     }
   }
   _readDataRow() {
@@ -1407,10 +1512,29 @@ class BackendMessageReader extends MessageReader {
     const payload = this._readString();
     return { pid, channel, payload };
   }
+
+  static async readSSLResponse(socket) {
+    const readbuf = new Uint8Array(1);
+    // Deno doc says that nread never equals 0, so don't need to repeat
+    const nread = await _net.read(socket, readbuf);
+    if (nread == null) throw new PgError({
+      message: 'Postgres unexpectedly closed connection, ssl response expected',
+      code: 'protocol_violation',
+    });
+    const [resp] = readbuf;
+    if (resp == 0x53 /*S*/) return true;
+    if (resp == 0x4e /*N*/) return false;
+    // TODO postgres doc says that we can receive
+    // 'E'rrorResponse in case of ancient server
+    throw new PgError({
+      message: `Postgres sent unexpected ssl response (${resp})`,
+      code: 'protocol_violation',
+    });
+  }
 }
 
 // https://www.postgresql.org/docs/14/protocol-replication.html#id-1.10.5.9.7.1.5.1.8
-class ReplicationStream extends MessageReader {
+class ReplicationStream extends BinaryReader {
   constructor(conn, options) {
     super();
     this._tx = new Channel();
@@ -1544,7 +1668,7 @@ class ReplicationStream extends MessageReader {
 }
 
 // https://www.postgresql.org/docs/14/protocol-logicalrep-message-formats.html
-class PgoutputReader extends MessageReader {
+class PgoutputReader extends BinaryReader {
   static async * decodeStream(replstream) {
     const pgoreader = new PgoutputReader();
     for await (const chunk of replstream) {
@@ -1784,7 +1908,7 @@ class FrontendMessage {
     // static inst = new this();
     write(w) {
       w.writeInt32(8);
-      w.writeInt32(80877102); // (1234 << 16) | 5678
+      w.writeInt32(80877103); // (1234 << 16) | 5679
     }
   }
   static PasswordMessage = class extends FrontendMessage {
@@ -1940,37 +2064,24 @@ class FrontendMessage {
       w.writeInt32(4);
     }
   }
-
-  // static startupMessage(p) { return new this.StartupMessage(p); }
-  // static cancelRequest(p) { return new this.CancelRequest(p); }
-  // static sslRequest() { return new this.SSLRequest.inst; }
-  // static passwordMessage(p) { return new this.PasswordMessage(p); }
-  // static saslInitialResponse(p) { return new this.SASLInitialResponse(p); }
-  // static saslResponse(p) { return new this.SASLResponse(p); }
-  // static query(p) { return new this.Query(p); }
-  // static parse(p) { return new this.Parse(p); }
-  // static bind(p) { return new this.Bind(p); }
-  // static execute(p) { return new this.Execute(p); }
-  // static describeStatement(p) { return new this.DescribeStatement(p); }
-  // static describePortal(p) { return new this.DescribePortal(p); }
-  // static closePortal(p) { return new this.ClosePortal(p); }
-  // static closeStatement(p) { return new this.CloseStatement(p); }
-  // static sync() { return new this.Sync.inst; }
-  // static flush() { return new this.Flush.inst; }
-  // static copyData(p) { return new this.CopyData(p); }
-  // static copyDone() { return new this.CopyDone.inst; }
-  // static copyFail(p) { return new this.CopyFail(p); }
-  // static terminate() { return new this.Terminate.inst; }
 }
 
 class MessageWriter {
   static defaultTextEncoder = new TextEncoder();
 
-  constructor() {
+  static async writeMessage(socket, m) {
+    // TODO to big allocation
+    const msgw = new this(socket);
+    msgw.writeMessage(m);
+    await msgw.flush();
+  }
+
+  constructor(socket) {
     this._buf = new Uint8Array(32 * 1024);
     this._v = new DataView(this._buf.buffer);
     this._pos = 0;
     this._textEncoder = MessageWriter.defaultTextEncoder;
+    this._socket = socket;
   }
   get length() {
     return this._pos;
@@ -1989,9 +2100,9 @@ class MessageWriter {
     this._buf = newBuf;
     this._v = new DataView(this._buf.buffer);
   }
-  async flush(socket) {
+  async flush() {
     if (!this._pos) return;
-    await _net.write(socket, this._buf.subarray(0, this._pos));
+    await _net.write(this._socket, this._buf.subarray(0, this._pos));
     this._pos = 0;
   }
   writeUint8(val) {
@@ -2434,12 +2545,29 @@ function md5(/** @type {Uint8Array} */ input) {
   }
 }
 
+export const _performance = {
+  now: _ => performance.now(),
+};
+
 export const _net = {
   async connect(options) {
     return Deno.connect(options);
   },
-  async startTls(socket) {
-    return Deno.startTls(socket);
+  reconnectable(err) {
+    return (
+      err instanceof Deno.errors.ConnectionRefused ||
+      err instanceof Deno.errors.ConnectionReset
+    );
+  },
+  async startTls(socket, options) {
+    const tlssock = await Deno.startTls(socket, options);
+    try {
+      await tlssock.handshake();
+    } catch (err) {
+      tlssock.close();
+      throw err;
+    }
+    return tlssock;
   },
   async write(socket, arr) {
     let nwritten = 0;
@@ -2450,7 +2578,8 @@ export const _net = {
   async read(socket, buf) {
     return socket.read(buf);
   },
-  close(socket) {
+  closeNullable(socket) {
+    if (!socket) return;
     try {
       socket.close();
     } catch (err) {

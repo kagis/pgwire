@@ -1,25 +1,51 @@
-import { connect } from 'net';
+import net from 'net';
+import tls from 'tls';
 import { createHash, createHmac, pbkdf2 as _pbkdf2, randomFill as _randomFill } from 'crypto';
 import { once } from 'events';
 import { promisify } from 'util';
-import { _net, _crypto } from './mod.js';
+import perf_hooks from 'perf_hooks';
+import { _performance, _net, _crypto } from './mod.js';
 export * from './mod.js';
 
 const randomFill = promisify(_randomFill);
 const pbkdf2 = promisify(_pbkdf2);
 
+_performance.now = _ => perf_hooks.performance.now();
+
 Object.assign(_net, {
-  async connect(options) {
-    return SocketAdapter.connect(options);
+  async connect({ hostname, port }) {
+    const socket = SocketAdapter.attach(net.connect({ host: hostname, port }));
+    await once(socket, 'connect');
+    return socket;
   },
-  async read(conn, buf) {
-    return conn.read(buf);
+  reconnectable(err) {
+    return err && (
+      err.code == 'ENOTFOUND' ||
+      err.code == 'ECONNREFUSED' ||
+      err.code == 'ECONNRESET'
+    );
   },
-  async write(conn, data) {
-    return conn.write(data);
+  async startTls(socket, { hostname, caCerts }) {
+    // https://nodejs.org/docs/latest-v14.x/api/tls.html#tls_tls_connect_options_callback
+    const tlssock = SocketAdapter.attach(tls.connect({
+      secureContext: tls.createSecureContext({ ca: caCerts }),
+      host: hostname,
+      socket,
+    }));
+    await once(tlssock, 'secureConnect');
+    tlssock.on('close', _ => socket.destroy());
+    return tlssock;
   },
-  close(conn) {
-    return conn.close();
+  async read(socket, out) {
+    // return sockadapt.read(buf);
+    return SocketAdapter.get(socket).read(out);
+  },
+  async write(socket, data) {
+    return SocketAdapter.get(socket).write(data);
+  },
+  closeNullable(socket) {
+    if (!socket) return;
+    return SocketAdapter.get(socket).close();
   },
 });
 
@@ -49,10 +75,13 @@ Object.assign(_crypto, {
 });
 
 class SocketAdapter {
-  static async connect({ hostname, port }) {
-    const socket = connect({ host: hostname, port });
-    await once(socket, 'connect');
-    return new this(socket);
+  static kAdapter = Symbol('SocketAdapter');
+  static attach(socket) {
+    socket[this.kAdapter] = new this(socket);
+    return socket;
+  }
+  static get(socket) {
+    return socket[this.kAdapter];
   }
   constructor(socket) {
     this._socket = socket;
@@ -62,14 +91,12 @@ class SocketAdapter {
     this._writePauseAsync = resolve => this._writeResume = resolve;
     this._socket.on('readable', _ => this._readResume());
     this._socket.on('end', _ => this._readResume());
-    this._socket.on('drain', _ => this._writeResume());
     this._socket.on('error', error => {
       this._error = error;
       this._readResume();
       this._writeResume();
     });
   }
-
   /** @param {Uint8Array} out */
   async read(out) {
     let buf;

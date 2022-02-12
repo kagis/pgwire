@@ -3,4 +3,5 @@ set -xe
 export COMPOSE_FILE=test/compose.yml
 docker compose down -v
 export TEST_FILTER="$@"
-docker compose -f test/compose.yml up --exit-code-from deno deno
+docker compose -f test/compose.yml up --build --exit-code-from deno deno \
+  pgwssl pgwossl

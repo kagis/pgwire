@@ -1,4 +1,5 @@
 export function pgconnect(...optionsChain: PgConnectOptions[]): Promise<PgConnection>;
+export function pgconnection(...optionsChain: PgConnectOptions[]): PgConnection;
 export function pgpool(...optionsChain: PgConnectOptions[]): PgClient;
 
 export type PgConnectOptions = string | URL | PgConnectKnownOptions & Record<string, string | Uint8Array>;

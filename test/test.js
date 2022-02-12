@@ -3,10 +3,11 @@ export function setup({
   pgpool,
   test,
   assertEquals,
+  tcpproxy,
 }) {
 
   test('simple proto', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0');
     try {
       const res = await conn.query(/*sql*/ `
         do $$ begin raise notice 'test start'; end $$;
@@ -65,7 +66,7 @@ export function setup({
   });
 
   test('simple proto empty', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const res = await conn.query(/*sql*/ ``);
       const [...row] = res;
@@ -101,7 +102,7 @@ export function setup({
   });
 
   test('extended proto', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const res = await conn.query({
         statement: /*sql*/ `do $$ begin raise notice 'test start'; end $$`
@@ -208,7 +209,7 @@ export function setup({
   });
 
 // test('sync connection', async _ => {
-//   const { connection } = pgconnect('postgres://postgres@postgres:5432/postgres');
+//   const { connection } = pgconnect('postgres://pgwire@pgwssl:5432/postgres');
 //   try {
 //     await connection.query(/*sql*/ `select 'hello'`);
 //   } finally {
@@ -217,7 +218,7 @@ export function setup({
 // });
 
 // test('connection error during query', async _ => {
-//   const { connection } = pgconnect('postgres://invalid@postgres:5432/postgres');
+//   const { connection } = pgconnect('postgres://invalid@pgwssl:5432/postgres');
 //   try {
 //     await assertRejects(
 //       _ => connection.query(/*sql*/ `select`),
@@ -230,7 +231,7 @@ export function setup({
 // });
 
 // test('throw when query after close', async _ => {
-//   const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+//   const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
 //   await conn.end();
 //   await assertRejects(
 //     _ => conn.query(/*sql*/ `select`),
@@ -252,12 +253,12 @@ export function setup({
 // });
 
   test('connect with unexisting user', async _ => {
-    const caughtError = await pgconnect('postgres://unknown@postgres:5432/postgres').catch(Object);
+    const caughtError = await pgconnect('postgres://unknown@pgwssl:5432/postgres').catch(Object);
     assertError(caughtError, 'PgError.28000');
   });
 
   test('copy from stdin extended', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const datasrc = ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode);
       const { rows } = await conn.query(
@@ -275,7 +276,7 @@ export function setup({
   });
 
   test('copy from stdin extended missing', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const caughtError = await conn.query(
         { statement: /*sql*/ `create temp table test(foo int, bar text)` },
@@ -288,7 +289,7 @@ export function setup({
   });
 
   test('copy from stdin simple', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const { rows } = await conn.query(/*sql*/ `
         create temp table test(foo text, bar text);
@@ -307,7 +308,7 @@ export function setup({
   });
 
   test('copy from stdin simple 2', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const { rows } = await conn.query(/*sql*/ `
         create temp table test(foo text, bar text);
@@ -335,7 +336,7 @@ export function setup({
   });
 
   test('copy from stdin simple missing', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const caughtError = await conn.query(/*sql*/ `
         create temp table test(foo int, bar text);
@@ -360,7 +361,7 @@ export function setup({
   });
 
   test('copy to stdout', async _ => {
-    const conn = await pgconnect('postgres://postgres:qwerty@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://postgres:qwerty@pgwssl:5432/postgres');
     try {
       const stdout = conn.stream(/*sql*/ `copy (values (1, 'hello'), (2, 'world')) to stdout`);
       const dump = await readAll(stdout)
@@ -372,7 +373,7 @@ export function setup({
   });
 
   test('copy to stdout multi', async _ => {
-    const conn = await pgconnect('postgres://postgres:qwerty@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://postgres:qwerty@pgwssl:5432/postgres');
     try {
       const stdout = conn.stream(/*sql*/ `
         copy (values (1, 'hello'), (2, 'world')) to stdout;
@@ -450,7 +451,7 @@ export function setup({
       [[[1, 2, 3], [4, 5, 6]]],
       [1, null, 2],
     ]
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const [[...simple], [...ext]] = await Promise.all([
         conn.query(statement),
@@ -464,7 +465,7 @@ export function setup({
   });
 
   test('type encode', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       let typeName, text;
       // int4
@@ -548,7 +549,7 @@ export function setup({
 // });
 
   _test('logical replication', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?replication=database');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?replication=database');
     try {
       await conn.query(/*sql*/ `
         select pg_create_logical_replication_slot('test_2b265aa1', 'test_decoding', temporary:=true)
@@ -582,7 +583,7 @@ export function setup({
   });
 
   test('logical replication pgoutput', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?replication=database');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?replication=database');
     try {
       await Promise.all([
         conn.query(/*sql*/ `create table pgo1rel(id int not null primary key, val text, note text)`),
@@ -790,7 +791,7 @@ export function setup({
 
   test('logical replication invalid startLsn', async _ => {
     let caughtError;
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?replication=database&_debug=0');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?replication=database&_debug=0');
     const replicationStream = conn.logicalReplication({ slot: 'test', startLsn: 'invalid/lsn' });
     try {
       for await (const _ of replicationStream);
@@ -891,7 +892,7 @@ export function setup({
 // });
 
   _test('parse bind execute', async _ => {
-    const pg = pgpool('postgres://postgres:secret@postgres:5432/postgres');
+    const pg = pgpool('postgres://postgres:secret@pgwssl:5432/postgres');
     const { scalar } = await pg.query({
       message: 'Parse',
       statement: /*sql*/ `SELECT $1`,
@@ -909,7 +910,7 @@ export function setup({
   });
 
   test('connection end', async _ => {
-    const conn = await pgconnect('postgres://postgres:qwerty@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://postgres:qwerty@pgwssl:5432/postgres');
     try {
       const [[health],,,, immediateQueryAfterEnd] = await Promise.all([
         // check that connection is working
@@ -938,8 +939,8 @@ export function setup({
   test('pending queries should be rejected when server closes connection', async _ => {
     let conn, conn1;
     try {
-      conn = await pgconnect('postgres://postgres@postgres:5432/postgres?_debug=0');
-      conn1 = await pgconnect('postgres://postgres@postgres:5432/postgres');
+      conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0');
+      conn1 = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
       const pid = conn.pid;
       const [caughtError] = await Promise.all([
         conn.query(/*sql*/ `select pg_sleep(5)`).catch(Object),
@@ -959,43 +960,188 @@ export function setup({
 // });
 
   test('auth clear', async _ => {
-    const caughtError = await pgconnect('postgres://pwduser@postgres:5432/postgres').catch(Object);
+    const caughtError = await pgconnect('postgres://pgwire_pwd@pgwssl:5432/postgres').catch(Object);
     assertError(caughtError, 'PgError.nopwd_clear');
-    const conn = await pgconnect('postgres://pwduser:secret@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire_pwd:secret@pgwssl:5432/postgres');
     try {
       const [username] = await conn.query(/*sql*/ `select current_user`);
-      assertEquals(username, 'pwduser');
+      assertEquals(username, 'pgwire_pwd');
     } finally {
       await conn.end();
     }
   });
 
   test('auth md5', async _ => {
-    const caughtError = await pgconnect('postgres://md5user@postgres:5432/postgres').catch(Object);
+    const caughtError = await pgconnect('postgres://pgwire_md5@pgwssl:5432/postgres').catch(Object);
     assertError(caughtError, 'PgError.nopwd_md5');
-    const conn = await pgconnect('postgres://md5user:secret@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire_md5:secret@pgwssl:5432/postgres');
     try {
       const [username] = await conn.query(/*sql*/ `select current_user`);
-      assertEquals(username, 'md5user');
+      assertEquals(username, 'pgwire_md5');
     } finally {
       await conn.end();
     }
   });
 
   test('auth scram-sha-256', async _ => {
-    const caughtError = await pgconnect('postgres://sha256user@postgres:5432/postgres').catch(Object);
+    const caughtError = await pgconnect('postgres://pgwire_sha256@pgwssl:5432/postgres').catch(Object);
     assertError(caughtError, 'PgError.nopwd_sha256');
-    const conn = await pgconnect('postgres://sha256user:secret@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire_sha256:secret@pgwssl:5432/postgres');
     try {
       const [username] = await conn.query(/*sql*/ `select current_user`);
-      assertEquals(username, 'sha256user');
+      assertEquals(username, 'pgwire_sha256');
     } finally {
       await conn.end();
     }
   });
 
+  _test('auth scram-sha-256-plus', async _ => {
+    const conn0 = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
+
+    const caughtError = await pgconnect('postgres://pgwire_sha256@pgwssl:5432/postgres', {
+      sslmode: 'require',
+      sslrootcert,
+    }).catch(Object);
+    assertError(caughtError, 'PgError.nopwd_sha256p');
+
+    const conn = await pgconnect('postgres://pgwire_sha256:secret@pgwssl:5432/postgres?_debug=1', {
+      sslmode: 'require',
+      sslrootcert,
+    });
+    try {
+      const [username] = await conn.query(/*sql*/ `select current_user`);
+      assertEquals(username, 'pgwire_sha256');
+    } finally {
+      await conn.end();
+    }
+  });
+
+  test('sslmode=require should create encrypted connection if ssl is supported', async _ => {
+    const conn0 = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
+
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0', {
+      sslmode: 'require',
+      sslrootcert,
+    });
+    assertEquals(conn.ssl, true);
+    const [sslUsed] = await (
+      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
+      .finally(_ => conn.end())
+    );
+    assertEquals(sslUsed, true);
+  });
+
+  test('sslmode=require should reject connection if ssl is not supported', async _ => {
+    const conn0 = await pgconnect('postgres://pgwire@pgwossl:5432/postgres');
+    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
+
+    const caughtError = await (
+      pgconnect('postgres://pgwire@pgwossl:5432/postgres', {
+        sslmode: 'require',
+        sslrootcert,
+      })
+      .catch(Object)
+    );
+    assertError(caughtError, 'PgError.nossl');
+  });
+
+  test('sslmode=prefer should create encypted connection if ssl is supported', async _ => {
+    const conn0 = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
+
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
+      sslmode: 'prefer',
+      sslrootcert,
+    });
+    assertEquals(conn.ssl, true);
+    const [sslUsed] = await (
+      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
+      .finally(_ => conn.end())
+    );
+    assertEquals(sslUsed, true);
+  });
+
+  test('sslmode=prefer should create unencypted connection if ssl is not supported', async _ => {
+    const conn0 = await pgconnect('postgres://pgwire@pgwossl:5432/postgres');
+    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
+
+    const conn = await pgconnect('postgres://pgwire@pgwossl:5432/postgres', {
+      sslmode: 'prefer',
+      sslrootcert,
+    });
+    assertEquals(conn.ssl, false);
+    const [sslUsed] = await (
+      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
+      .finally(_ => conn.end())
+    );
+    assertEquals(sslUsed, false);
+  });
+
+  test('sslmode=prefer should create unencypted connection if ssl is denied', async _ => {
+    const conn0 = await pgconnect('postgres://pgwire_nossl@pgwssl:5432/postgres');
+    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
+
+    const conn = await pgconnect('postgres://pgwire_nossl@pgwssl:5432/postgres', {
+      sslmode: 'prefer',
+      sslrootcert,
+      // _debug: true,
+    });
+    assertEquals(conn.ssl, false);
+    const [sslUsed] = await (
+      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
+      .finally(_ => conn.end())
+    );
+    assertEquals(sslUsed, false);
+  });
+
+  test('sslmode=prefer should create unencypted connection if ssl handshake fails', async _ => {
+    const conn = await pgconnect('postgres://pgwire_nossl@pgwssl:5432/postgres', {
+      sslmode: 'prefer',
+      // sslrootcert,
+      // _debug: true,
+    });
+    assertEquals(conn.ssl, false);
+    const [sslUsed] = await (
+      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
+      .finally(_ => conn.end())
+    );
+    assertEquals(sslUsed, false);
+  });
+
+  test('sslmode=allow should create unencypted connection if possible', async _ => {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
+      sslmode: 'allow',
+      // _debug: true,
+    });
+    assertEquals(conn.ssl, false);
+    const [sslUsed] = await (
+      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
+      .finally(_ => conn.end())
+    );
+    assertEquals(sslUsed, false);
+  });
+
+  test('sslmode=allow should use ssl if server requires ssl', async _ => {
+    const conn0 = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
+
+    const conn = await pgconnect('postgres://pgwire_sslonly@pgwssl:5432/postgres', {
+      sslmode: 'allow',
+      sslrootcert,
+      // _debug: true,
+    });
+    assertEquals(conn.ssl, true);
+    const [sslUsed] = await (
+      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
+      .finally(_ => conn.end())
+    );
+    assertEquals(sslUsed, true);
+  });
+
   test('pool should reuse connection', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1');
+    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1');
     try {
       const [pid1] = await pool.query(/*sql*/ `select pg_backend_pid()`);
       const [pid2] = await pool.query(/*sql*/ `select pg_backend_pid()`);
@@ -1006,7 +1152,7 @@ export function setup({
   });
 
   test('pool should do connection per query when poolSize is unset', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres');
+    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const [pid] = await pool.query(/*sql*/ `select pg_backend_pid()`);
       assertEquals(typeof pid, 'number');
@@ -1018,7 +1164,7 @@ export function setup({
   });
 
   test('pool should prevent idle in trasaction', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1');
+    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1');
     try {
       const [caughtError1, caughtError2] = await Promise.all([
         // emit bad query with explicit transaction
@@ -1043,7 +1189,7 @@ export function setup({
   // we not consume all backend messages before connection destroy.
   // Can we rely on this behavior?
   test('pool should auto rollback', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1&_debug=0');
+    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1&_debug=0');
     try {
       const [caughtError1, caughtError2] = await Promise.all([
         // emit bad query with explicit transaction
@@ -1064,7 +1210,7 @@ export function setup({
   });
 
   test('pool should keep reason of left_in_txn', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1&_debug=0');
+    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1&_debug=0');
     try {
       const caughtError = await (
         pool.query(/*sql*/ `begin; select 1 / 0; commit;`)
@@ -1092,7 +1238,7 @@ export function setup({
   // });
 
   test('pool idle timeout', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1&_poolIdleTimeout=1000');
+    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1&_poolIdleTimeout=1');
     try {
       const [pid] = await pool.query(/*sql*/ `select pg_backend_pid()`);
       assertEquals(typeof pid, 'number');
@@ -1108,8 +1254,8 @@ export function setup({
 
   test('pool async error', async _ => {
     // use pool with single connection
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=1');
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       // new pooled connection should be created
       const [pid] = await pool.query(/*sql*/ `select pg_backend_pid()`);
@@ -1130,7 +1276,7 @@ export function setup({
   });
 
   _test('pool should destroy ephemeral conns when _poolSize=0', async _ => {
-    const pool = pgpool('postgres://postgres@postgres:5432/postgres?_poolSize=0');
+    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=0');
     const [loid] = await pool.query(/*sql*/ `select lo_from_bytea(0, 'initial')`);
     // assertEquals(typeof loid, 'number'); // TODO register oid type
     const resp = pool.query(/*sql*/ `
@@ -1144,7 +1290,7 @@ export function setup({
     } catch (err) {
       // console.error(err);
     }
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const [lo] = await conn.query(/*sql*/ `select convert_from(lo_get(${loid}), 'sql_ascii')`);
       // destroyed query should be started but not completed
@@ -1155,7 +1301,7 @@ export function setup({
   });
 
   test('connection application_name', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?application_name=test');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?application_name=test');
     try {
       const [appname] = await conn.query(/*sql*/ `show application_name`);
       assertEquals(appname, 'test');
@@ -1175,7 +1321,7 @@ export function setup({
   });
 
   _test('streaming', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const resp = conn.query(/*sql*/ `select 'hello' col`);
       for await (const chunk of resp) {
@@ -1187,7 +1333,7 @@ export function setup({
   });
 
   test('cancel by break', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres', {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0', {
       'x.state': 'initial',
     });
     try {
@@ -1209,7 +1355,7 @@ export function setup({
   });
 
   test('cancel simple by signal', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres', {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
       // disable wake timer to test that connection wakes on .abort()
       _wakeInterval: 0,
       'x.state': 'initial',
@@ -1237,7 +1383,7 @@ export function setup({
   });
 
   test('cancel extended by signal', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres', {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
       // disable wake timer to test that connection wakes on .abort()
       _wakeInterval: 0,
       'x.state': 'initial',
@@ -1265,7 +1411,7 @@ export function setup({
   });
 
   _test('wake', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?_debug=0');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0');
     console.log('-');
     try {
       const stream = conn.query(
@@ -1309,7 +1455,7 @@ export function setup({
 
   test('notifications', async _ => {
     const actual = [];
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?_debug=0');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0');
     const pid = conn.pid;
     try {
       conn.onnotification = n => actual.push(n);
@@ -1328,7 +1474,7 @@ export function setup({
   });
 
   _test('notifications handler should not swallow errors', async _ => {
-    const conn = await pgconnect('postgres://postgres@postgres:5432/postgres?_debug=1');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=1');
     try {
       conn.onnotification = onnotification;
       await conn.query(/*sql*/ `listen test_chan`);
@@ -1340,6 +1486,39 @@ export function setup({
       throw Error('boom');
     }
   });
+
+  test('connectRetry', async _ => {
+    const aborter = new PoormanAbortController();
+    await Promise.all([client(aborter), server(aborter.signal)]);
+
+    async function client(aborter) {
+      let conn;
+      try {
+        conn = await pgconnect('postgres://pgwire@127.0.0.1:5433/postgres?_connectRetry=10&_debug=0');
+        const [health] = await conn.query(/*sql*/ `select 'ok'`);
+        assertEquals(health, 'ok');
+      } finally {
+        await conn?.end();
+        aborter.abort();
+      }
+    }
+    async function server(signal) {
+      await delay(1000);
+      await tcpproxy({
+        listen: { hostname: '127.0.0.1', port: 5433 },
+        target: { hostname: 'pgwssl', port: 5432 },
+        signal,
+      });
+    }
+  });
+
+  function assertError(actualError, expectedName) {
+    if (
+      actualError instanceof Error &&
+      actualError.name == expectedName
+    ) return;
+    assertEquals(actualError, Symbol(expectedName));
+  }
 }
 
 // mute
@@ -1349,31 +1528,17 @@ async function delay(duration) {
   return new Promise(resolve => setTimeout(resolve, duration));
 }
 
-function assertError(actualError, expectedName) {
-  if (
-    actualError instanceof Error &&
-    actualError.name == expectedName
-  ) return;
-  console.error('%s expected, but got %o', expectedName, actualError);
-  throw Error('assertError failed');
-}
-
 class PoormanAbortController {
-  signal = new PoormanAbortSignal();
-  abort(reason) {
+  signal = {
+    aborted: false,
+    reason: null,
+    _listeners: new Set(),
+    addEventListener(_e, handler) { this._listeners.add(handler); },
+    removeEventListener(_e, handler) { this._listeners.delete(handler); },
+  };
+  abort(reason = Error('aborted')) {
     this.signal.aborted = true;
     this.signal.reason = reason;
     this.signal._listeners.forEach(queueMicrotask);
-  }
-}
-class PoormanAbortSignal {
-  aborted;
-  reason;
-  _listeners = new Set();
-  addEventListener(_event, handler) {
-    this._listeners.add(handler);
-  }
-  removeEventListener(_event, handler) {
-    this._listeners.delete(handler);
   }
 }
