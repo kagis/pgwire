@@ -2397,33 +2397,36 @@ class Channel {
   }
 }
 
-class SaslScramSha256 {
+// https://www.postgresql.org/docs/14/sasl-authentication.html
+// https://datatracker.ietf.org/doc/html/rfc5802#section-3
+export class SaslScramSha256 {
   _clientFirstMessageBare;
   _serverSignatureB64;
   async start() {
-    const clientNonce = await _crypto.randomBytes(24);
-    this._clientFirstMessageBare = 'n=,r=' + _crypto.b64encode(clientNonce);
+    const clientNonce = await this._randomBytes(24);
+    this._clientFirstMessageBare = 'n=,r=' + this._b64encode(clientNonce);
     return 'n,,' + this._clientFirstMessageBare;
   }
   async continue(serverFirstMessage, password) {
     const utf8enc = new TextEncoder();
     const { 'i': iterations, 's': saltB64, 'r': nonceB64 } = this._parseMsg(serverFirstMessage);
     const finalMessageWithoutProof = 'c=biws,r=' + nonceB64;
-    const salt = _crypto.b64decode(saltB64);
+    const salt = this._b64decode(saltB64);
     const passwordUtf8 = utf8enc.encode(password.normalize());
-    const saltedPassword = await _crypto.sha256pbkdf2(passwordUtf8, salt, +iterations, 32);
-    const clientKey = await _crypto.sha256hmac(saltedPassword, utf8enc.encode('Client Key'));
-    const storedKey = await _crypto.sha256(clientKey);
+    const saltedPassword = await this._hi(passwordUtf8, salt, +iterations);
+    const clientKey = await this._hmac(saltedPassword, utf8enc.encode('Client Key'));
+    const storedKey = await this._hash(clientKey);
     const authMessage = utf8enc.encode(
       this._clientFirstMessageBare + ',' +
       serverFirstMessage + ',' +
       finalMessageWithoutProof
     );
-    const clientSignature = await _crypto.sha256hmac(storedKey, authMessage);
+    const clientSignature = await this._hmac(storedKey, authMessage);
     const clientProof = xor(clientKey, clientSignature);
-    const serverKey = await _crypto.sha256hmac(saltedPassword, utf8enc.encode('Server Key'));
-    this._serverSignatureB64 = _crypto.b64encode(await _crypto.sha256hmac(serverKey, authMessage));
-    return finalMessageWithoutProof + ',p=' + _crypto.b64encode(clientProof);
+    const serverKey = await this._hmac(saltedPassword, utf8enc.encode('Server Key'));
+    const serverSignature = await this._hmac(serverKey, authMessage);
+    this._serverSignatureB64 = this._b64encode(serverSignature);
+    return finalMessageWithoutProof + ',p=' + this._b64encode(clientProof);
 
     function xor(a, b) {
       return Uint8Array.from(a, (ai, i) => ai ^ b[i]);
@@ -2440,6 +2443,31 @@ class SaslScramSha256 {
   }
   _parseMsg(msg) { // parses `key1=val,key2=val` into object
     return Object.fromEntries(msg.split(',').map(it => /^(.*?)=(.*)$/.exec(it).slice(1)));
+  }
+
+  _b64encode(bytes) {
+    return btoa(String.fromCharCode(...bytes));
+  }
+  _b64decode(b64) {
+    return Uint8Array.from(atob(b64), x => x.charCodeAt());
+  }
+  async _randomBytes(n) {
+    return crypto.getRandomValues(new Uint8Array(n));
+  }
+  async _hash(val) {
+    return new Uint8Array(await crypto.subtle.digest('SHA-256', val));
+  }
+  async _hmac(key, inp) {
+    const hmacParams = { name: 'HMAC', hash: 'SHA-256' };
+    const importedKey = await crypto.subtle.importKey('raw', key, hmacParams, false, ['sign']);
+    const buf = await crypto.subtle.sign('HMAC', importedKey, inp);
+    return new Uint8Array(buf);
+  }
+  async _hi(pwd, salt, iterations) {
+    const cryptoKey = await crypto.subtle.importKey('raw', pwd, 'PBKDF2', false, ['deriveBits']);
+    const pbkdf2params = { name: 'PBKDF2', hash: 'SHA-256', salt, iterations };
+    const buf = await crypto.subtle.deriveBits(pbkdf2params, cryptoKey, 32 * 8);
+    return new Uint8Array(buf);
   }
 }
 
@@ -2590,33 +2618,5 @@ export const _net = {
       if (err instanceof Deno.errors.BadResource) return; // already closed
       throw err;
     }
-  },
-};
-
-// for scram-sha-256
-export const _crypto = {
-  b64encode(bytes) {
-    return btoa(String.fromCharCode(...bytes));
-  },
-  b64decode(b64) {
-    return Uint8Array.from(atob(b64), x => x.charCodeAt());
-  },
-  async randomBytes(n) {
-    return crypto.getRandomValues(new Uint8Array(n));
-  },
-  async sha256(val) {
-    return new Uint8Array(await crypto.subtle.digest('SHA-256', val));
-  },
-  async sha256hmac(key, inp) {
-    const hmacParams = { name: 'HMAC', hash: 'SHA-256' };
-    const importedKey = await crypto.subtle.importKey('raw', key, hmacParams, false, ['sign']);
-    const buf = await crypto.subtle.sign('HMAC', importedKey, inp);
-    return new Uint8Array(buf);
-  },
-  async sha256pbkdf2(pwd, salt, iterations, nbytes) {
-    const cryptoKey = await crypto.subtle.importKey('raw', pwd, 'PBKDF2', false, ['deriveBits']);
-    const pbkdf2params = { name: 'PBKDF2', hash: 'SHA-256', salt, iterations };
-    const buf = await crypto.subtle.deriveBits(pbkdf2params, cryptoKey, nbytes * 8);
-    return new Uint8Array(buf);
   },
 };

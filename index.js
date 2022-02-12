@@ -3,7 +3,7 @@ import tls from 'tls';
 import { createHash, createHmac, pbkdf2 as _pbkdf2, randomFill as _randomFill } from 'crypto';
 import { once } from 'events';
 import { promisify } from 'util';
-import { _net, _crypto } from './mod.js';
+import { _net, SaslScramSha256 } from './mod.js';
 export * from './mod.js';
 
 const randomFill = promisify(_randomFill);
@@ -43,31 +43,6 @@ Object.assign(_net, {
   closeNullable(socket) {
     if (!socket) return;
     return SocketAdapter.get(socket).close();
-  },
-});
-
-// for scram-sha-256
-Object.assign(_crypto, {
-  b64encode(bytes) {
-    return Buffer.from(bytes).toString('base64');
-  },
-  b64decode(b64) {
-    return Uint8Array.from(Buffer.from(b64, 'base64'));
-  },
-  async randomBytes(n) {
-    const buf = new Uint8Array(n);
-    await randomFill(buf);
-    return buf;
-  },
-  async sha256(val) {
-    return Uint8Array.from(createHash('sha256').update(val).digest());
-  },
-  async sha256hmac(key, inp) {
-    return Uint8Array.from(createHmac('sha256', key).update(inp).digest());
-  },
-  async sha256pbkdf2(pwd, salt, iterations, nbytes) {
-    const buf = await pbkdf2(pwd, salt, iterations, nbytes, 'sha256');
-    return Uint8Array.from(buf);
   },
 });
 
@@ -131,3 +106,27 @@ class SocketAdapter {
     this._socket.destroy();
   }
 }
+
+Object.assign(SaslScramSha256.prototype, {
+  _b64encode(bytes) {
+    return Buffer.from(bytes).toString('base64');
+  },
+  _b64decode(b64) {
+    return Uint8Array.from(Buffer.from(b64, 'base64'));
+  },
+  async _randomBytes(n) {
+    const buf = new Uint8Array(n);
+    await randomFill(buf);
+    return buf;
+  },
+  async _hash(val) {
+    return Uint8Array.from(createHash('sha256').update(val).digest());
+  },
+  async _hmac(key, inp) {
+    return Uint8Array.from(createHmac('sha256', key).update(inp).digest());
+  },
+  async _hi(pwd, salt, iterations) {
+    const buf = await pbkdf2(pwd, salt, iterations, 32, 'sha256');
+    return Uint8Array.from(buf);
+  },
+});

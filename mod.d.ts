@@ -12,10 +12,15 @@ export interface PgConnectKnownOptions {
   readonly database?: string | Uint8Array;
   readonly replication?: string | Uint8Array;
   readonly application_name?: string | Uint8Array;
-  readonly _debug?: boolean;
+  readonly _sslmode?: 'require' | 'prefer' | 'allow' | 'disable' | null;
+  readonly _sslrootcert: string;
+  /** Connection attempts duration in seconds.
+   * If 0 (default) then only one connection attempt will be made. */
+  readonly _connectRetry?: number;
   readonly _wakeInterval?: number;
   readonly _poolSize?: number;
   readonly _poolIdleTimeout?: number;
+  readonly _debug?: boolean;
 }
 
 export interface PgClient {
