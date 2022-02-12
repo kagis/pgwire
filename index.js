@@ -3,14 +3,11 @@ import tls from 'tls';
 import { createHash, createHmac, pbkdf2 as _pbkdf2, randomFill as _randomFill } from 'crypto';
 import { once } from 'events';
 import { promisify } from 'util';
-import perf_hooks from 'perf_hooks';
-import { _performance, _net, _crypto } from './mod.js';
+import { _net, _crypto } from './mod.js';
 export * from './mod.js';
 
 const randomFill = promisify(_randomFill);
 const pbkdf2 = promisify(_pbkdf2);
-
-_performance.now = _ => perf_hooks.performance.now();
 
 Object.assign(_net, {
   async connect({ hostname, port }) {

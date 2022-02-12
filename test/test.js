@@ -1411,11 +1411,14 @@ export function setup({
   });
 
   _test('wake', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0');
-    console.log('-');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
+      _wakeInterval: 2,
+      _debug: 0,
+    });
+    console.log('.');
     try {
-      const stream = conn.query(
-        { statement: /*sql*/ `prepare q as select now() from pg_sleep(0.8)` },
+      const stream = conn.stream(
+        { statement: /*sql*/ `prepare q as select statement_timestamp() from pg_sleep(1.5)` },
         { statement: /*sql*/ `execute q;` },
         { message: 'Flush' },
         { statement: /*sql*/ `execute q;` },
@@ -1441,13 +1444,35 @@ export function setup({
         { statement: /*sql*/ `execute q;` },
       );
       let i = 0;
+      console.time('chunk');
       for await (const chunk of stream) {
-        console.log(chunk.tag, chunk.rows);
-
-        if (i++ > 5) {
-          conn._abortCtl.abort();
-        }
+        console.timeLog('chunk', chunk.tag, chunk.rows);
       }
+    } finally {
+      await conn.end();
+    }
+  });
+
+
+  _test('wake2', async _ => {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
+      _wakeInterval: 2,
+      _debug: 0,
+    });
+    console.log('.');
+    try {
+      const stream = conn.stream(/*sql*/ `
+        select i
+        from generate_series(0, 9999999) i
+      `);
+      let i = 0;
+      for await (const chunk of stream) {
+        if (chunk.tag == 'wake') {
+          console.log('wake', i);
+        }
+        i++;
+      }
+      console.log(i);
     } finally {
       await conn.end();
     }

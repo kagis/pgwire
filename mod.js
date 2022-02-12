@@ -230,16 +230,17 @@ class PgConnection {
     this._sslrootcert = sslrootcert;
     this._ssl = null;
     this._connectRetry = Math.max(_connectRetry, 0);
-    this._startTime = 0;
+    this._connectRetryEnabled = false;
+    this._connectRetryTimer = null;
     this._socket = null;
     this._backendKeyData = null;
     this._lastErrorResponse = null;
     this._queuedResponseChannels = [];
     this._currResponseChannel = null;
     this._transactionStatus = null;
-    this._lastPullTime = 0; // TODO _wakeSupress
-    this._wakeInterval = Math.max(_wakeInterval, 0) * 1000;
-    this._wakeTimer = 0;
+    this._wakeSupress = true;
+    this._wakeInterval = Math.max(_wakeInterval, 0);
+    this._wakeTimer = null;
     this._rowColumns = null; // last RowDescription
     this._rowTextDecoder = new TextDecoder('utf-8', { fatal: true });
     this._copyingOut = false;
@@ -255,7 +256,7 @@ class PgConnection {
     this._whenReady.catch(Boolean);
     this._saslScramSha256 = null;
     this._authok = false;
-    // create StartupMessage here to validate startupOptions in constructor call stack
+    // create StartupMessage here to validate options in constructor call stack
     this._startupmsg = new FrontendMessage.StartupMessage({
       // remove underscored options
       ...Object.fromEntries(
@@ -264,7 +265,7 @@ class PgConnection {
       ),
       'client_encoding': 'UTF8', // TextEncoder supports UTF8 only, so hardcode and force UTF8
       // client_encoding: 'win1251',
-    })
+    });
     this._pipeFemsgqPromise = null;
     this._ioloopPromise = null;
   }
@@ -373,10 +374,6 @@ class PgConnection {
         if (done) break;
         this._throwIfQueryAborted(signal);
         yield value;
-        // We will send 'wake' message if _lastPullTime is older
-        // than _wakeInterval, so user have a chance to break loop
-        // when response is stuck.
-        this._lastPullTime = _performance.now();
       }
     } catch (err) {
       stdinSignal.reason = err;
@@ -453,6 +450,7 @@ class PgConnection {
   }
   destroy(destroyReason) {
     clearInterval(this._wakeTimer);
+    clearTimeout(this._connectRetryTimer);
     // TODO it can be overwritten in ioloop.
     // It used for PgConnection.pid wich is used to
     // determine if connection is alive.
@@ -508,7 +506,15 @@ class PgConnection {
     }
   }
   async _ioloop() {
-    this._startTime = _performance.now();
+    if (this._connectRetry > 0) {
+      this._connectRetryEnabled = true;
+      // avoid use of Date.now because not monitonic
+      // avoid use of perfomance.now because nodejs compatibility
+      this._connectRetryTimer = setTimeout(
+        _ => this._connectRetryEnabled = false,
+        this._connectRetry * 1000,
+      );
+    }
     try {
       while (await this._ioloopAttempt());
       // Connection should be already ended at this point,
@@ -534,10 +540,7 @@ class PgConnection {
     try {
       this._socket = await _net.connect(this._connectOptions);
     } catch (err) {
-      if (
-        _net.reconnectable(err) &&
-        this._connectRetry * 1000 > _performance.now() - this._startTime
-      ) {
+      if (_net.reconnectable(err) && this._connectRetryEnabled) {
         this._log(err);
         this._log('retrying connection');
         await this._connectRetryPause();
@@ -563,10 +566,8 @@ class PgConnection {
       }
 
       if (this._lastErrorResponse && !this._authok) {
-        if (
-          this._lastErrorResponse.code == '57P03' && // cannot_connect_now
-          this._connectRetry > _performance.now() - this._startTime
-        ) {
+        // cannot_connect_now
+        if (this._lastErrorResponse.code == '57P03' && this._connectRetryEnabled) {
           this._log('retrying connection');
           await this._connectRetryPause();
           this._lastErrorResponse = null; // prevent throw
@@ -716,7 +717,7 @@ class PgConnection {
         pnext = stack[0].next();
       }
     } catch (err) {
-      // iterator.return() will wait until tx.end()
+      // _femsgq.return() will wait until _femsgq.end()
       // so we need to destroy connection here to prevent deadlock.
       this.destroy(err);
     } finally {
@@ -791,12 +792,14 @@ class PgConnection {
       batch.buf = batch.buf.subarray(batch.pos);
       batch.pos = 0;
       batch.copies = [];
+      this._wakeSupress = true;
       await this._currResponseChannel.push(copyChunk);
     }
     if (batch.rows.length) {
       const rowsChunk = new PgChunk();
       rowsChunk.tag = 'DataRow';
       rowsChunk.rows = batch.rows;
+      this._wakeSupress = true;
       await this._currResponseChannel.push(rowsChunk);
       batch.rows = [];
     }
@@ -907,14 +910,7 @@ class PgConnection {
     this._saslScramSha256.finish(utf8dec.decode(data));
     this._saslScramSha256 = null;
   }
-  _recvAuthenticationOk() {
-    // we dont need password anymore, its more secure to forget it
-    this._password = null;
-    // TODO we can receive ErrorResponse after AuthenticationOk
-    // and if we going to implement connectRetry in Connection
-    // then we still need _password here
-  }
-
+  _recvAuthenticationOk() {}
   _recvErrorResponse(_, payload) {
     this._lastErrorResponse = payload;
     this._copyingOut = false;
@@ -932,11 +928,16 @@ class PgConnection {
     }
   }
   _startupComplete() {
+    // we dont need password anymore, its more secure to forget it
+    this._password = null;
     // TODO we should check that server does not cheat with message order when SASL used
     this._resolveReady();
     this._pipeFemsgqPromise = this._pipeFemsgq();
-    if (this._wakeInterval) {
-      this._wakeTimer = setInterval(this._wakeThrottled.bind(this), this._wakeInterval);
+    if (this._wakeInterval > 0) {
+      this._wakeTimer = setInterval(
+        this._wakeIfStuck.bind(this),
+        this._wakeInterval * 1000,
+      );
     }
   }
   async _startResponse(m) {
@@ -974,10 +975,17 @@ class PgConnection {
     const chunk = new PgChunk();
     chunk.tag = tag;
     chunk.payload = payload;
+    this._wakeSupress = true;
     await this._currResponseChannel.push(chunk);
   }
-  _wakeThrottled() {
-    if (this._lastPullTime + this._wakeInterval > _performance.now()) return;
+  _wakeIfStuck() {
+    // We will send 'wake' chunk if response
+    // is stuck longer then _wakeInterval
+    // so user have a chance to break loop
+    if (this._wakeSupress) {
+      this._wakeSupress = false;
+      return;
+    }
     this._wake();
   }
   _wake() {
@@ -2544,10 +2552,6 @@ function md5(/** @type {Uint8Array} */ input) {
     return (x << n) | (x >>> (32 - n));
   }
 }
-
-export const _performance = {
-  now: _ => performance.now(),
-};
 
 export const _net = {
   async connect(options) {
