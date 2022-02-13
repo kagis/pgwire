@@ -183,7 +183,7 @@ export interface ReplicationStream extends AsyncIterable<ReplicationChunk> {
   /**
    * Decodes {@link ReplicationMessage.data} and yields upgraded pgoutput packets.
    * Use this method if replication is started with pgoutput slot. */
-  pgoutputDecode(): AsyncIterable<PgoChunk>;
+  pgoutputDecode(): AsyncIterable<PgotputChunk>;
 }
 
 export interface ReplicationChunk {
@@ -203,12 +203,12 @@ export interface ReplicationMessage {
    readonly data: Uint8Array;
 }
 
-export interface PgoChunk extends ReplicationChunk {
-  readonly messages: PgoMessage[];
+export interface PgotputChunk extends ReplicationChunk {
+  readonly messages: PgoutputMessage[];
 }
 
 /** https://www.postgresql.org/docs/14/protocol-logicalrep-message-formats.html */
-export type PgoMessage = (
+export type PgoutputMessage = (
   | PgoutputBegin
   | PgoutputCommit
   | PgoutputRelation
@@ -216,16 +216,21 @@ export type PgoMessage = (
   | PgoutputUpdate
   | PgoutputDelete
   | PgoutputTruncate
+  | PgoutputCustomMessage
 );
 
 export interface PgoutputBegin extends ReplicationMessage {
   readonly tag: 'begin';
   /** https://github.com/postgres/postgres/blob/27b77ecf9f4d5be211900eda54d8155ada50d696/src/include/replication/reorderbuffer.h#L275 */
-  readonly finalLsn: string;
+  readonly commitLsn: string;
+  readonly commitTime: bigint;
+  readonly xid: number;
 }
 
 export interface PgoutputCommit extends ReplicationMessage {
   readonly tag: 'commit';
+  readonly commitLsn: string;
+  readonly commitTime: bigint;
 }
 
 export interface PgoutputRelation extends ReplicationMessage {
@@ -288,6 +293,14 @@ export interface PgoutputTruncate extends ReplicationMessage {
   readonly restartIdentity: boolean;
   /** Truncated relations. */
   readonly relations: PgoutputRelation[];
+}
+
+export interface PgoutputCustomMessage extends ReplicationMessage {
+  readonly tag: 'message';
+  readonly transactional: boolean;
+  readonly messageLsn: string;
+  readonly prefix: string;
+  readonly content: Uint8Array;
 }
 
 /** https://www.postgresql.org/docs/14/protocol-error-fields.html */
