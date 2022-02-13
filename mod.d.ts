@@ -21,12 +21,11 @@ export interface PgConnectKnownOptions {
 
   // underscore parameters are pgwire specific parameters
 
-  /** Connection attempts duration in seconds.
-   * If 0 (default) then only one connection attempt will be made. */
+  /** Connection attempts duration. If 0 (default) then only one connection attempt will be made. */
   readonly _connectRetry?: number;
   readonly _wakeInterval?: number;
-  readonly _poolSize?: number;
   readonly _poolIdleTimeout?: number;
+  readonly _poolSize?: number;
   readonly _debug?: boolean;
 }
 

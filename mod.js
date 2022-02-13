@@ -90,7 +90,7 @@ class PgPool {
     // then query will be rejected with error.
     // We should be ready to repeat query in this case
     // and this is more difficult to implement than client side timeout
-    this._poolIdleTimeout = Math.max(options._poolIdleTimeout, 0);
+    this._poolIdleTimeout = Math.max(millis(options._poolIdleTimeout), 0);
   }
   query(...args) {
     return PgResult.fromStream(this.stream(...args));
@@ -200,7 +200,7 @@ class PgPool {
     }
 
     if (this._poolIdleTimeout && !conn.pending /* is idle */) {
-      conn._poolTimeoutId = setTimeout(this._onConnectionTimeout, this._poolIdleTimeout * 1000, this, conn);
+      conn._poolTimeoutId = setTimeout(this._onConnectionTimeout, this._poolIdleTimeout, this, conn);
     }
   }
   _onConnectionTimeout(_self, conn) {
@@ -216,7 +216,7 @@ class PgConnection {
   constructor({
     hostname, port, password, sslmode, sslrootcert,
     _connectRetry = 0,
-    _wakeInterval = 2,
+    _wakeInterval = 2000,
     _debug = false,
     ...options
   }) {
@@ -229,8 +229,7 @@ class PgConnection {
     this._sslmode = sslmode;
     this._sslrootcert = sslrootcert;
     this._ssl = null;
-    this._connectRetry = Math.max(_connectRetry, 0);
-    this._connectRetryEnabled = false;
+    this._connectRetry = Math.max(millis(_connectRetry), 0);
     this._connectRetryTimer = null;
     this._socket = null;
     this._backendKeyData = null;
@@ -239,7 +238,7 @@ class PgConnection {
     this._currResponseChannel = null;
     this._transactionStatus = null;
     this._wakeSupress = true;
-    this._wakeInterval = Math.max(_wakeInterval, 0);
+    this._wakeInterval = Math.max(millis(_wakeInterval), 0);
     this._wakeTimer = null;
     this._rowColumns = null; // last RowDescription
     this._rowTextDecoder = new TextDecoder('utf-8', { fatal: true });
@@ -507,12 +506,11 @@ class PgConnection {
   }
   async _ioloop() {
     if (this._connectRetry > 0) {
-      this._connectRetryEnabled = true;
       // avoid use of Date.now because not monitonic
       // avoid use of perfomance.now because nodejs compatibility
       this._connectRetryTimer = setTimeout(
-        _ => this._connectRetryEnabled = false,
-        this._connectRetry * 1000,
+        _ => this._connectRetryTimer = null,
+        this._connectRetry,
       );
     }
     try {
@@ -540,7 +538,7 @@ class PgConnection {
     try {
       this._socket = await _net.connect(this._connectOptions);
     } catch (err) {
-      if (_net.reconnectable(err) && this._connectRetryEnabled) {
+      if (_net.reconnectable(err) && this._connectRetryTimer) {
         this._log(err);
         this._log('retrying connection');
         await this._connectRetryPause();
@@ -567,7 +565,7 @@ class PgConnection {
 
       if (this._lastErrorResponse && !this._authok) {
         // cannot_connect_now
-        if (this._lastErrorResponse.code == '57P03' && this._connectRetryEnabled) {
+        if (this._lastErrorResponse.code == '57P03' && this._connectRetryTimer) {
           this._log('retrying connection');
           await this._connectRetryPause();
           this._lastErrorResponse = null; // prevent throw
@@ -936,7 +934,7 @@ class PgConnection {
     if (this._wakeInterval > 0) {
       this._wakeTimer = setInterval(
         this._wakeIfStuck.bind(this),
-        this._wakeInterval * 1000,
+        this._wakeInterval,
       );
     }
   }
@@ -2343,6 +2341,19 @@ class PgType {
 function lsnMakeComparable(text) {
   const [h, l] = text.split('/');
   return h.padStart(8, '0') + '/' + l.padStart(8, '0');
+}
+
+function millis(inp) {
+  if (typeof inp == 'number') return inp;
+  if (typeof inp != 'string') return;
+  inp = inp.trim().toLowerCase();
+  const [unit] = /[a-z]*$/i.exec(inp);
+  const num = Number.parseFloat(inp);
+  if (!unit || unit == 'ms') return num;
+  if (unit == 's') return num * 1000;
+  if (unit == 'min') return num * 1000 * 60;
+  if (unit == 'h') return num * 1000 * 60 * 60;
+  if (unit == 'd') return num * 1000 * 60 * 60 * 24;
 }
 
 class Channel {

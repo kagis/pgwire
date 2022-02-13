@@ -1238,17 +1238,20 @@ export function setup({
   // });
 
   test('pool idle timeout', async _ => {
-    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1&_poolIdleTimeout=1');
+    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1&_poolIdleTimeout=1s');
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const [pid] = await pool.query(/*sql*/ `select pg_backend_pid()`);
       assertEquals(typeof pid, 'number');
-      const [alive] = await pool.query(/*sql*/ `select exists (select from pg_stat_activity where pid = ${pid})`);
+      await delay(100);
+      const [alive] = await conn.query(/*sql*/ `select exists (select from pg_stat_activity where pid = ${pid})`);
       assertEquals(alive, true);
       await delay(2000);
-      const [stilAlive] = await pool.query(/*sql*/ `select exists (select from pg_stat_activity where pid = ${pid})`);
+      const [stilAlive] =  await conn.query(/*sql*/ `select exists (select from pg_stat_activity where pid = ${pid})`);
       assertEquals(stilAlive, false);
     } finally {
       await pool.end();
+      await conn.end();
     }
   });
 
@@ -1519,7 +1522,7 @@ export function setup({
     async function client(aborter) {
       let conn;
       try {
-        conn = await pgconnect('postgres://pgwire@127.0.0.1:5433/postgres?_connectRetry=10&_debug=0');
+        conn = await pgconnect('postgres://pgwire@127.0.0.1:5433/postgres?_connectRetry=10s&_debug=0');
         const [health] = await conn.query(/*sql*/ `select 'ok'`);
         assertEquals(health, 'ok');
       } finally {
@@ -1528,12 +1531,23 @@ export function setup({
       }
     }
     async function server(signal) {
-      await delay(1000);
+      await delay(4000);
       await tcpproxy({
         listen: { hostname: '127.0.0.1', port: 5433 },
         target: { hostname: 'pgwssl', port: 5432 },
         signal,
       });
+    }
+  });
+
+  _test('idle_session_timeout', async _ => {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?idle_session_timeout=2s&_debug=1');
+    try {
+      const [health0] = await conn.query(/*sql*/ `select 'ok'`);
+      await delay(10_000);
+      const [health1] = await conn.query(/*sql*/ `select 'ok'`);
+    } finally {
+      await conn.end();
     }
   });
 
