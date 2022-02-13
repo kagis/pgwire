@@ -76,8 +76,8 @@ class SocketAdapter {
       if (this._error) throw this._error; // TODO callstack
       if (this._socket.readableEnded) return null;
       buf = this._socket.read();
-      if (buf) break;
-      await new Promise(this._readPauseAsync);
+      if (buf?.length) break;
+      if (!buf) await new Promise(this._readPauseAsync);
     }
     if (buf.length > out.length) {
       out.set(buf.subarray(0, out.length));
