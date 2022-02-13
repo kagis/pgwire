@@ -7,13 +7,20 @@ export type PgConnectOptions = string | URL | PgConnectKnownOptions & Record<str
 export interface PgConnectKnownOptions {
   readonly hostname?: string;
   readonly port?: number;
-  readonly user?: string | Uint8Array;
+  readonly sslmode?: 'require' | 'prefer' | 'allow' | 'disable' | null;
+  // readonly sslrootcert?: string;
   readonly password?: string | Uint8Array;
+
+  // these parameters are included in StatupMessage,
+  // any runtime config parameters are allowed
+  // https://www.postgresql.org/docs/14/runtime-config-client.html
+  readonly user?: string | Uint8Array;
   readonly database?: string | Uint8Array;
   readonly replication?: string | Uint8Array;
   readonly application_name?: string | Uint8Array;
-  readonly _sslmode?: 'require' | 'prefer' | 'allow' | 'disable' | null;
-  readonly _sslrootcert: string;
+
+  // underscore parameters are pgwire specific parameters
+
   /** Connection attempts duration in seconds.
    * If 0 (default) then only one connection attempt will be made. */
   readonly _connectRetry?: number;
@@ -60,6 +67,7 @@ export interface PgConnection extends PgClient {
   /** ID of postgres backend process. */
   readonly pid: number | null;
   readonly inTransaction: number | null;
+  readonly ssl: boolean | null;
   /** Notification handler */
   onnotification: (n: PgNotification) => void;
   parameters: Record<string,string>;
