@@ -1278,11 +1278,11 @@ export function setup({
     }
   });
 
-  _test('pool should destroy ephemeral conns when _poolSize=0', async _ => {
+  test('pool should destroy ephemeral conns when _poolSize=0', async _ => {
     const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=0');
     const [loid] = await pool.query(/*sql*/ `select lo_from_bytea(0, 'initial')`);
     // assertEquals(typeof loid, 'number'); // TODO register oid type
-    const resp = pool.query(/*sql*/ `
+    const resp = pool.stream(/*sql*/ `
       select lo_put(${loid}, 0, 'started'); commit;
       select lo_put(${loid}, 0, 'completed') from pg_sleep(5);
     `);
@@ -1298,6 +1298,23 @@ export function setup({
       const [lo] = await conn.query(/*sql*/ `select convert_from(lo_get(${loid}), 'sql_ascii')`);
       // destroyed query should be started but not completed
       assertEquals(lo, 'started');
+    } finally {
+      await conn.end();
+    }
+  });
+
+  test('pool end should wait until all connections destroyed', async _ => {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    try {
+      const [loid] = await conn.query(/*sql*/ `select lo_from_bytea(0, 'initial')`);
+      const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=0');
+      const [, [p1], [p2]] = await Promise.all([
+        pool.query(/*sql*/ `select lo_put(${loid}, 0, 'completed') from pg_sleep(1)`),
+        pool.end().then(_ => conn.query(/*sql*/ `select convert_from(lo_get(${loid}), 'sql_ascii')`)),
+        pool.end().then(_ => conn.query(/*sql*/ `select convert_from(lo_get(${loid}), 'sql_ascii')`)),
+      ]);
+      assertEquals(p1, 'completed');
+      assertEquals(p2, 'completed');
     } finally {
       await conn.end();
     }

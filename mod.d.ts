@@ -22,9 +22,9 @@ export interface PgConnectKnownOptions {
   // underscore parameters are pgwire specific parameters
 
   /** Connection attempts duration. If 0 (default) then only one connection attempt will be made. */
-  readonly _connectRetry?: number;
-  readonly _wakeInterval?: number;
-  readonly _poolIdleTimeout?: number;
+  readonly _connectRetry?: number | string;
+  readonly _wakeInterval?: number | string;
+  readonly _poolIdleTimeout?: number | string;
   readonly _poolSize?: number;
   readonly _debug?: boolean;
 }
@@ -55,8 +55,6 @@ export interface PgClient {
    * before `.destroy`
    * @returns reason back so you can destroy and throw in one line. */
   destroy<R>(reason?: R): R;
-  /** Resolves when no new quieries can be emitted and client is about to terminate. */
-  readonly whenEnded: Promise<void>;
   /** Number of pending queries. */
   readonly pending: number;
 }

@@ -103,7 +103,7 @@ class SocketAdapter {
   //   await socket_end();
   // }
   close() {
-    this._socket.destroy();
+    this._socket.destroy(Error('socket destroyed'));
   }
 }
 

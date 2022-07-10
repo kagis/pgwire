@@ -22,6 +22,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 /// <reference types="./mod.d.ts" />
 
+// TODO abort signal (connectRetry)
 export async function pgconnect(...optionsChain) {
   const conn = pgconnection(...optionsChain);
   await conn.start();
@@ -80,6 +81,7 @@ function computeConnectionOptions([uriOrObj, ...rest]) {
 class PgPool {
   // TODO whenEnded, pending
   constructor(options) {
+    /** @type {Set<PgConnection>} */
     this._connections = new Set();
     this._endReason = null;
     this._options = options;
@@ -123,13 +125,12 @@ class PgPool {
     await this._recycleConnection(conn);
   }
   async end() {
-    // TODO should await all pending queries when _poolSize = 0 ?
-    if (this._endReason) return; // TODO await connections end
-    this._endReason = new PgError({ message: 'Postgres connection pool ended' });
+    if (!this._endReason) {
+      this._endReason = new PgError({ message: 'Postgres connection pool ended' });
+    }
     await Promise.all(Array.from(this._connections, conn => conn.end()));
   }
   destroy(destroyReason) {
-    // TODO should destroy connections when _poolSize = 0
     if (!(destroyReason instanceof Error)) {
       destroyReason = new PgError({
         message: 'Postgres connection pool destroyed',
@@ -143,28 +144,24 @@ class PgPool {
     return destroyReason;
   }
   _getConnection() {
-    if (!this._poolSize) {
-      return new PgConnection(this._options);
-    }
-    let leastBusyConn;
-    for (const conn of this._connections) {
-      if (!(leastBusyConn?.pending < conn.pending)) {
-        leastBusyConn = conn;
+    // try to reuse connection
+    if (this._poolSize > 0) {
+      const queryableConns = Array.from(this._connections).filter(conn => conn.queryable);
+      const full = queryableConns.length >= this._poolSize;
+      const [leastBusyConn] = queryableConns.sort((a, b) => a.pending - b.pending);
+      if (leastBusyConn?.pending == 0 || full) {
+        clearTimeout(leastBusyConn._poolTimeoutId);
+        return leastBusyConn;
       }
-    }
-    const hasSpaceForNewConnection = this._connections.size < this._poolSize;
-    if (leastBusyConn?.pending == 0 || !hasSpaceForNewConnection) {
-      clearTimeout(leastBusyConn._poolTimeoutId);
-      return leastBusyConn;
     }
     const newConn = new PgConnection(this._options);
     newConn._poolTimeoutId = null; // TODO check whether it disables v8 hidden class optimization
     this._connections.add(newConn);
-    newConn.whenEnded.then(this._onConnectionEnded.bind(this, newConn));
+    newConn.whenDestroyed.then(this._onConnectionEnded.bind(this, newConn));
     return newConn;
   }
   async _recycleConnection(conn, queryError) {
-    if (!this._poolSize) {
+    if (!(this._poolSize > 0)) {
       // TODO not wait
       // but pgbouncer does not allow async Terminate anyway.
       // May be other poolers do
@@ -185,7 +182,7 @@ class PgPool {
       // + 'begin' causes notice warning when in transaction.
       // - will be not executed as single query when connection is errored in transaction
 
-      // TODO check if query pipelining actually improves perfomance
+      // TODO check if query pipelining actually improves performance
 
       // Next query can be already executed and can modify db
       // so destroying connection cannot prevent next query execution.
@@ -205,6 +202,7 @@ class PgPool {
   }
   _onConnectionTimeout(_self, conn) {
     conn.end();
+    // TODO conn.destroy() if .end() stuck?
   }
   _onConnectionEnded(conn) {
     clearTimeout(conn._poolTimeoutId);
@@ -257,7 +255,9 @@ class PgConnection {
     this._authok = false;
     // create StartupMessage here to validate options in constructor call stack
     this._startupmsg = new FrontendMessage.StartupMessage({
-      // remove underscored options
+      // Underscored props are used for client only,
+      // Underscore prefix is not supported by postgres anyway
+      // https://github.com/postgres/postgres/blob/REL_14_2/src/backend/utils/misc/guc.c#L5398
       ...Object.fromEntries(
         Object.entries(options)
         .filter(([k]) => !k.startsWith('_'))
@@ -269,14 +269,6 @@ class PgConnection {
     this._ioloopPromise = null;
   }
   async start() {
-    this._ensureIoloop();
-    try {
-      await this._whenReady;
-    } catch (cause) {
-      throw new PgError({ cause });
-    }
-  }
-  _ensureIoloop() {
     if (this._endReason) {
       throw new PgError({
         message: 'Cannot start ended postgres connection',
@@ -284,17 +276,27 @@ class PgConnection {
         cause: this._endReason,
       });
     }
-    if (this._ioloopPromise) return;
-    this._ioloopPromise = this._ioloop();
+    this._ioloopEnsure();
+    try {
+      await this._whenReady;
+    } catch (cause) {
+      throw new PgError({ cause });
+    }
   }
-  /** resolved when no queries can be emitted and connection is about to terminate */
-  get whenEnded() {
-    // TODO private _whenEnded
-    return this._femsgq._whenEnded;
+  _ioloopEnsure() {
+    if (!this._ioloopPromise) {
+      this._ioloopPromise = this._ioloop();
+    }
+  }
+  get whenDestroyed() {
+    return this._femsgq._whenEnded.then(_ => this._ioloopPromise);
   }
   /** number of pending queries */
   get pending() {
     return this._queuedResponseChannels.length;
+  }
+  get queryable() {
+    return !this._endReason;
   }
   get inTransaction() {
     return this._socket && ( // if not destroyed
@@ -351,7 +353,7 @@ class PgConnection {
     }
     this._throwIfQueryAborted(signal);
     const onabort = this._wake.bind(this);
-    // TODO if next two steps throw then abort handler will not be removed.
+    // TODO if next two steps throw error then abort handler will not be removed.
     signal?.addEventListener('abort', onabort);
 
     // TODO This two steps should be executed atomiсally.
@@ -361,7 +363,7 @@ class PgConnection {
     frontendMessages.forEach(this._femsgq.push, this._femsgq);
     this._queuedResponseChannels.push(responseChannel);
 
-    this._ensureIoloop();
+    this._ioloopEnsure();
     try {
       for (;;) {
         // Important to call responseChannel.next() as first step of try block
@@ -416,12 +418,13 @@ class PgConnection {
     }
   }
   _throwIfQueryAborted(signal) {
-    if (!signal?.aborted) return;
-    throw new PgError({
-      code: 'aborted',
-      message: 'Postgres query aborted',
-      cause: signal.reason,
-    });
+    if (signal?.aborted) {
+      throw new PgError({
+        code: 'aborted',
+        message: 'Postgres query aborted',
+        cause: signal.reason,
+      });
+    }
   }
 
   // should immediately close connection for new queries
@@ -451,7 +454,7 @@ class PgConnection {
     clearInterval(this._wakeTimer);
     clearTimeout(this._connectRetryTimer);
     // TODO it can be overwritten in ioloop.
-    // It used for PgConnection.pid wich is used to
+    // It used for PgConnection.pid which is used to
     // determine if connection is alive.
     this._backendKeyData = null;
     if (!(destroyReason instanceof Error)) {
@@ -507,7 +510,7 @@ class PgConnection {
   async _ioloop() {
     if (this._connectRetry > 0) {
       // avoid use of Date.now because not monitonic
-      // avoid use of perfomance.now because nodejs compatibility
+      // avoid use of performance.now because nodejs compatibility
       this._connectRetryTimer = setTimeout(
         _ => this._connectRetryTimer = null,
         this._connectRetry,
@@ -1153,6 +1156,7 @@ async function * wrapCopyData(source, signal) {
   //   return;
   // }
   try {
+    // TODO find a way to abort source
     for await (const chunk of source) {
       if (signal.aborted) {
         throw signal.reason;
@@ -1564,6 +1568,7 @@ class ReplicationStream extends BinaryReader {
   [Symbol.asyncIterator]() {
     return this._iterator;
   }
+  // TODO signal
   async * _start(conn, { slot, startLsn = '0/0', options = {}, ackInterval = 10e3 }) {
     this.ack(startLsn);
 
@@ -1807,14 +1812,14 @@ class PgoutputReader extends BinaryReader {
       const { name, typeOid } = columns[i];
       const kind = this._readUint8();
       switch (kind) {
-        case 0x62 /*b*/: // binary
+        case 0x62: // 'b' binary
           const bsize = this._readInt32();
           const bval = this._read(bsize);
           // dont need to .slice() because new buffer
           // is created for each replication chunk
           tuple[name] = bval;
           break;
-        case 0x74 /*t*/: // text
+        case 0x74: // 't' text
           const valsize = this._readInt32();
           const valbuf = this._read(valsize);
           // TODO lazy decode
@@ -1822,7 +1827,7 @@ class PgoutputReader extends BinaryReader {
           const valtext = this._textDecoder.decode(valbuf);
           tuple[name] = PgType.decode(valtext, typeOid);
           break;
-        case 0x6e /*n*/: // null
+        case 0x6e: // 'n' null
           if (keyOnly) {
             // If value is `null`, then it is definitely not part of key,
             // because key cannot have nulls by documentation.
@@ -1834,7 +1839,7 @@ class PgoutputReader extends BinaryReader {
             tuple[name] = null;
           }
           break;
-        case 0x75 /*u*/: // unchanged toast datum
+        case 0x75: // 'u' unchanged toast datum
           tuple[name] = unchangedToastFallback?.[name];
           break;
         default: throw Error(`uknown attribute kind ${kind}`);
@@ -1891,7 +1896,7 @@ class FrontendMessage {
     return this.constructor.name; // we will use it only for debug logging
   }
 
-  static StartupMessage = class extends FrontendMessage {
+  static StartupMessage = class extends this {
     write(w, size, options) {
       w.writeInt32(size);
       w.writeInt32(0x00030000);
@@ -1902,7 +1907,7 @@ class FrontendMessage {
       w.writeUint8(0);
     }
   }
-  static CancelRequest = class extends FrontendMessage {
+  static CancelRequest = class extends this {
     write(w, _size, { pid, secretKey }) {
       w.writeInt32(16);
       w.writeInt32(80877102); // (1234 << 16) | 5678
@@ -1910,21 +1915,21 @@ class FrontendMessage {
       w.writeInt32(secretKey);
     }
   }
-  static SSLRequest = class extends FrontendMessage {
+  static SSLRequest = class extends this {
     // static inst = new this();
     write(w) {
       w.writeInt32(8);
       w.writeInt32(80877103); // (1234 << 16) | 5679
     }
   }
-  static PasswordMessage = class extends FrontendMessage {
+  static PasswordMessage = class extends this {
     write(w, size, payload) {
       w.writeUint8(0x70); // p
       w.writeInt32(size - 1);
       w.writeString(payload);
     }
   }
-  static SASLInitialResponse = class extends FrontendMessage {
+  static SASLInitialResponse = class extends this {
     write(w, size, { mechanism, data }) {
       w.writeUint8(0x70); // p
       w.writeInt32(size - 1);
@@ -1937,21 +1942,21 @@ class FrontendMessage {
       }
     }
   }
-  static SASLResponse = class extends FrontendMessage {
+  static SASLResponse = class extends this {
     write(w, size, data) {
       w.writeUint8(0x70); // p
       w.writeInt32(size - 1);
       w.write(data);
     }
   }
-  static Query = class extends FrontendMessage {
+  static Query = class extends this {
     write(w, size) {
       w.writeUint8(0x51); // Q
       w.writeInt32(size - 1);
       w.writeString(this.payload);
     }
   }
-  static Parse = class extends FrontendMessage {
+  static Parse = class extends this {
     write(w, size, { statement, statementName = '', paramTypeOids = [] }) {
       w.writeUint8(0x50); // P
       w.writeInt32(size - 1);
@@ -1963,7 +1968,7 @@ class FrontendMessage {
       }
     }
   }
-  static Bind = class extends FrontendMessage {
+  static Bind = class extends this {
     write(w, size, { portal = '', statementName = '', params = [], binary = [] }) {
       w.writeUint8(0x42); // B
       w.writeInt32(size - 1);
@@ -1987,7 +1992,7 @@ class FrontendMessage {
       }
     }
   }
-  static Execute = class extends FrontendMessage {
+  static Execute = class extends this {
     write(w, size, { portal = '', limit = 0 }) {
       w.writeUint8(0x45); // E
       w.writeInt32(size - 1);
@@ -1995,7 +2000,7 @@ class FrontendMessage {
       w.writeUint32(limit);
     }
   }
-  static DescribeStatement = class extends FrontendMessage {
+  static DescribeStatement = class extends this {
     write(w, size, statementName = '') {
       w.writeUint8(0x44); // D
       w.writeInt32(size - 1);
@@ -2003,7 +2008,7 @@ class FrontendMessage {
       w.writeString(statementName);
     }
   }
-  static DescribePortal = class extends FrontendMessage {
+  static DescribePortal = class extends this {
     write(w, size, portal = '') {
       w.writeUint8(0x44); // D
       w.writeInt32(size - 1);
@@ -2011,7 +2016,7 @@ class FrontendMessage {
       w.writeString(portal);
     }
   }
-  static ClosePortal = class extends FrontendMessage {
+  static ClosePortal = class extends this {
     write(w, size, portal = '') {
       w.writeUint8(2); // C
       w.writeInt32(size - 1);
@@ -2019,7 +2024,7 @@ class FrontendMessage {
       w.writeString(portal);
     }
   }
-  static CloseStatement = class extends FrontendMessage {
+  static CloseStatement = class extends this {
     write(w, size, statementName = '') {
       w.writeUint8(2); // C
       w.writeInt32(size - 1);
@@ -2027,7 +2032,7 @@ class FrontendMessage {
       w.writeString(statementName);
     }
   }
-  static Sync = class extends FrontendMessage {
+  static Sync = class extends this {
     // static inst = new this();
     write(w) {
       w.writeUint8(0x53); // S
@@ -2035,35 +2040,35 @@ class FrontendMessage {
     }
   }
   // unused
-  static Flush = class extends FrontendMessage {
+  static Flush = class extends this {
     // static inst = new this();
     write(w) {
       w.writeUint8(0x48); // H
       w.writeInt32(4);
     }
   }
-  static CopyData = class extends FrontendMessage {
+  static CopyData = class extends this {
     write(w, size, data) {
       w.writeUint8(0x64); // d
       w.writeInt32(size - 1);
       w.write(data);
     }
   }
-  static CopyDone = class extends FrontendMessage {
+  static CopyDone = class extends this {
     // static inst = new this();
     write(w) {
       w.writeUint8(0x63); // c
       w.writeInt32(4);
     }
   }
-  static CopyFail = class extends FrontendMessage {
+  static CopyFail = class extends this {
     write(w, size, cause) {
       w.writeUint8(0x66); // f
       w.writeInt32(size - 1);
       w.writeString(cause);
     }
   }
-  static Terminate = class extends FrontendMessage {
+  static Terminate = class extends this {
     // static inst = new this();
     write(w) {
       w.writeUint8(0x58); // X
@@ -2076,7 +2081,7 @@ class MessageWriter {
   static defaultTextEncoder = new TextEncoder();
 
   static async writeMessage(socket, m) {
-    // TODO to big allocation
+    // TODO too big allocation
     const msgw = new this(socket);
     msgw.writeMessage(m);
     await msgw.flush();
@@ -2246,7 +2251,7 @@ class PgType {
       case 3802 /* jsonb   */: return JSON.stringify(value);
       case   17 /* bytea   */: return this._encodeBytea(value); // bytea encoder is used only for array element encoding
     }
-    let elemTypeid = this._elemTypeOid(typeOid);
+    const elemTypeid = this._elemTypeOid(typeOid);
     if (elemTypeid) {
       return this._encodeArray(value, elemTypeid);
     }
@@ -2269,7 +2274,7 @@ class PgType {
       case 3802 /* jsonb   */: return JSON.parse(text);
       case 3220 /* pg_lsn  */: return lsnMakeComparable(text);
     }
-    let elemTypeid = this._elemTypeOid(typeOid);
+    const elemTypeid = this._elemTypeOid(typeOid);
     if (elemTypeid) {
       return this._decodeArray(text, elemTypeid);
     }
