@@ -9,6 +9,7 @@ PostgreSQL client library for Deno and Node.js that exposes all features of wire
 - Copy from stdin and to stdout
 - Query cancellation
 - Implicit-transaction multi-statement queries
+- Listen/Notify
 - Query pipelining, single round trip
 - Efficient bytea transferring
 - Pure js without dependencies
