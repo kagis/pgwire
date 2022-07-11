@@ -338,18 +338,28 @@ class PgConnection {
     const responseChannel = new Channel();
     // Collect outgoing messages into intermediate array
     // to let errors occur before any message enqueued.
-    const frontendMessages = [];
+    const frontendMessages = [
+      // To cancel query we should send CancelRequest _after_
+      // query is received by server and started executing.
+      // But we cannot wait for first chunk because postgres can hold it
+      // for an unpredictably long time. I see no way to make postgres
+      // to flush RowDescription in simple protocol. So we prepend Query message
+      // with Sync to eagerly know when query is started and can be cancelled.
+      // Also it makes possible to determine whether NoticeResponse/ErrorResponse
+      // is asyncronous server message or belongs to query.
+      // (TODO Maybe there is a small window between first ReadyForQuery and actual
+      // query execution, when async messages can be received. Need more source digging)
+      // Seems that this is ok to do Sync during simple protocol
+      // even when replication=database.
+      new FrontendMessage.Sync(),
+    ];
     let signal;
     if (typeof args[0] == 'string') {
       const [simpleSql, simpleOptions] = args;
       signal = simpleOptions?.signal;
       simpleQuery(frontendMessages, stdinSignal, simpleSql, simpleOptions, responseEndLock);
-    } else if (Array.isArray(args[0])) {
-      const [extendedBlocks, extendedOptions] = args;
-      signal = extendedOptions?.signal;
-      extendedQuery(frontendMessages, stdinSignal, extendedBlocks, extendedOptions);
     } else {
-      extendedQuery(frontendMessages, stdinSignal, args);
+      signal = extendedQuery(frontendMessages, stdinSignal, args);
     }
     this._throwIfQueryAborted(signal);
     const onabort = this._wake.bind(this);
@@ -494,7 +504,7 @@ class PgConnection {
         code: 'misuse',
       });
     }
-    let socket = await _net.connect(this._connectOptions);
+    const socket = await _net.connect(this._connectOptions);
     try {
       // TODO ssl support
       // if (this._ssl) {
@@ -1037,19 +1047,6 @@ class PgError extends Error {
 }
 
 function simpleQuery(out, stdinSignal, script, { stdin, stdins = [] } = 0, responseEndLock) {
-  // To cancel query we should send CancelRequest _after_
-  // query is received by server and started executing.
-  // But we cannot wait for first chunk because postgres can hold it
-  // for an unpredictably long time. I see no way to make postgres
-  // to flush RowDescription in simple protocol. So we prepend Query message
-  // with Sync to eagerly know when query is started and can be cancelled.
-  // Also it makes possible to determine whether NoticeResponse/ErrorResponse
-  // is asyncronous server message or belongs to query.
-  // (TODO Maybe there is a small window between first ReadyForQuery and actual
-  // query execution, when async messages can be received. Need more source digging)
-  // Seems that this is ok to do Sync during simple protocol
-  // even when replication=database.
-  out.push(new FrontendMessage.Sync());
   out.push(new FrontendMessage.Query(script));
   // TODO handle case when number of stdins is unknown
   // should block tx and wait for CopyInResponse/CopyBothResponse
@@ -1072,8 +1069,15 @@ function simpleQuery(out, stdinSignal, script, { stdin, stdins = [] } = 0, respo
   }
 }
 function extendedQuery(out, stdinSignal, blocks) {
-  out.push(new FrontendMessage.Sync()); // see top comment in simpleQuery
+  let signalBlock;
   for (const m of blocks) {
+    if (signalBlock !== undefined) {
+      throw Error('signal block must be last block');
+    }
+    if ('signal' in m) {
+      signalBlock = m;
+      continue;
+    }
     switch (m.message) {
       case undefined:
       case null: extendedQueryStatement(out, m, stdinSignal); break;
@@ -1092,6 +1096,7 @@ function extendedQuery(out, stdinSignal, blocks) {
     }
   }
   out.push(new FrontendMessage.Sync());
+  return signalBlock?.signal;
 }
 function extendedQueryStatement(out, { statement, params = [], limit, binary, stdin, noBuffer }, stdinSignal) {
   const paramTypes = params.map(({ type }) => type);

@@ -1413,12 +1413,13 @@ export function setup({
       const abortReason = Error('cause we can');
       setTimeout(_ => abortCtl.abort(abortReason), 1000);
       const caughtError = await (
-        conn.query([
+        conn.query(
           { statement: /*sql*/ `set x.state = 'started'` },
           { statement: /*sql*/ `commit` },
           { statement: /*sql*/ `select from pg_sleep(10)` },
           { statement: /*sql*/ `set x.state = 'completed'` },
-        ], { signal: abortCtl.signal })
+          { signal: abortCtl.signal },
+        )
         .catch(Object)
       );
       assertError(caughtError, 'PgError.aborted');

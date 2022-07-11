@@ -36,14 +36,9 @@ export interface PgClient {
   stream(script: string, options?: PgSimpleQueryOptions): AsyncIterableIterator<PgChunk>;
 
   /** Extended query protocol. */
-  query(statements: Statement[], options?: PgExtendedQueryOptions): Promise<PgResult>;
+  query(...args: Statement[] | [...Statement[], PgExtendedQueryOptions]): Promise<PgResult>;
   /** Extended query protocol. */
-  stream(statements: Statement[], options?: PgExtendedQueryOptions): AsyncIterableIterator<PgChunk>;
-
-  /** Extended query protocol. */
-  query(...statements: Statement[]): Promise<PgResult>;
-  /** Extended query protocol. */
-  stream(...statements: Statement[]): AsyncIterableIterator<PgChunk>;
+  stream(...args: Statement[] | [...Statement[], PgExtendedQueryOptions]): AsyncIterableIterator<PgChunk>;
 
   /** Terminates client gracefully if possible and waits until pending queries complete.
    * New queries will be rejected. Has no effect if client already ended or destroyed. */
@@ -55,12 +50,12 @@ export interface PgClient {
    * before `.destroy`
    * @returns reason back so you can destroy and throw in one line. */
   destroy<R>(reason?: R): R;
-  /** Number of pending queries. */
-  readonly pending: number;
 }
 
 export interface PgConnection extends PgClient {
   logicalReplication(options: LogicalReplicationOptions): ReplicationStream;
+  /** Number of pending queries. */
+  readonly pending: number;
   /** ID of postgres backend process. */
   readonly pid: number | null;
   readonly inTransaction: number | null;
@@ -73,11 +68,11 @@ export interface PgConnection extends PgClient {
 export interface PgSimpleQueryOptions {
   readonly stdin?: AsyncIterable<Uint8Array>;
   readonly stdins?: Iterable<AsyncIterable<Uint8Array>>;
-  readonly signal?: AbortSignal;
+  readonly signal?: AbortSignal | null;
 }
 
 export interface PgExtendedQueryOptions {
-  readonly signal?: AbortSignal;
+  readonly signal?: AbortSignal | null;
 }
 
 export interface PgResult extends Iterable<any> {

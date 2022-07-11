@@ -2,8 +2,6 @@
 
 PostgreSQL client library for Deno and Node.js that exposes all features of wire protocol.
 
-## Features
-
 - Memory efficient data streaming
 - Logical replication, including pgoutput protocol
 - Copy from stdin and to stdout
@@ -179,7 +177,7 @@ assertEquals(products, [
 Postgres wraps multi-statement query into transaction implicitly. Implicit transaction does rollback automatically when error occures or does commit when all statements successfully executed. Multi-statement queries and implicit transactions are described here https://www.postgresql.org/docs/14/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT
 
 Top level `rows` accessor will contain rows returned by last SELECTish statement.
-Iterator accessor will iterate over first row returned by last SELECTish statement
+Iterator accessor will iterate over first row returned by last SELECTish statement.
 
 ```js
 const retval = await client.query(`
@@ -232,63 +230,38 @@ TODO describe chunk shape
 If statement is `COPY ... FROM STDIN` then `stdin` parameter must be set.
 
 ```js
+async function * generateData() {
+  const utf8enc = new TextEncoder();
+  for (let i = 0; i < 2; i++) {
+    yield utf8enc.encode(i + '\t' + 'Mississipi' + '\n');
+  }
+}
+
 await pg.query({
   statement: `COPY foo FROM STDIN`,
-  stdin: fs.createReadableStream('/tmp/file'),
+  stdin: generateData('/tmp/file'),
 });
 ```
 
 # Copy to stdout
 
-`COPY ... TO STDOUT` statement acts like `SELECT` but fills `rows` with `Buffer` instances instead of row tuples.
-
 ```js
-const { rows } = await pg.query({
-  statement: `
-    COPY (
-      SELECT i, 'Mississippi'
-      FROM generate_series(1, 3) i
-    ) TO STDOUT
-  `,
+const upstream = await pg.stream({
+  statement: `COPY foo TO STDOUT`,
 });
 
-const tsv = Buffer.concat(rows).toString();
-console.assert(tsv == (
+const utf8dec = new TextDecoder();
+let result = '';
+for await (const chunk of upstream) {
+  result += utf8dec.decode(chunk);
+}
+
+assertEquals(result,
   '1\tMississippi\n' +
   '2\tMississippi\n' +
   '3\tMississippi\n'
 ));
 ```
-
-Dump table data to TSV file:
-
-```js
-import { pipeline } from 'stream';
-import { promisify } from 'util';
-const ppipeline = promisify(pipeline);
-
-const copyUpstream = client.query({
-  statement: `COPY upstream_table TO STDOUT`,
-});
-await ppipeline(
-  copyUpstream,
-  fs.createWritableStream('/tmp/file.tsv'),
-);
-```
-
-Copy table from one database to another:
-
-```js
-const copyUpstream = clientA.query({
-  statement: `COPY upstream_table TO STDOUT`,
-});
-await clientB.query({
-  statement: `COPY downstream_table FROM STDIN`,
-  stdin: copyUpstream,
-});
-```
-
-Response stream emits boundary chunks at start and end of stream, but this chunks are ignored by piped writable stream since boundary chunks inherited from empty `Buffer`.
 
 # Listen and Notify
 
@@ -304,6 +277,8 @@ pg.onnotification = ({ pid, channel, payload }) => {
 });
 await pg.query(`LISTEN some_channel`);
 ```
+
+TODO back preassure doc
 
 # Simple and Extended query protocols
 
@@ -336,8 +311,8 @@ await pg.query({
 }, {
   statement: `INSERT INTO foo VALUES ($1, $2)`,
   params: [
-    { type: 'int4', value: 1 },
-    { type: 'text', value: 'hello' },
+    { type: 'int4', value: 1 },       // $1
+    { type: 'text', value: 'hello' }, // $2
   ],
 }, {
   statement: 'COPY foo FROM STDIN',
@@ -345,26 +320,6 @@ await pg.query({
 }, {
   statement: 'SELECT * FROM foo',
 });
-
-await pg.query([
-  {
-    statement: `CREATE TABLE foo (a int, b text)`,
-  },
-  {
-    statement: `INSERT INTO foo VALUES ($1, $2)`,
-    params: [
-      { type: 'int4', value: 1 },
-      { type: 'text', value: 'hello' },
-    ],
-  },
-  {
-    statement: 'COPY foo FROM STDIN',
-    stdin: fs.createReadableStream('/tmp/file1.tsv'),
-  },
-  {
-    statement: 'SELECT * FROM foo',
-  }
-]);
 ```
 
 # Logical replication
@@ -459,7 +414,7 @@ try {
 }
 ```
 
-# PgResult
+# .query()
 
 ```js
 const pgresult = await conn.query(` SELECT 'hello', 'world' `);
@@ -497,7 +452,7 @@ for (const notice of out.notices) {
 }
 ```
 
-# PgChunk
+# .stream()
 
 # pgoutput messages
 
