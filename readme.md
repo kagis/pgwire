@@ -239,7 +239,7 @@ async function * generateData() {
 
 await pg.query({
   statement: `COPY foo FROM STDIN`,
-  stdin: generateData('/tmp/file'),
+  stdin: generateData(),
 });
 ```
 
