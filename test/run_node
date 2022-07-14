@@ -1,7 +1,5 @@
 #!/bin/sh
 set -xe
-export COMPOSE_FILE=test/compose.yml
+export COMPOSE_FILE="$0/../compose.yml" TEST_FILTER="$@"
 docker compose down -v
-export TEST_FILTER="$@"
-docker compose -f test/compose.yml up  --build --exit-code-from node node \
-  pgwssl pgwossl
+docker compose up --build --exit-code-from=node node

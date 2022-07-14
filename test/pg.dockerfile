@@ -29,7 +29,6 @@ RUN set -x \
   "log_timezone = UTC" \
   "timezone = UTC" \
   "ssl = on" \
-  "x.hello = 'hello\nworld'" \
   > postgresql.conf \
 
  && printf %s\\n \
@@ -54,7 +53,6 @@ RUN set -x \
   " create role pgwire_sha256 login password 'secret'; " \
   " create role pgwire_sslonly login; " \
   " create role pgwire_nossl login; " \
-  " alter database postgres set x.cacert = \$\$`cat ca.crt`\$\$; " \
   | psql -v ON_ERROR_STOP=1 \
  && pg_ctl --wait stop
 

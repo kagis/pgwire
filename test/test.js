@@ -1018,25 +1018,26 @@ export function setup({
   });
 
   test('sslmode=require should create encrypted connection if ssl is supported', async _ => {
-    const conn0 = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
-    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
-
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0', {
+    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
+      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
+    ));
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
       sslmode: 'require',
       sslrootcert,
     });
-    assertEquals(conn.ssl, true);
-    const [sslUsed] = await (
-      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
-      .finally(_ => conn.end())
-    );
-    assertEquals(sslUsed, true);
+    try {
+      const [sslUsed] = await conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`);
+      assertEquals(sslUsed, true);
+      assertEquals(conn.ssl, true);
+    } finally {
+      await conn.end();
+    }
   });
 
   test('sslmode=require should reject connection if ssl is not supported', async _ => {
-    const conn0 = await pgconnect('postgres://pgwire@pgwossl:5432/postgres');
-    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
-
+    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
+      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
+    ));
     const caughtError = await (
       pgconnect('postgres://pgwire@pgwossl:5432/postgres', {
         sslmode: 'require',
@@ -1048,52 +1049,55 @@ export function setup({
   });
 
   test('sslmode=prefer should create encypted connection if ssl is supported', async _ => {
-    const conn0 = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
-    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
-
+    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
+      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
+    ));
     const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
       sslmode: 'prefer',
       sslrootcert,
     });
-    assertEquals(conn.ssl, true);
-    const [sslUsed] = await (
-      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
-      .finally(_ => conn.end())
-    );
-    assertEquals(sslUsed, true);
+    try {
+      const [sslUsed] = await conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`);
+      assertEquals(sslUsed, true);
+      assertEquals(conn.ssl, true);
+    } finally {
+      await conn.end();
+    }
   });
 
   test('sslmode=prefer should create unencypted connection if ssl is not supported', async _ => {
-    const conn0 = await pgconnect('postgres://pgwire@pgwossl:5432/postgres');
-    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
-
+    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
+      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
+    ));
     const conn = await pgconnect('postgres://pgwire@pgwossl:5432/postgres', {
       sslmode: 'prefer',
       sslrootcert,
     });
-    assertEquals(conn.ssl, false);
-    const [sslUsed] = await (
-      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
-      .finally(_ => conn.end())
-    );
-    assertEquals(sslUsed, false);
+    try {
+      const [sslUsed] = await conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`);
+      assertEquals(sslUsed, false);
+      assertEquals(conn.ssl, false);
+    } finally {
+      await conn.end();
+    }
   });
 
   test('sslmode=prefer should create unencypted connection if ssl is denied', async _ => {
-    const conn0 = await pgconnect('postgres://pgwire_nossl@pgwssl:5432/postgres');
-    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
-
+    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
+      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
+    ));
     const conn = await pgconnect('postgres://pgwire_nossl@pgwssl:5432/postgres', {
       sslmode: 'prefer',
       sslrootcert,
       // _debug: true,
     });
-    assertEquals(conn.ssl, false);
-    const [sslUsed] = await (
-      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
-      .finally(_ => conn.end())
-    );
-    assertEquals(sslUsed, false);
+    try {
+      const [sslUsed] = await conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`);
+      assertEquals(sslUsed, false);
+      assertEquals(conn.ssl, false);
+    } finally {
+      await conn.end();
+    }
   });
 
   test('sslmode=prefer should create unencypted connection if ssl handshake fails', async _ => {
@@ -1102,12 +1106,13 @@ export function setup({
       // sslrootcert,
       // _debug: true,
     });
-    assertEquals(conn.ssl, false);
-    const [sslUsed] = await (
-      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
-      .finally(_ => conn.end())
-    );
-    assertEquals(sslUsed, false);
+    try {
+      const [sslUsed] = await conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`);
+      assertEquals(sslUsed, false);
+      assertEquals(conn.ssl, false);
+    } finally {
+      await conn.end();
+    }
   });
 
   test('sslmode=allow should create unencypted connection if possible', async _ => {
@@ -1115,29 +1120,31 @@ export function setup({
       sslmode: 'allow',
       // _debug: true,
     });
-    assertEquals(conn.ssl, false);
-    const [sslUsed] = await (
-      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
-      .finally(_ => conn.end())
-    );
-    assertEquals(sslUsed, false);
+    try {
+      const [sslUsed] = await conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`);
+      assertEquals(sslUsed, false);
+      assertEquals(conn.ssl, false);
+    } finally {
+      await conn.end();
+    }
   });
 
   test('sslmode=allow should use ssl if server requires ssl', async _ => {
-    const conn0 = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
-    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
-
+    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
+      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
+    ));
     const conn = await pgconnect('postgres://pgwire_sslonly@pgwssl:5432/postgres', {
       sslmode: 'allow',
       sslrootcert,
       // _debug: true,
     });
-    assertEquals(conn.ssl, true);
-    const [sslUsed] = await (
-      conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`)
-      .finally(_ => conn.end())
-    );
-    assertEquals(sslUsed, true);
+    try {
+      const [sslUsed] = await conn.query(/*sql*/ `select ssl from pg_stat_ssl where pid = pg_backend_pid()`);
+      assertEquals(sslUsed, true);
+      assertEquals(conn.ssl, true);
+    } finally {
+      await conn.end();
+    }
   });
 
   test('pool should reuse connection', async _ => {
