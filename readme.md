@@ -359,7 +359,7 @@ import { pgconnect } from 'https://raw.githubusercontent.com/kagis/pgwire/main/m
 
 const pg = await pgconnect({ replication: 'database' }, Deno.env.get('POSTGRES'));
 try {
-  const replicationStream = await pg.logicalReplication({ slot: 'my-app-slot' });
+  const replicationStream = pg.logicalReplication({ slot: 'my-app-slot' });
   const utf8dec = new TextDecoder();
   for await (const { lastLsn, messages } of replicationStream) {
     for (const { lsn, data } of messages) {
@@ -396,7 +396,7 @@ import { pgconnect } from 'https://raw.githubusercontent.com/kagis/pgwire/main/m
 
 const pg = await pgconnect({ replication: 'database' }, Deno.env.get('POSTGRES'));
 try {
-  const replicationStream = await pg.logicalReplication({
+  const replicationStream = pg.logicalReplication({
     slot: 'my-app-slot',
     options: {
       'proto_version': 1,
