@@ -246,7 +246,7 @@ await pg.query({
 # Copy to stdout
 
 ```js
-const upstream = await pg.stream({
+const upstream = pg.stream({
   statement: `COPY foo TO STDOUT`,
 });
 
