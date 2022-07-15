@@ -232,7 +232,7 @@ If statement is `COPY ... FROM STDIN` then `stdin` parameter must be set.
 ```js
 async function * generateData() {
   const utf8enc = new TextEncoder();
-  for (let i = 1; i <= 2; i++) {
+  for (let i = 1; i <= 3; i++) {
     yield utf8enc.encode(i + '\t' + 'Mississipi' + '\n');
   }
 }
