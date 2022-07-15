@@ -1,13 +1,12 @@
 import { setup } from './test.js';
 import * as pgwire from '../mod.js';
-import { assertEquals, assertObjectMatch } from 'https://deno.land/std@0.125.0/testing/asserts.ts';
-import { copy } from 'https://deno.land/std@0.125.0/streams/conversion.ts';
+import { assertEquals } from 'https://deno.land/std@0.148.0/testing/asserts.ts';
+import { copy } from 'https://deno.land/std@0.148.0/streams/conversion.ts';
 
 setup({
   ...pgwire,
   test: Deno.test.bind(Deno),
   assertEquals,
-  assertObjectMatch,
   tcpproxy,
 });
 
