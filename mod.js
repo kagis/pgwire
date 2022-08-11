@@ -1567,8 +1567,8 @@ class ReplicationStream extends BinaryReader {
     this._ackmsgAppliedLsn = new DataView(this._ackmsg.buffer, 17, 8);
     this._iterator = this._start(conn, options);
   }
-  pgoutputDecode() {
-    return PgoutputReader.decodeStream(this);
+  pgoutputDecode(options = {}) {
+    return PgoutputReader.decodeStream(this, options);
   }
   [Symbol.asyncIterator]() {
     return this._iterator;
@@ -1685,8 +1685,13 @@ class ReplicationStream extends BinaryReader {
 
 // https://www.postgresql.org/docs/14/protocol-logicalrep-message-formats.html
 class PgoutputReader extends BinaryReader {
-  static async * decodeStream(replstream) {
-    const pgoreader = new PgoutputReader();
+  constructor(options = {}) {
+    super();
+    this.opts = Object.assign({}, options, { parseJson: true });
+  }
+
+  static async * decodeStream(replstream, options = {}) {
+    const pgoreader = new PgoutputReader(options);
     for await (const chunk of replstream) {
       for (const msg of chunk.messages) {
         pgoreader._reset(msg.data);
@@ -1830,7 +1835,7 @@ class PgoutputReader extends BinaryReader {
           // TODO lazy decode
           // https://github.com/kagis/pgwire/issues/16
           const valtext = this._textDecoder.decode(valbuf);
-          tuple[name] = PgType.decode(valtext, typeOid);
+          tuple[name] = PgType.decode(valtext, typeOid, this.opts.parseJson);
           break;
         case 0x6e: // 'n' null
           if (keyOnly) {
@@ -2262,7 +2267,7 @@ class PgType {
     }
     return String(value);
   }
-  static decode(text, typeOid) {
+  static decode(text, typeOid, parseJson) {
     switch (typeOid) { // add line here when register new type
       case   25 /* text    */:
       case 2950 /* uuid    */:
@@ -2276,7 +2281,7 @@ class PgType {
       case  701 /* float8  */: return Number(text);
       case   20 /* int8    */: return BigInt(text);
       case  114 /* json    */:
-      case 3802 /* jsonb   */: return JSON.parse(text);
+      case 3802 /* jsonb   */: return parseJson ? JSON.parse(text) : text;
       case 3220 /* pg_lsn  */: return lsnMakeComparable(text);
     }
     const elemTypeid = this._elemTypeOid(typeOid);
