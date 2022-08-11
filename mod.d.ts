@@ -169,6 +169,10 @@ export interface LogicalReplicationOptions {
   readonly ackIntervalMillis?: number;
 }
 
+export interface PgOutputDecodeOptions {
+  parseJson?: boolean;
+}
+
 export interface ReplicationStream extends AsyncIterable<ReplicationChunk> {
   /** Confirms receipt of replication packet by lsn.
    * Use {@link ReplicationMessage.lsn} to get packet lsn. */
@@ -176,7 +180,7 @@ export interface ReplicationStream extends AsyncIterable<ReplicationChunk> {
   /**
    * Decodes {@link ReplicationMessage.data} and yields upgraded pgoutput packets.
    * Use this method if replication is started with pgoutput slot. */
-  pgoutputDecode(): AsyncIterable<PgotputChunk>;
+  pgoutputDecode(options?: PgOutputDecodeOptions): AsyncIterable<PgotputChunk>;
 }
 
 export interface ReplicationChunk {
