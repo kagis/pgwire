@@ -1827,10 +1827,22 @@ class PgoutputReader extends BinaryReader {
         case 0x74: // 't' text
           const valsize = this._readInt32();
           const valbuf = this._read(valsize);
-          // TODO lazy decode
-          // https://github.com/kagis/pgwire/issues/16
-          const valtext = this._textDecoder.decode(valbuf);
-          tuple[name] = PgType.decode(valtext, typeOid);
+          const decoder = this._textDecoder;
+          Object.defineProperty(tuple, name, {
+            configurable: true,
+            enumerable: true,
+            get() {
+              const valtext = decoder.decode(valbuf);
+              const value = PgType.decode(valtext, typeOid);
+              Object.defineProperty(this, name, {
+                value,
+                configurable: false,
+                enumerable: true,
+                writable: false,
+              })
+              return value;
+            }
+          })
           break;
         case 0x6e: // 'n' null
           if (keyOnly) {
