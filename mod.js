@@ -1834,13 +1834,16 @@ class PgoutputReader extends BinaryReader {
             get() {
               const valtext = decoder.decode(valbuf);
               const value = PgType.decode(valtext, typeOid);
+              this[name] = value;
+              return value;
+            },
+            set(value) {
               Object.defineProperty(this, name, {
                 value,
-                configurable: false,
+                configurable: true,
                 enumerable: true,
-                writable: false,
+                writable: true,
               })
-              return value;
             }
           })
           break;
