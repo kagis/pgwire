@@ -170,24 +170,24 @@ export interface LogicalReplicationOptions {
 }
 
 export interface ReplicationStream extends AsyncIterable<ReplicationChunk> {
-  /** Confirms receipt of replication packet by lsn.
-   * Use {@link ReplicationMessage.lsn} to get packet lsn. */
+  /** Confirms receipt of replication message by lsn.
+   * Use {@link ReplicationMessage.lsn} to get lsn. */
   ack(lsn: string): undefined;
   /**
-   * Decodes {@link ReplicationMessage.data} and yields upgraded pgoutput packets.
+   * Decodes {@link ReplicationMessage.data} and yields upgraded pgoutput messages.
    * Use this method if replication is started with pgoutput slot. */
   pgoutputDecode(): AsyncIterable<PgotputChunk>;
 }
 
 export interface ReplicationChunk {
-  readonly endLsn: string;
-  readonly time: bigint;
   readonly messages: ReplicationMessage[];
+  readonly lastLsn: string;
+  readonly lastTime: bigint;
 }
 
 export interface ReplicationMessage {
-  /** Log Serial Number of packet.
-   * Use it for {@link ReplicationStream.ack} to confirm receipt of packet. */
+  /** Log Serial Number of message.
+   * Use it for {@link ReplicationStream.ack} to confirm receipt of message. */
    readonly lsn: string | null;
    readonly endLsn: string | null;
    /** microseconds since unix epoch */

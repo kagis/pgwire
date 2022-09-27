@@ -458,8 +458,7 @@ for (const notice of out.notices) {
 
 ```js
 for await (const chunk of replstream.pgoutputDecode()) {
-
-  // (string) Lsn of last received message.
+  // (string) Last valid received lsn.
   // Use it for replstream.ack() to confirm receipt of whole chunk.
   chunk.lastLsn;
   // (bigint) Time of last received message. Microseconds since unix epoch.

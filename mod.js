@@ -1605,10 +1605,10 @@ class ReplicationStream extends BinaryReader {
               break;
             case 'PrimaryKeepaliveMessage':
               shouldAck = shouldAck || msg.shouldReply;
+              // TODO msg.endLsn not exposed
               break;
           }
           if (lastLsn < msg.lsn) lastLsn = msg.lsn;
-          if (lastLsn < msg.endLsn) lastLsn = msg.endLsn;
           if (lastTime < msg.time) lastTime = msg.time;
         }
         if (shouldAck) {
