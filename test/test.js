@@ -664,6 +664,9 @@ export function setup({
       assertEquals(minsert.key, noproto({ id: 1 }));
       assertEquals(minsert.before, null);
       assertEquals(minsert.after, noproto({ id: 1, val: 'foo', note: '_toasted_'.repeat(10000) }));
+      assertEquals(minsert.keyRaw, noproto({ id: '1' }));
+      assertEquals(minsert.beforeRaw, null);
+      assertEquals(minsert.afterRaw, noproto({ id: '1', val: 'foo', note: '_toasted_'.repeat(10000) }));
 
       const mupdate = actual.shift();
       assertEquals(typeof mupdate.lsn, 'string');
@@ -673,6 +676,9 @@ export function setup({
       assertEquals(mupdate.key, noproto({ id: 1 }));
       assertEquals(mupdate.before, null);
       assertEquals(mupdate.after, noproto({ id: 1, val: 'bar', note: undefined }));
+      assertEquals(mupdate.keyRaw, noproto({ id: '1' }));
+      assertEquals(mupdate.beforeRaw, null);
+      assertEquals(mupdate.afterRaw, noproto({ id: '1', val: 'bar', note: undefined }));
 
       const mupdate_ = actual.shift();
       assertEquals(typeof mupdate_.lsn, 'string');
@@ -682,6 +688,9 @@ export function setup({
       assertEquals(mupdate_.key, noproto({ id: 1 }));
       assertEquals(mupdate_.before, null);
       assertEquals(mupdate_.after, noproto({ id: 2, val: 'bar', note: undefined }));
+      assertEquals(mupdate_.keyRaw, noproto({ id: '1' }));
+      assertEquals(mupdate_.beforeRaw, null);
+      assertEquals(mupdate_.afterRaw, noproto({ id: '2', val: 'bar', note: undefined }));
 
       const mdelete = actual.shift();
       assertEquals(typeof mdelete.lsn, 'string');
@@ -691,6 +700,9 @@ export function setup({
       assertEquals(mdelete.key, noproto({ id: 2 }));
       assertEquals(mdelete.before, null);
       assertEquals(mdelete.after, null);
+      assertEquals(mdelete.keyRaw, noproto({ id: '2' }));
+      assertEquals(mdelete.beforeRaw, null);
+      assertEquals(mdelete.afterRaw, null);
 
       const mrel2 = actual.shift();
       assertEquals(mrel2.lsn, null);
@@ -714,6 +726,9 @@ export function setup({
       assertEquals(minsert2.key, noproto({ id: 1, val: 'foo', note: '_toasted_'.repeat(10000) }));
       assertEquals(minsert2.before, null);
       assertEquals(minsert2.after, noproto({ id: 1, val: 'foo', note: '_toasted_'.repeat(10000) }));
+      assertEquals(minsert2.keyRaw, noproto({ id: '1', val: 'foo', note: '_toasted_'.repeat(10000) }));
+      assertEquals(minsert2.beforeRaw, null);
+      assertEquals(minsert2.afterRaw, noproto({ id: '1', val: 'foo', note: '_toasted_'.repeat(10000) }));
 
       const mupdate2 = actual.shift();
       assertEquals(typeof mupdate2.lsn, 'string');
@@ -723,6 +738,9 @@ export function setup({
       assertEquals(mupdate2.key, noproto({ id: 1, val: 'foo', note: '_toasted_'.repeat(10000) }));
       assertEquals(mupdate2.before, noproto({ id: 1, val: 'foo', note: '_toasted_'.repeat(10000) }));
       assertEquals(mupdate2.after, noproto({ id: 1, val: 'bar', note: '_toasted_'.repeat(10000) }));
+      assertEquals(mupdate2.keyRaw, noproto({ id: '1', val: 'foo', note: '_toasted_'.repeat(10000) }));
+      assertEquals(mupdate2.beforeRaw, noproto({ id: '1', val: 'foo', note: '_toasted_'.repeat(10000) }));
+      assertEquals(mupdate2.afterRaw, noproto({ id: '1', val: 'bar', note: '_toasted_'.repeat(10000) }));
 
       const mdelete2 = actual.shift();
       assertEquals(typeof mdelete2.lsn, 'string');
@@ -732,6 +750,9 @@ export function setup({
       assertEquals(mdelete2.key, noproto({ id: 1, val: 'bar', note: '_toasted_'.repeat(10000) }));
       assertEquals(mdelete2.before, noproto({ id: 1, val: 'bar', note: '_toasted_'.repeat(10000) }));
       assertEquals(mdelete2.after, null);
+      assertEquals(mdelete2.keyRaw, noproto({ id: '1', val: 'bar', note: '_toasted_'.repeat(10000) }));
+      assertEquals(mdelete2.beforeRaw, noproto({ id: '1', val: 'bar', note: '_toasted_'.repeat(10000) }));
+      assertEquals(mdelete2.afterRaw, null);
 
       const mrel3 = actual.shift();
       assertEquals(mrel3.lsn, null);

@@ -1752,6 +1752,16 @@ class PgoutputReader extends BinaryReader {
     out.replicaIdentity = this._readRelationReplicaIdentity();
     out.columns = this._array(this._readInt16(), this._readRelationColumn);
     out.keyColumns = out.columns.filter(it => it.flags & 0b1).map(it => it.name);
+    out._tupleDecoder = {
+      _typeOids: new Map(out.columns.map(({ name, typeOid }) => [name, typeOid])),
+      get(tupleRaw, columnName) {
+        const rawval = tupleRaw[columnName];
+        const typeOid = this._typeOids.get(columnName);
+        if (typeof rawval == 'string' && typeOid) return PgType.decode(rawval, typeOid);
+        return rawval;
+      },
+      // TODO make proxy (or target tuple) readonly?
+    };
     // mem leak not likely to happen because amount of relations is usually small
     this._relationCache.set(out.relationOid, out);
   }
@@ -1806,15 +1816,20 @@ class PgoutputReader extends BinaryReader {
     }
     out.tag = tag;
     out.relation = relation;
-    out.key = key;
-    out.before = before;
-    out.after = after;
+    // https://github.com/kagis/pgwire/issues/16
+    // https://github.com/kagis/pgwire/issues/27
+    out.keyRaw = key;
+    out.beforeRaw = before;
+    out.afterRaw = after;
+    out.key = key && new Proxy(key, relation._tupleDecoder);
+    out.before = before && new Proxy(before, relation._tupleDecoder);
+    out.after = after && new Proxy(after, relation._tupleDecoder);
   }
   _readTuple({ columns }, keyOnly, unchangedToastFallback) {
     const nfields = this._readInt16();
     const tuple = Object.create(null);
     for (let i = 0; i < nfields; i++) {
-      const { name, typeOid } = columns[i];
+      const { name } = columns[i];
       const kind = this._readUint8();
       switch (kind) {
         case 0x62: // 'b' binary
@@ -1827,10 +1842,7 @@ class PgoutputReader extends BinaryReader {
         case 0x74: // 't' text
           const valsize = this._readInt32();
           const valbuf = this._read(valsize);
-          // TODO lazy decode
-          // https://github.com/kagis/pgwire/issues/16
-          const valtext = this._textDecoder.decode(valbuf);
-          tuple[name] = PgType.decode(valtext, typeOid);
+          tuple[name] = this._textDecoder.decode(valbuf);
           break;
         case 0x6e: // 'n' null
           if (keyOnly) {
