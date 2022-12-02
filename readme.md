@@ -16,6 +16,7 @@ PostgreSQL client library for Deno and Node.js that exposes all features of wire
 
 ```js
 import { pgconnect } from 'https://raw.githubusercontent.com/kagis/pgwire/main/mod.js';
+//                                use exact commit or tag instead of main ^^^^                              
 const pg = await pgconnect('postgres://USER:PASSWORD@HOST:PORT/DATABASE');
 ```
 
