@@ -1894,7 +1894,7 @@ class PgoutputReader extends BinaryReader {
 class FrontendMessage {
   constructor(payload) {
     this.payload = payload;
-    // TODO string size is depends on encoder
+    // TODO string size depends on encoder
     this.size = MessageSizer.getMessageSize(this);
   }
   get tag() {
