@@ -447,7 +447,7 @@ for (const sub of pgresult.results) {
   sub.columns;
 }
 
-for (const notice of out.notices) {
+for (const notice of pgresult.notices) {
   notice.severity;
   notice.message;
 }
