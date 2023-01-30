@@ -29,7 +29,7 @@ export function setup({
           columns: it?.columns,
         })),
       }, {
-        status: undefined,
+        status: null,
         scalar: 'hello',
         rows: [['hello', 'world'], ['bonjour', 'le monde']],
         columns: [
@@ -145,7 +145,7 @@ export function setup({
           columns: it?.columns,
         })),
       }, {
-        status: undefined,
+        status: null,
         scalar: 'hello',
         rows: [['hello', 'world'], ['bonjour', 'le monde']],
         columns: [

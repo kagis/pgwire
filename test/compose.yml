@@ -1,6 +1,6 @@
 version: '3.8'
+name: pgwire
 services:
-
   deno:
     build:
       dockerfile: deno.dockerfile

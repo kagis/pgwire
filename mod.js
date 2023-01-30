@@ -157,7 +157,7 @@ class PgPool {
     const newConn = new PgConnection(this._options);
     newConn._poolTimeoutId = null; // TODO check whether it disables v8 hidden class optimization
     this._connections.add(newConn);
-    newConn.whenDestroyed.then(this._onConnectionEnded.bind(this, newConn));
+    newConn.whenDestroyed.then(this._onConnectionDestroyed.bind(this, newConn));
     return newConn;
   }
   async _recycleConnection(conn, queryError) {
@@ -204,7 +204,7 @@ class PgPool {
     conn.end();
     // TODO conn.destroy() if .end() stuck?
   }
-  _onConnectionEnded(conn) {
+  _onConnectionDestroyed(conn) {
     clearTimeout(conn._poolTimeoutId);
     this._connections.delete(conn);
   }
@@ -1230,9 +1230,8 @@ class PgResult {
     return this._lastSelect?.columns || [];
   }
   get status() {
-    if (this.results.length == 1) {
-      return this.results[0].status;
-    }
+    // TODO return last statement status?
+    return this.results.length == 1 ? this.results[0].status : null;
   }
   * [Symbol.iterator]() {
     const [row] = this.rows;
@@ -1495,6 +1494,7 @@ class MessageReader extends BinaryReader {
     return { parameter, value };
   }
   _readErrorOrNotice() {
+    /** @type {string[]} */
     const fields = Array(256);
     for (;;) {
       const fieldCode = this._readUint8();
@@ -1512,6 +1512,7 @@ class MessageReader extends BinaryReader {
       internalQuery: fields[0x71], // q
       where: fields[0x57], // W
       file: fields[0x46], // F
+      // TODO not parse L number? doc says no details about number format
       line: fields[0x4c] && Number(fields[0x4c]), // L
       routine: fields[0x52], // R
       schema: fields[0x73], // s
@@ -2180,7 +2181,7 @@ class MessageSizer {
     return this._inst.result;
   }
 
-  result = 0
+  result = 0;
   writeUint8() {
     this.result += 1;
   }
@@ -2333,7 +2334,7 @@ class PgType {
         if (0x30 <= d && d <= 0x39) d -= 0x30; // 0-9
         else if (0x41 <= d && d <= 0x46) d -= 0x41 - 0xa; // A-F
         else if (0x61 <= d && d <= 0x66) d -= 0x61 - 0xa; // a-f
-        else throw Error(`invalid hex digit 0x${d}`);
+        else throw Error(`invalid hex digit ${d}`);
         bytes[i >> 1] |= d << m; // m==4 on even iter, m==0 on odd iter
       }
       return bytes;

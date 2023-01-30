@@ -45,11 +45,11 @@ export interface PgClient {
   end(): Promise<void>;
   /** Terminates client abruptly. Pending queries will be rejected.
    * Has no effect when called on destroyed connection.
-   * @param {Error} reason Pending queries will be rejected with provided reason.
+   * @param reason Pending queries will be rejected with provided reason.
    * New queries will also be rejected with provided reason unless `.end` was called
-   * before `.destroy`
+   * before `.destroy`.
    * @returns reason back so you can destroy and throw in one line. */
-  destroy<R>(reason?: R): R;
+  destroy(reason?: any): Error;
 }
 
 export interface PgConnection extends PgClient {
@@ -79,7 +79,7 @@ export interface PgResult extends Iterable<any> {
   /**
    * @deprecated Use iterator instead.
    *
-   * First row first column value. `undefined` if no rows returned.  a */
+   * First row first column value. `undefined` if no rows returned. */
   readonly scalar: any;
   readonly rows: any[][];
   readonly columns: ColumnDescription[];
@@ -93,7 +93,10 @@ export interface PgResult extends Iterable<any> {
 }
 
 export interface PgSubResult {
-  /** First row first column value. `undefined` if no rows returned. */
+  /**
+   * @deprecated
+   *
+   * First row first column value. `undefined` if no rows returned. */
   readonly scalar: any;
   readonly rows: any[][];
   readonly columns: ColumnDescription[];
@@ -258,12 +261,12 @@ export interface PgoutputUpdate extends ReplicationMessage {
   readonly relation: PgoutputRelation;
   readonly key: Record<string, any>;
   /**
-   * If {@link PgoutputRelation.replicaIdentity} is not `full`
+   * If {@link PgoutputRelation.replicaIdentity} == 'full'
    * then gets row values before update, otherwise gets `null` */
   readonly before: Record<string, any> | null;
   /**
    * Gets row values after update.
-   * If {@link PgoutputRelation.replicaIdentity} is not `full`
+   * If {@link PgoutputRelation.replicaIdentity} != 'full'
    * then unchanged TOASTed values will be `undefined`.
    * See https://www.postgresql.org/docs/14/storage-toast.html for TOASTing */
   readonly after: Record<string, any>;
@@ -274,7 +277,7 @@ export interface PgoutputDelete extends ReplicationMessage {
   readonly relation: PgoutputRelation;
   readonly key: Record<string, any>;
   /**
-   * If {@link PgoutputRelation.replicaIdentity} is not `full`
+   * If {@link PgoutputRelation.replicaIdentity} == 'full'
    * then gets values of deleted row, otherwise gets `null`. */
   readonly before: Record<string, any> | null;
   readonly after: null;
