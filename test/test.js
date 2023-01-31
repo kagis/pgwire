@@ -712,7 +712,6 @@ export function setup({
       assertEquals(typeof minsert2.time, 'bigint');
       assertEquals(minsert2.tag, 'insert');
       assertEquals(minsert2.relation, mrel2);
-      // assertEquals(minsert2.key, { __proto__: null, id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
       assertEquals(minsert2.before, null);
       assertEquals(minsert2.after, { __proto__: null, id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
 
@@ -721,7 +720,6 @@ export function setup({
       assertEquals(typeof mupdate2.time, 'bigint');
       assertEquals(mupdate2.tag, 'update');
       assertEquals(mupdate2.relation, mrel2);
-      // assertEquals(mupdate2.key, { __proto__: null, id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
       assertEquals(mupdate2.before, { __proto__: null, id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
       assertEquals(mupdate2.after, { __proto__: null, id: 1, val: 'bar', note: '_toasted_'.repeat(10000) });
 
@@ -730,7 +728,6 @@ export function setup({
       assertEquals(typeof mdelete2.time, 'bigint');
       assertEquals(mdelete2.tag, 'delete');
       assertEquals(mdelete2.relation, mrel2);
-      // assertEquals(mdelete2.key, { __proto__: null, id: 1, val: 'bar', note: '_toasted_'.repeat(10000) });
       assertEquals(mdelete2.before, { __proto__: null, id: 1, val: 'bar', note: '_toasted_'.repeat(10000) });
       assertEquals(mdelete2.after, null);
 
