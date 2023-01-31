@@ -16,7 +16,7 @@ PostgreSQL client library for Deno and Node.js that exposes all features of wire
 
 ```js
 import { pgconnect } from 'https://raw.githubusercontent.com/kagis/pgwire/main/mod.js';
-//                                use exact commit or tag instead of main ^^^^                              
+//                                use exact commit or tag instead of main ^^^^
 const pg = await pgconnect('postgres://USER:PASSWORD@HOST:PORT/DATABASE');
 ```
 
@@ -516,8 +516,6 @@ for await (const chunk of replstream.pgoutputDecode()) {
         // ('default' | 'nothing'| 'full' | 'index')
         // https://www.postgresql.org/docs/14/sql-altertable.html#SQL-ALTERTABLE-REPLICA-IDENTITY
         pgomsg.replicaIdentity;
-        // (string[]) Array of key columns names (column.flags & 0b1)
-        pgomsg.keyColumns;
         // (object[]) Relation columns descriptions
         for (const column of pgomsg.columns) {
           // (number) 0b1 if column is part of replica identity
@@ -537,18 +535,14 @@ for await (const chunk of replstream.pgoutputDecode()) {
       case 'insert':
         // (object) Associated relation.
         pgomsg.relation;
-        // (object)
-        pgomsg.key;
         // (object) Inserted row values.
         pgomsg.after;
 
       case 'update':
         // (object) Associated relation.
         pgomsg.relation;
-        // (object)
-        pgomsg.key;
         // (object | null) If pgomsg.relation.replicaIdentity == 'full'
-        // then gets row values before update, otherwise gets null
+        // then gets row values before update.
         pgomsg.before;
         // (object) Row values after update.
         // If pgomsg.relation.replicaIdentity != 'full'
@@ -559,8 +553,6 @@ for await (const chunk of replstream.pgoutputDecode()) {
       case 'delete':
         // (object) Associated relation.
         pgomsg.relation;
-        // (object)
-        pgomsg.key;
         // (object | null) If pgomsg.relation.replicaIdentity == 'full'
         // then gets deleted row values, otherwise gets null
         pgomsg.before;

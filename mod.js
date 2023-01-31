@@ -1752,7 +1752,6 @@ class PgoutputReader extends BinaryReader {
     out.name = this._readString();
     out.replicaIdentity = this._readRelationReplicaIdentity();
     out.columns = this._array(this._readInt16(), this._readRelationColumn);
-    out.keyColumns = out.columns.filter(it => it.flags & 0b1).map(it => it.name);
     // mem leak not likely to happen because amount of relations is usually small
     this._relationCache.set(out.relationOid, out);
   }
@@ -1779,79 +1778,64 @@ class PgoutputReader extends BinaryReader {
     Object.assign(col, this._typeCache.get(col.typeOid));
     return col;
   }
-  _upgradeMsgChange(out, tag, readUntilN) {
+  _upgradeMsgChange(out, tag, mustHaveNewTuple) {
     const relid = this._readInt32();
     const relation = this._relationCache.get(relid);
-    const actionKON = this._readUint8();
-    const keyOnly = actionKON == 0x4b /*K*/;
-    let before = this._readTuple(relation, keyOnly);
+    let before = Object.create(null);
     let after = null;
-    if (actionKON == 0x4e /*N*/) {
+    const isNewTuple = this._readTuple(relation, before);
+    if (isNewTuple) {
       after = before;
       before = null;
-    } else if (readUntilN) {
-      const actionN = this._readUint8();
-      // TODO assert actionN == 'N'
-      after = this._readTuple(relation, false, before);
-    }
-    let key = before || after;
-    if (relation.keyColumns.length < relation.columns.length) {
-      const tup = key;
-      key = Object.create(null);
-      for (const k of relation.keyColumns) {
-        key[k] = tup[k];
-      }
-    }
-    if (keyOnly) {
-      before = null;
+    } else if (mustHaveNewTuple) {
+      after = Object.create(null);
+      this._readTuple(relation, after, before);
+      // TODO assert isNewTuple
     }
     out.tag = tag;
     out.relation = relation;
-    out.key = key;
     out.before = before;
-    out.after = after;
+    out.after = after; // avoid use out.new to make message destructuring easy
   }
-  _readTuple({ columns }, keyOnly, unchangedToastFallback) {
+  _readTuple({ columns }, tuple, unchangedToastFallback) {
+    const kon = this._readUint8();
+    // Treat nulls in key-only tuple (K) as placeholders rather then actual column values.
+    // Key cannot have nulls by documentation anyway.
+    const nullval = kon == 0x4b /*K*/ ? undefined : null;
     const nfields = this._readInt16();
-    const tuple = Object.create(null);
     for (let i = 0; i < nfields; i++) {
       const { name, typeOid } = columns[i];
       const kind = this._readUint8();
+      let val;
       switch (kind) {
         case 0x62: // 'b' binary
-          const bsize = this._readInt32();
-          const bval = this._read(bsize);
-          // dont need to .slice() because new buffer
-          // is created for each replication chunk
-          tuple[name] = bval;
-          break;
         case 0x74: // 't' text
           const valsize = this._readInt32();
-          const valbuf = this._read(valsize);
-          // TODO lazy decode
-          // https://github.com/kagis/pgwire/issues/16
-          const valtext = this._textDecoder.decode(valbuf);
-          tuple[name] = PgType.decode(valtext, typeOid);
-          break;
-        case 0x6e: // 'n' null
-          if (keyOnly) {
-            // If value is `null`, then it is definitely not part of key,
-            // because key cannot have nulls by documentation.
-            // And if we got `null` while reading keyOnly tuple,
-            // then it means that `null` is not actual value
-            // but placeholder of non key column.
-            tuple[name] = undefined;
-          } else {
-            tuple[name] = null;
+          // no need to clone bytes because new buffer
+          // is created for each replication chunk
+          val = this._read(valsize);
+          if (kind == 0x74 /* t */) {
+            val = this._textDecoder.decode(val);
+            // TODO lazy decode
+            // https://github.com/kagis/pgwire/issues/16
+            val = PgType.decode(val, typeOid);
           }
           break;
-        case 0x75: // 'u' unchanged toast datum
-          tuple[name] = unchangedToastFallback?.[name];
+        case 0x6e: // 'n' null
+          val = nullval;
           break;
-        default: throw Error(`uknown attribute kind ${kind}`);
+        case 0x75: // 'u' unchanged toast datum
+          val = unchangedToastFallback?.[name];
+          break;
+        default:
+          throw new PgError({
+            message: `Unknown attribute kind ${kind}.`,
+            code: 'protocol_violation',
+          });
       }
+      tuple[name] = val;
     }
-    return tuple;
+    return kon == 0x4e /*N*/;
   }
   _upgradeMsgTruncate(out) {
     const nrels = this._readInt32();

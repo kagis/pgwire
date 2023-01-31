@@ -236,7 +236,6 @@ export interface PgoutputRelation extends ReplicationMessage {
   readonly name: string;
   /** https://www.postgresql.org/docs/14/sql-altertable.html#SQL-ALTERTABLE-REPLICA-IDENTITY */
   readonly replicaIdentity: 'default' | 'nothing'| 'full' | 'index';
-  readonly keyColumns: string[];
   readonly columns: Array<{
     /** `0b1` if attribute is part of replica identity */
     readonly flags: number;
@@ -251,7 +250,6 @@ export interface PgoutputRelation extends ReplicationMessage {
 export interface PgoutputInsert extends ReplicationMessage {
   readonly tag: 'insert';
   readonly relation: PgoutputRelation;
-  readonly key: Record<string, any>;
   readonly before: null;
   readonly after: Record<string, any>;
 }
@@ -259,10 +257,9 @@ export interface PgoutputInsert extends ReplicationMessage {
 export interface PgoutputUpdate extends ReplicationMessage {
   readonly tag: 'update';
   readonly relation: PgoutputRelation;
-  readonly key: Record<string, any>;
   /**
    * If {@link PgoutputRelation.replicaIdentity} == 'full'
-   * then gets row values before update, otherwise gets `null` */
+   * then gets row values before update. */
   readonly before: Record<string, any> | null;
   /**
    * Gets row values after update.
@@ -275,7 +272,6 @@ export interface PgoutputUpdate extends ReplicationMessage {
 export interface PgoutputDelete extends ReplicationMessage {
   readonly tag: 'delete';
   readonly relation: PgoutputRelation;
-  readonly key: Record<string, any>;
   /**
    * If {@link PgoutputRelation.replicaIdentity} == 'full'
    * then gets values of deleted row, otherwise gets `null`. */
