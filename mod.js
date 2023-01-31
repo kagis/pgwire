@@ -108,14 +108,6 @@ class PgPool {
     const conn = this._getConnection();
     try {
       yield * conn.stream(...args);
-      // const response = conn.query(...args);
-      // const discard = conn.query(`discard all`);
-      // discard.catch(Boolean);
-      // try {
-      //   yield * response;
-      // } finally {
-      //   await discard;
-      // }
     } catch (err) {
       // Keep err for cases when _recycleConnection throws PgError.left_in_txn.
       // We will report err as cause of PgError.left_in_txn.
@@ -263,7 +255,6 @@ class PgConnection {
         .filter(([k]) => !k.startsWith('_'))
       ),
       'client_encoding': 'UTF8', // TextEncoder supports UTF8 only, so hardcode and force UTF8
-      // client_encoding: 'win1251',
     });
     this._pipeFemsgqPromise = null;
     this._ioloopPromise = null;
