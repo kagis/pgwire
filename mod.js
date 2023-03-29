@@ -1590,7 +1590,8 @@ class ReplicationStream extends BinaryReader {
         const messages = [];
         let shouldAck = false;
         for (const copyData of chunk.copies) {
-          const msg = this._decodeReplicationMessage(copyData);
+          this._reset(copyData);
+          const msg = this._readReplicationMessage();
           switch (msg.tag) {
             case 'XLogData':
               messages.push(msg);
@@ -1640,10 +1641,6 @@ class ReplicationStream extends BinaryReader {
     this._tx.push(this._ackmsg);
   }
 
-  _decodeReplicationMessage(copyData) {
-    this._reset(copyData);
-    return this._readReplicationMessage();
-  }
   _readReplicationMessage() {
     const tag = this._readUint8();
     switch (tag) {
