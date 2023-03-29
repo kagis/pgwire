@@ -1626,7 +1626,6 @@ class ReplicationStream extends BinaryReader {
       this._ackingLsn = lsn;
     }
     let nlsn = BigInt('0x' + this._ackingLsn.replace('/', ''));
-    nlsn += 1n;
     // https://github.com/postgres/postgres/blob/0526f2f4c38cb50d3e2a6e0aa5d51354158df6e3/src/backend/replication/logical/worker.c#L2473-L2478
     // https://github.com/postgres/postgres/blob/0526f2f4c38cb50d3e2a6e0aa5d51354158df6e3/src/backend/replication/walsender.c#L2021-L2023
     // TODO accept { written, flushed, applied, immediate }
