@@ -1571,8 +1571,7 @@ class ReplicationStream extends BinaryReader {
 
     const optionsSql = (
       Object.entries(options)
-      // TODO fix option key is injectable
-      .map(([k, v]) => k + ' ' + pgliteral(v))
+      .map(([k, v]) => pgident(k) + ' ' + pgliteral(v))
       .join(',')
       .replace(/.+/, '($&)')
     );
