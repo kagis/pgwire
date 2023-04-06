@@ -1894,7 +1894,7 @@ class FrontendMessage {
       }
       w.writeUint8(0);
     }
-  }
+  };
   static CancelRequest = class extends this {
     write(w, _size, { pid, secretKey }) {
       w.writeInt32(16);
@@ -1902,21 +1902,21 @@ class FrontendMessage {
       w.writeInt32(pid);
       w.writeInt32(secretKey);
     }
-  }
+  };
   static SSLRequest = class extends this {
     // static inst = new this();
     write(w) {
       w.writeInt32(8);
       w.writeInt32(80877103); // (1234 << 16) | 5679
     }
-  }
+  };
   static PasswordMessage = class extends this {
     write(w, size, payload) {
       w.writeUint8(0x70); // p
       w.writeInt32(size - 1);
       w.writeString(payload);
     }
-  }
+  };
   static SASLInitialResponse = class extends this {
     write(w, size, { mechanism, data }) {
       w.writeUint8(0x70); // p
@@ -1929,21 +1929,21 @@ class FrontendMessage {
         w.writeInt32(-1);
       }
     }
-  }
+  };
   static SASLResponse = class extends this {
     write(w, size, data) {
       w.writeUint8(0x70); // p
       w.writeInt32(size - 1);
       w.write(data);
     }
-  }
+  };
   static Query = class extends this {
     write(w, size) {
       w.writeUint8(0x51); // Q
       w.writeInt32(size - 1);
       w.writeString(this.payload);
     }
-  }
+  };
   static Parse = class extends this {
     write(w, size, { statement, statementName = '', paramTypeOids = [] }) {
       w.writeUint8(0x50); // P
@@ -1955,7 +1955,7 @@ class FrontendMessage {
         w.writeUint32(typeOid || 0);
       }
     }
-  }
+  };
   static Bind = class extends this {
     write(w, size, { portal = '', statementName = '', params = [], binary = [] }) {
       w.writeUint8(0x42); // B
@@ -1979,7 +1979,7 @@ class FrontendMessage {
         w.writeInt16(fmt);
       }
     }
-  }
+  };
   static Execute = class extends this {
     write(w, size, { portal = '', limit = 0 }) {
       w.writeUint8(0x45); // E
@@ -1987,7 +1987,7 @@ class FrontendMessage {
       w.writeString(portal);
       w.writeUint32(limit);
     }
-  }
+  };
   static DescribeStatement = class extends this {
     write(w, size, statementName = '') {
       w.writeUint8(0x44); // D
@@ -1995,7 +1995,7 @@ class FrontendMessage {
       w.writeUint8(0x53); // S
       w.writeString(statementName);
     }
-  }
+  };
   static DescribePortal = class extends this {
     write(w, size, portal = '') {
       w.writeUint8(0x44); // D
@@ -2003,7 +2003,7 @@ class FrontendMessage {
       w.writeUint8(0x50); // P
       w.writeString(portal);
     }
-  }
+  };
   static ClosePortal = class extends this {
     write(w, size, portal = '') {
       w.writeUint8(2); // C
@@ -2011,7 +2011,7 @@ class FrontendMessage {
       w.writeUint8(0x50); // P
       w.writeString(portal);
     }
-  }
+  };
   static CloseStatement = class extends this {
     write(w, size, statementName = '') {
       w.writeUint8(2); // C
@@ -2019,14 +2019,14 @@ class FrontendMessage {
       w.writeUint8(0x53); // S
       w.writeString(statementName);
     }
-  }
+  };
   static Sync = class extends this {
     // static inst = new this();
     write(w) {
       w.writeUint8(0x53); // S
       w.writeInt32(4);
     }
-  }
+  };
   // unused
   static Flush = class extends this {
     // static inst = new this();
@@ -2034,35 +2034,35 @@ class FrontendMessage {
       w.writeUint8(0x48); // H
       w.writeInt32(4);
     }
-  }
+  };
   static CopyData = class extends this {
     write(w, size, data) {
       w.writeUint8(0x64); // d
       w.writeInt32(size - 1);
       w.write(data);
     }
-  }
+  };
   static CopyDone = class extends this {
     // static inst = new this();
     write(w) {
       w.writeUint8(0x63); // c
       w.writeInt32(4);
     }
-  }
+  };
   static CopyFail = class extends this {
     write(w, size, cause) {
       w.writeUint8(0x66); // f
       w.writeInt32(size - 1);
       w.writeString(cause);
     }
-  }
+  };
   static Terminate = class extends this {
     // static inst = new this();
     write(w) {
       w.writeUint8(0x58); // X
       w.writeInt32(4);
     }
-  }
+  };
 }
 
 class MessageWriter {
