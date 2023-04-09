@@ -423,7 +423,7 @@ export function setup({
       'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid,
       ARRAY[1, 2, 3]::int[],
       ARRAY[1, 2, 3]::text[],
-      ARRAY['"quoted"', '{string}', '"{-,-}"'],
+      ARRAY['"quoted"', '{string}', '"{-,-}"', e'\t'],
       ARRAY[[1, 2], [3, 4]],
       '[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}'::int[],
       ARRAY[1, NULL, 2]
@@ -446,7 +446,7 @@ export function setup({
       'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
       [1, 2, 3],
       ['1', '2', '3'],
-      ['"quoted"', '{string}', '"{-,-}"'],
+      ['"quoted"', '{string}', '"{-,-}"', '\t'],
       [[1, 2], [3, 4]],
       [[[1, 2, 3], [4, 5, 6]]],
       [1, null, 2],
@@ -498,11 +498,11 @@ export function setup({
       assertEquals(text, 'cafebabe');
       // text[]
       [typeName, text] = await conn.query({
-        statement: /*sql*/ `select pg_typeof($1)::text, $1::text`,
-        params: [{ type: 'text[]', value: ['1', '2', '3', null] }],
+        statement: /*sql*/ `select pg_typeof($1)::text, to_json($1)::text`,
+        params: [{ type: 'text[]', value: ['1', '2', '3', ' \t"hello world"\n ', null] }],
       });
       assertEquals(typeName, 'text[]');
-      assertEquals(text, '{1,2,3,NULL}');
+      assertEquals(JSON.parse(text), ['1', '2', '3', ' \t"hello world"\n ', null]);
       // bytea[]
       [typeName, text] = await conn.query({
         statement: /*sql*/ `select pg_typeof($1)::text, $1::text`,

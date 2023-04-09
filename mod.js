@@ -2287,24 +2287,43 @@ class PgType {
     }
   }
   static _decodeArray(text, elemTypeOid) {
-    text = text.replace(/^\[.+=/, ''); // skip dimensions
-    const jsonArray = text.replace(/{|}|,|"(?:[^"\\]|\\.)*"|[^,}]+/gy, token => (
-      token == '{' ? '[' :
-      token == '}' ? ']' :
-      token == 'NULL' ? 'null' :
-      token == ',' || token[0] == '"' ? token :
-      JSON.stringify(token)
-    ));
-    return JSON.parse(jsonArray, (_, elem) => (
-      typeof elem == 'string' ? this.decode(elem, elemTypeOid) : elem
-    ));
+    text = text.replace(/^\[.+=/u, ''); // skip dimensions
+    let result;
+    for (let i = 0, inQuotes = false, elStart = 0, stack = []; i < text.length; i++) {
+      const ch = text.charCodeAt(i);
+      if (ch == 0x5c /*\*/) i++; // escape
+      else if (ch == 0x22 /*"*/) inQuotes = !inQuotes;
+      else if (inQuotes); // continue
+      else if (ch == 0x7b /*{*/) stack.unshift([]), elStart = i + 1;
+      else if (ch == 0x7d /*}*/ || ch == 0x2c /*,*/) { // TODO configurable delimiter
+        if (!result) {
+          const escaped = text.slice(elStart, i); // TODO trim ' \t\n\r\v\f'
+          if (!/^NULL$/ui.test(escaped)) {
+            result = escaped.replace(/^"|"$|(?<!\\)\\/ug, '');
+            // TODO accept decodeFn as argument,
+            // extract parseArray logic out of decoder,
+            // do benchmark of static vs dynamic dispatch
+            result = this.decode(result, elemTypeOid);
+          }
+        }
+        stack[0].push(result);
+        result = ch == 0x7d /*}*/ ? stack.shift() : null;
+        elStart = i + 1; // TODO dry
+      }
+    }
+    return result;
   }
   // TODO multi dimension
   // TODO array_nulls https://www.postgresql.org/docs/14/runtime-config-compatible.html#id-1.6.7.16.2.2.1.1.3
   static _encodeArray(arr, elemTypeOid) {
-    return JSON.stringify(arr, function (_, elem) {
-      return this == arr && elem != null ? PgType.encode(elem, elemTypeOid) : elem;
-    }).replace(/^\[(.*)]$/, '{$1}');
+    const quoteElem = elem => {
+      if (elem == null) return 'NULL';
+      elem = this.encode(elem, elemTypeOid);
+      elem = elem.replace(/(?=\\|")/g, '\\');
+      return `"${elem}"`;
+    };
+    const delim = ','; // TODO box[] uses semicolon
+    return `{${arr.map(quoteElem).join(delim)}}`;
   }
   static _decodeBytea(text) {
     // https://www.postgresql.org/docs/9.6/datatype-binary.html#AEN5830
