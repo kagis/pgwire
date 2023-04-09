@@ -40,9 +40,7 @@ export function pgpool(...optionsChain) {
 }
 
 export function pgliteral(s) {
-  if (s == null) {
-    return 'NULL';
-  }
+  if (s == null) return 'NULL';
   // TODO array
   return `'` + String(s).replace(/'/g, `''`) + `'`;
 }
@@ -60,16 +58,14 @@ function computeConnectionOptions([uriOrObj, ...rest]) {
     // if (!(uri.protocol == 'postgresql' || uri.protocol == 'postgres')) {
     //   throw Error(`invalid postgres protocol ${JSON.stringify(uri.protocol)}`);
     // }
-    uriOrObj = Array.from(uri.searchParams).reduce(
-      (obj, [k, v]) => (obj[k] = v, obj),
-      withoutUndefinedProps({
-        hostname: uri.hostname || undefined,
-        port: Number(uri.port) || undefined,
-        password: decodeURIComponent(uri.password) || undefined,
-        'user': decodeURIComponent(uri.username) || undefined,
-        'database': decodeURIComponent(uri.pathname).replace(/^[/]/, '') || undefined,
-      }),
-    );
+    uriOrObj = withoutUndefinedProps({
+      hostname: uri.hostname || undefined,
+      port: Number(uri.port) || undefined,
+      password: decodeURIComponent(uri.password) || undefined,
+      'user': decodeURIComponent(uri.username) || undefined,
+      'database': decodeURIComponent(uri.pathname).replace(/^[/]/, '') || undefined,
+      ...Object.fromEntries(uri.searchParams)
+    });
   }
   return Object.assign(computeConnectionOptions(rest), uriOrObj);
 
@@ -386,7 +382,7 @@ class PgConnection {
       // Оtherwise
       // - if error occured
       // - or iter was .returned()
-      // - or no COPY FROM STDIN was queries
+      // - or no COPY FROM STDIN was queried
       // then we should abort all pending stdins
       // stdinAbortCtl.abort();
       stdinSignal.aborted = true;
