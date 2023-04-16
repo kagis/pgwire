@@ -417,8 +417,8 @@ class PgConnection {
   _throwIfQueryAborted(signal) {
     if (signal?.aborted) {
       throw new PgError({
-        code: 'aborted',
         message: 'Postgres query aborted',
+        code: 'aborted',
         cause: signal.reason,
       });
     }
