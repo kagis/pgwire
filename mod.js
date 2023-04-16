@@ -2323,23 +2323,23 @@ class PgType {
   }
   static _decodeBytea(text) {
     // https://www.postgresql.org/docs/9.6/datatype-binary.html#AEN5830
-    if (text.startsWith('\\x')) {
-      const hex = text.slice(2); // TODO check hex.length is even ?
-      const bytes = new Uint8Array(hex.length >> 1);
-      for (let i = 0, m = 4; i < hex.length; i++, m ^= 4) {
-        let d = hex.charCodeAt(i);
-        if (0x30 <= d && d <= 0x39) d -= 0x30; // 0-9
-        else if (0x41 <= d && d <= 0x46) d -= 0x41 - 0xa; // A-F
-        else if (0x61 <= d && d <= 0x66) d -= 0x61 - 0xa; // a-f
-        else throw Error(`invalid hex digit ${d}`);
-        bytes[i >> 1] |= d << m; // m==4 on even iter, m==0 on odd iter
-      }
-      return bytes;
+    if (!text.startsWith('\\x')) {
+      return Uint8Array.from( // legacy escape format TODO no eval
+        Function(text.replace('"', '\\"').replace(/.*/, 'return "$&"')).call(),
+        x => x.charCodeAt(),
+      );
     }
-    return Uint8Array.from( // legacy escape format TODO no eval
-      Function(text.replace('"', '\\"').replace(/.*/, 'return "$&"')).call(),
-      x => x.charCodeAt(),
-    );
+    const hex = text.slice(2); // TODO check hex.length is even ?
+    const bytes = new Uint8Array(hex.length >> 1);
+    for (let i = 0, m = 4; i < hex.length; i++, m ^= 4) {
+      let d = hex.charCodeAt(i);
+      if (0x30 <= d && d <= 0x39) d -= 0x30; // 0-9
+      else if (0x41 <= d && d <= 0x46) d -= 0x41 - 0xa; // A-F
+      else if (0x61 <= d && d <= 0x66) d -= 0x61 - 0xa; // a-f
+      else throw PgError({ message: 'Bad encoded bytea received', code: 'protocol_violation' });
+      bytes[i >> 1] |= d << m; // m==4 on even iter, m==0 on odd iter
+    }
+    return bytes;
   }
   static _encodeBytea(bytes) {
     return '\\x' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
