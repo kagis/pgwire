@@ -1,6 +1,6 @@
 import net from 'net';
 import tls from 'tls';
-import { createHash, createHmac, pbkdf2 as _pbkdf2, randomFill as _randomFill } from 'crypto';
+import { createHash, pbkdf2 as _pbkdf2, randomFill as _randomFill } from 'crypto';
 import { once } from 'events';
 import { promisify } from 'util';
 import { _net, SaslScramSha256 } from './mod.js';
@@ -121,9 +121,6 @@ Object.assign(SaslScramSha256.prototype, {
   },
   async _hash(val) {
     return Uint8Array.from(createHash('sha256').update(val).digest());
-  },
-  async _hmac(key, inp) {
-    return Uint8Array.from(createHmac('sha256', key).update(inp).digest());
   },
   async _hi(pwd, salt, iterations) {
     const buf = await pbkdf2(pwd, salt, iterations, 32, 'sha256');

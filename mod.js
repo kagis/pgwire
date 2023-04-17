@@ -2476,11 +2476,12 @@ export class SaslScramSha256 {
   async _hash(val) {
     return new Uint8Array(await crypto.subtle.digest('SHA-256', val));
   }
-  async _hmac(key, inp) {
-    const hmacParams = { name: 'HMAC', hash: 'SHA-256' };
-    const importedKey = await crypto.subtle.importKey('raw', key, hmacParams, false, ['sign']);
-    const buf = await crypto.subtle.sign('HMAC', importedKey, inp);
-    return new Uint8Array(buf);
+  async _hmac(key, msg) {
+    // https://en.wikipedia.org/wiki/HMAC
+    const bskey = new Uint8Array(64);
+    bskey.set(key.length > bskey.length ? await this._hash(key) : key);
+    const inner = await this._hash(Uint8Array.of(...bskey.map(x => 0x36 ^ x), ...msg));
+    return await this._hash(Uint8Array.of(...bskey.map(x => 0x5c ^ x), ...inner));
   }
   async _hi(pwd, salt, iterations) {
     const cryptoKey = await crypto.subtle.importKey('raw', pwd, 'PBKDF2', false, ['deriveBits']);
