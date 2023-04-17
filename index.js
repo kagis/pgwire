@@ -1,12 +1,11 @@
 import net from 'net';
 import tls from 'tls';
-import { createHash, pbkdf2 as _pbkdf2, randomFill as _randomFill } from 'crypto';
+import { createHash, pbkdf2 as _pbkdf2, randomFillSync } from 'crypto';
 import { once } from 'events';
 import { promisify } from 'util';
 import { _net, SaslScramSha256 } from './mod.js';
 export * from './mod.js';
 
-const randomFill = promisify(_randomFill);
 const pbkdf2 = promisify(_pbkdf2);
 
 Object.assign(_net, {
@@ -114,10 +113,8 @@ Object.assign(SaslScramSha256.prototype, {
   _b64decode(b64) {
     return Uint8Array.from(Buffer.from(b64, 'base64'));
   },
-  async _randomBytes(n) {
-    const buf = new Uint8Array(n);
-    await randomFill(buf);
-    return buf;
+  _randomBytes(n) {
+    return randomFillSync(new Uint8Array(n));
   },
   async _hash(val) {
     return Uint8Array.from(createHash('sha256').update(val).digest());

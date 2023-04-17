@@ -2422,7 +2422,7 @@ export class SaslScramSha256 {
   _clientFirstMessageBare;
   _serverSignatureB64;
   async start() {
-    const clientNonce = await this._randomBytes(24);
+    const clientNonce = this._randomBytes(24);
     this._clientFirstMessageBare = 'n=,r=' + this._b64encode(clientNonce);
     return 'n,,' + this._clientFirstMessageBare;
   }
@@ -2470,7 +2470,7 @@ export class SaslScramSha256 {
   _b64decode(b64) {
     return Uint8Array.from(atob(b64), x => x.charCodeAt());
   }
-  async _randomBytes(n) {
+  _randomBytes(n) {
     return crypto.getRandomValues(new Uint8Array(n));
   }
   async _hash(val) {
