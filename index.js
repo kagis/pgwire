@@ -8,58 +8,60 @@ export * from './mod.js';
 
 const pbkdf2 = promisify(_pbkdf2);
 
+Object.assign(SaslScramSha256.prototype, {
+  _b64encode(bytes) {
+    return Buffer.from(bytes).toString('base64');
+  },
+  _b64decode(b64) {
+    return Uint8Array.from(Buffer.from(b64, 'base64'));
+  },
+  _randomBytes(n) {
+    return randomFillSync(new Uint8Array(n));
+  },
+  async _hash(val) {
+    return Uint8Array.from(createHash('sha256').update(val).digest());
+  },
+  async _hi(pwd, salt, iterations) {
+    const buf = await pbkdf2(pwd, salt, iterations, 32, 'sha256');
+    return Uint8Array.from(buf);
+  },
+});
+
 Object.assign(_net, {
-  async connect({ hostname, port }) {
-    const socket = SocketAdapter.attach(net.connect({ host: hostname, port }));
-    await once(socket, 'connect');
-    return socket;
+  connect({ hostname, port }) {
+    return SocketAdapter.connect(hostname, port);
   },
   reconnectable(err) {
-    return err && (
-      err.code == 'ENOTFOUND' ||
-      err.code == 'ECONNREFUSED' ||
-      err.code == 'ECONNRESET'
-    );
+    return ['ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET'].includes(err?.code);
   },
-  async startTls(socket, { hostname, caCerts }) {
-    // https://nodejs.org/docs/latest-v14.x/api/tls.html#tls_tls_connect_options_callback
-    const tlssock = SocketAdapter.attach(tls.connect({
-      secureContext: tls.createSecureContext({ ca: caCerts }),
-      host: hostname,
-      socket,
-    }));
-    await once(tlssock, 'secureConnect');
-    tlssock.on('close', _ => socket.destroy());
-    return tlssock;
+  startTls(sockadapt, { hostname, caCerts }) {
+    return sockadapt.startTls(hostname, caCerts);
   },
-  async read(socket, out) {
-    // return sockadapt.read(buf);
-    return SocketAdapter.get(socket).read(out);
+  read(sockadapt, out) {
+    return sockadapt.read(out);
   },
-  async write(socket, data) {
-    return SocketAdapter.get(socket).write(data);
+  write(sockadapt, data) {
+    return sockadapt.write(data);
   },
-  closeNullable(socket) {
-    if (!socket) return;
-    return SocketAdapter.get(socket).close();
+  closeNullable(sockadapt) {
+    if (!sockadapt) return;
+    return sockadapt.close();
   },
 });
 
 class SocketAdapter {
-  static kAdapter = Symbol('SocketAdapter');
-  static attach(socket) {
-    socket[this.kAdapter] = new this(socket);
-    return socket;
-  }
-  static get(socket) {
-    return socket[this.kAdapter];
+  static async connect(host, port) {
+    const socket = net.connect({ host, port });
+    await once(socket, 'connect');
+    return new this(socket);
   }
   constructor(socket) {
-    this._socket = socket;
-    this._readResume = Boolean;
-    this._writeResume = Boolean;
+    this._readResume = Boolean; // noop
+    this._writeResume = Boolean; // noop
     this._readPauseAsync = resolve => this._readResume = resolve;
     this._writePauseAsync = resolve => this._writeResume = resolve;
+    this._error = null;
+    this._socket = socket;
     this._socket.on('readable', _ => this._readResume());
     this._socket.on('end', _ => this._readResume());
     this._socket.on('error', error => {
@@ -67,6 +69,19 @@ class SocketAdapter {
       this._readResume();
       this._writeResume();
     });
+  }
+  async startTls(host, ca) {
+    // https://nodejs.org/docs/latest-v14.x/api/tls.html#tls_tls_connect_options_callback
+    const socket = this._socket;
+    const secureContext = tls.createSecureContext({ ca });
+    const tlsSocket = tls.connect({ socket, host, secureContext });
+    await once(tlsSocket, 'secureConnect');
+    // TODO check tlsSocket.authorized
+
+    // if secure connection succeeded then we take underlying socket ownership,
+    // otherwise underlying socket should be closed outside.
+    tlsSocket.on('close', _ => socket.destroy());
+    return new this.constructor(tlsSocket);
   }
   /** @param {Uint8Array} out */
   async read(out) {
@@ -105,22 +120,3 @@ class SocketAdapter {
     this._socket.destroy(Error('socket destroyed'));
   }
 }
-
-Object.assign(SaslScramSha256.prototype, {
-  _b64encode(bytes) {
-    return Buffer.from(bytes).toString('base64');
-  },
-  _b64decode(b64) {
-    return Uint8Array.from(Buffer.from(b64, 'base64'));
-  },
-  _randomBytes(n) {
-    return randomFillSync(new Uint8Array(n));
-  },
-  async _hash(val) {
-    return Uint8Array.from(createHash('sha256').update(val).digest());
-  },
-  async _hi(pwd, salt, iterations) {
-    const buf = await pbkdf2(pwd, salt, iterations, 32, 'sha256');
-    return Uint8Array.from(buf);
-  },
-});
