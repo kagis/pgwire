@@ -1711,7 +1711,10 @@ class PgoutputReader extends BinaryReader {
     // https://github.com/postgres/postgres/blob/27b77ecf9f4d5be211900eda54d8155ada50d696/src/include/replication/reorderbuffer.h#L275
     out.commitLsn = this._readLsn();
     out.commitTime = this._readTime();
-    out.xid = this._readInt32();
+    // https://github.com/postgres/postgres/blob/4d5105a684ba20bf6a98e6ae48224fe93382c040/src/backend/replication/logical/proto.c#LL67C30-L67C30
+    // https://github.com/postgres/postgres/blob/4d5105a684ba20bf6a98e6ae48224fe93382c040/src/include/libpq/pqformat.h#L143-L149
+    // pq_sendint32 handles both int32 and uint32, xid is uint32
+    out.xid = this._readUint32();
   }
   _upgradeMsgOrigin(out) {
     out.tag = 'origin';
