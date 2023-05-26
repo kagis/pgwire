@@ -1,4 +1,4 @@
-FROM denoland/deno:alpine-1.30.0
+FROM denoland/deno:alpine-1.34.0
 COPY test_deno.js /tmp/test/
 RUN set -x \
  && touch /tmp/mod.js \
