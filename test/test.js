@@ -625,6 +625,7 @@ export function setup({
       for await (const chunk of replstream.pgoutputDecode()) {
         // console.log(chunk);
         for (const pgomsg of chunk.messages) {
+          if (pgomsg.tag == 'PrimaryKeepaliveMessage') continue; // unpredictable
           actual.push(pgomsg);
         }
         // console.log({ lastLsn: chunk.lastLsn, stopLsn });

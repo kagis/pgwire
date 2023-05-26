@@ -1587,24 +1587,17 @@ class ReplicationStream extends BinaryReader {
         const { value: chunk, done } = await rx.next();
         if (done) break;
         const messages = [];
-        let shouldAck = false;
+        let shouldReply = false;
         for (const copyData of chunk.copies) {
           this._reset(copyData);
           const msg = this._readReplicationMessage();
-          switch (msg.tag) {
-            case 'XLogData':
-              messages.push(msg);
-              break;
-            case 'PrimaryKeepaliveMessage':
-              shouldAck = shouldAck || msg.shouldReply;
-              // TODO messages.push(msg); ?
-              break;
-          }
+          messages.push(msg);
+          shouldReply = shouldReply || Boolean(msg.shouldReply);
           if (lastLsn < msg.lsn) lastLsn = msg.lsn;
           if (lastLsn < msg.endLsn) lastLsn = msg.endLsn;
           if (lastTime < msg.time) lastTime = msg.time;
         }
-        if (shouldAck) {
+        if (shouldReply) {
           this._ackImmediate();
         }
         yield { lastLsn, lastTime, messages };
@@ -1677,9 +1670,11 @@ class PgoutputReader extends BinaryReader {
     const pgoreader = new PgoutputReader();
     for await (const chunk of replstream) {
       for (const msg of chunk.messages) {
-        pgoreader._reset(msg.data);
-        pgoreader._upgradeMsg(msg);
-        msg.data = null; // free XLogData buffer
+        if (msg.tag == 'XLogData') {
+          pgoreader._reset(msg.data);
+          msg.data = null; // free XLogData buffer
+          pgoreader._upgradeMsg(msg);
+        }
       }
       yield chunk;
     }

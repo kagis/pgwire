@@ -172,35 +172,45 @@ export interface LogicalReplicationOptions {
   readonly ackIntervalMillis?: number;
 }
 
-export interface ReplicationStream extends AsyncIterable<ReplicationChunk> {
+export interface ReplicationStream extends AsyncIterable<ReplicationChunk<ReplicationMessage>> {
   /** Confirms receipt of replication message by lsn.
    * Use {@link ReplicationMessage.lsn} to get lsn. */
   ack(lsn: string): undefined;
   /**
    * Decodes {@link ReplicationMessage.data} and yields upgraded pgoutput messages.
    * Use this method if replication is started with pgoutput slot. */
-  pgoutputDecode(): AsyncIterable<PgotputChunk>;
+  pgoutputDecode(): AsyncIterable<ReplicationChunk<PgoutputMessage>>;
 }
 
-export interface ReplicationChunk {
-  readonly messages: ReplicationMessage[];
+export interface ReplicationChunk<M> {
+  readonly messages: M[];
   readonly lastLsn: string;
   readonly lastTime: bigint;
 }
 
-export interface ReplicationMessage {
+export type ReplicationMessage = (
+  | ReplicationXLogData
+  | ReplicationPrimaryKeepaliveMessage
+);
+
+export interface ReplicationMessageBase {
   /** Log Serial Number of message.
    * Use it for {@link ReplicationStream.ack} to confirm receipt of message. */
    readonly lsn: string | null;
    readonly endLsn: string | null;
    /** microseconds since unix epoch */
    readonly time: bigint;
-   /** binary payload */
-   readonly data: Uint8Array;
 }
 
-export interface PgotputChunk extends ReplicationChunk {
-  readonly messages: PgoutputMessage[];
+export interface ReplicationXLogData extends ReplicationMessageBase {
+  readonly tag: 'XLogData';
+  /** binary payload */
+  readonly data: Uint8Array;
+}
+
+export interface ReplicationPrimaryKeepaliveMessage extends ReplicationMessageBase  {
+  readonly tag: 'PrimaryKeepaliveMessage';
+  readonly shouldReply: number;
 }
 
 /** https://www.postgresql.org/docs/14/protocol-logicalrep-message-formats.html */
@@ -213,9 +223,10 @@ export type PgoutputMessage = (
   | PgoutputDelete
   | PgoutputTruncate
   | PgoutputCustomMessage
+  | ReplicationPrimaryKeepaliveMessage
 );
 
-export interface PgoutputBegin extends ReplicationMessage {
+export interface PgoutputBegin extends ReplicationMessageBase {
   readonly tag: 'begin';
   /** https://github.com/postgres/postgres/blob/27b77ecf9f4d5be211900eda54d8155ada50d696/src/include/replication/reorderbuffer.h#L275 */
   readonly commitLsn: string;
@@ -223,13 +234,13 @@ export interface PgoutputBegin extends ReplicationMessage {
   readonly xid: number;
 }
 
-export interface PgoutputCommit extends ReplicationMessage {
+export interface PgoutputCommit extends ReplicationMessageBase {
   readonly tag: 'commit';
   readonly commitLsn: string;
   readonly commitTime: bigint;
 }
 
-export interface PgoutputRelation extends ReplicationMessage {
+export interface PgoutputRelation extends ReplicationMessageBase {
   readonly tag: 'relation';
   readonly relationid: number;
   readonly schema: string;
@@ -247,14 +258,14 @@ export interface PgoutputRelation extends ReplicationMessage {
   }>;
 }
 
-export interface PgoutputInsert extends ReplicationMessage {
+export interface PgoutputInsert extends ReplicationMessageBase {
   readonly tag: 'insert';
   readonly relation: PgoutputRelation;
   readonly before: null;
   readonly after: Record<string, any>;
 }
 
-export interface PgoutputUpdate extends ReplicationMessage {
+export interface PgoutputUpdate extends ReplicationMessageBase {
   readonly tag: 'update';
   readonly relation: PgoutputRelation;
   /**
@@ -269,7 +280,7 @@ export interface PgoutputUpdate extends ReplicationMessage {
   readonly after: Record<string, any>;
 }
 
-export interface PgoutputDelete extends ReplicationMessage {
+export interface PgoutputDelete extends ReplicationMessageBase {
   readonly tag: 'delete';
   readonly relation: PgoutputRelation;
   /**
@@ -279,7 +290,7 @@ export interface PgoutputDelete extends ReplicationMessage {
   readonly after: null;
 }
 
-export interface PgoutputTruncate extends ReplicationMessage {
+export interface PgoutputTruncate extends ReplicationMessageBase {
   readonly tag: 'truncate';
   readonly cascade: boolean;
   readonly restartIdentity: boolean;
@@ -287,7 +298,7 @@ export interface PgoutputTruncate extends ReplicationMessage {
   readonly relations: PgoutputRelation[];
 }
 
-export interface PgoutputCustomMessage extends ReplicationMessage {
+export interface PgoutputCustomMessage extends ReplicationMessageBase {
   readonly tag: 'message';
   readonly transactional: boolean;
   readonly messageLsn: string;
