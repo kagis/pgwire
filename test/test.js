@@ -524,6 +524,13 @@ export function setup({
       });
       assertEquals(typeName, 'oid');
       assertEquals(text, '1');
+      // null
+      [typeName, text] = await conn.query({
+        statement: /*sql*/ `select pg_typeof($1)::text, $1::text`,
+        params: [{ type: 'text', value: null }],
+      });
+      assertEquals(typeName, 'text');
+      assertEquals(text, null);
     } finally {
       await conn.end();
     }

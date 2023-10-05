@@ -15,12 +15,11 @@ RUN set -x \
   "subjectAltName = DNS:pgwssl" \
   > domains.txt \
 
- # I understand almost nothing about openssl,
  # got this from https://deno.land/x/postgres@v0.15.0/docker/generate_tls_keys.sh
- && openssl req -x509 -nodes -new -sha256 -newkey rsa:2048 -keyout ca.key -out ca.pem -subj "/CN=Example-Root-CA" \
+ && openssl req -x509 -nodes -new -sha256 -days 36135 -newkey rsa:2048 -keyout ca.key -out ca.pem -subj "/CN=Example-Root-CA" \
  && openssl x509 -outform pem -in ca.pem -out ca.crt \
  && openssl req -new -nodes -newkey rsa:2048 -keyout server.key -out server.csr -subj "/CN=Example" \
- && openssl x509 -req -sha256 -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -extfile domains.txt -out server.crt \
+ && openssl x509 -req -sha256 -days 36135 -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -extfile domains.txt -out server.crt \
  && chmod og-rwx server.key \
 
  && printf %s\\n \

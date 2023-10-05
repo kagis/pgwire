@@ -1103,6 +1103,7 @@ function extendedQueryBind(out, { portal, statementName, binary, params = [] }) 
   out.push(new FrontendMessage.Bind({ portal, statementName, binary, params }));
 
   function encodeParam({ value, type}) {
+    if (value == null) return null;
     // treat Uint8Array values as already encoded,
     // so user can receive value with unknown type as Uint8Array
     // from extended .query and pass it back as parameter
