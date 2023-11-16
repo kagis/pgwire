@@ -536,6 +536,19 @@ export function setup({
     }
   });
 
+  test('emoji', async _ => {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    try {
+      const [res] = await conn.query({
+        statement: /*sql*/ `select $1`,
+        params: [{ type: 'text', value: '\u{1f4ce}' }],
+      });
+      assertEquals(res, '\u{1f4ce}');
+    } finally {
+      await conn.end();
+    }
+  });
+
 // test('CREATE_REPLICATION_SLOT issue', async () => {
 //   const conn = await pgwire.connect(process.env.POSTGRES, {
 //     replication: 'database',

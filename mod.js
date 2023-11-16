@@ -2204,12 +2204,18 @@ class MessageSizer {
       throw TypeError('string or Uint8Array expected');
     }
   }
-  // https://stackoverflow.com/a/25994411
   _utf8length(s) {
+    // TODO still not shure that its correct.
+    // May be better use the same aproach as writeCounted:
+    // seek back and mutate 'size' prefix instead of
+    // compute message size ahead of allocation.
     let result = 0;
     for (let i = 0; i < s.length; i++) {
-      const c = s.charCodeAt(i);
-      result += c >> 11 ? 3 : c >> 7 ? 2 : 1;
+      const c = s.codePointAt(i);
+      if (c > 0xffff) i++, result += 4;
+      else if (c > 0x7ff) result += 3;
+      else if (c > 0x7f) result += 2;
+      else result++;
     }
     return result;
   }
