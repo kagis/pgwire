@@ -295,10 +295,11 @@ export interface PgoutputCustomMessage extends ReplicationMessage {
   readonly content: Uint8Array;
 }
 
-/** https://www.postgresql.org/docs/14/protocol-error-fields.html */
+/** https://www.postgresql.org/docs/16/protocol-error-fields.html */
 export interface PgNotice {
   /** WARNING, NOTICE, DEBUG, INFO, or LOG, or a localized translation of one of these. */
   severity: string;
+  severityEn: "WARNING" | "NOTICE" | "DEBUG" | "INFO" | "LOG";
   /** The SQLSTATE code for the error. Not localizable.
    * https://www.postgresql.org/docs/14/errcodes-appendix.html */
   code: string;

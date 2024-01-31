@@ -1009,7 +1009,12 @@ class PgError extends Error {
   static kErrorResponse = Symbol.for('pg.ErrorResponse');
   static kErrorCode = Symbol.for('pg.ErrorCode');
   static fromErrorResponse(errorResponse) {
-    const { code, message: messageHead, ...rest } = errorResponse || 0;
+    const {
+      code,
+      message: messageHead,
+      severityEn: _severityEn,
+      ...rest
+    } = errorResponse || 0;
     const propsfmt = (
       Object.entries(rest)
       .filter(([_, v]) => v != null)
@@ -1490,9 +1495,11 @@ class MessageReader extends BinaryReader {
       if (!fieldCode) break;
       fields[fieldCode] = this._readString();
     }
+    // https://www.postgresql.org/docs/16/protocol-error-fields.html
     return {
       severity: fields[0x53], // S
-      code: fields[0x43], //  C
+      severityEn: fields[0x56], // V
+      code: fields[0x43], // C
       message: fields[0x4d], // M
       detail: fields[0x44], // D
       hint: fields[0x48], // H
