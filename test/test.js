@@ -426,7 +426,9 @@ export function setup({
       ARRAY['"quoted"', '{string}', '"{-,-}"', e'\t'],
       ARRAY[[1, 2], [3, 4]],
       '[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}'::int[],
-      ARRAY[1, NULL, 2]
+      ARRAY[1, NULL, 2],
+      ARRAY[]::text[],
+      ARRAY[]::int[]
     `;
     const expected = [
       null,
@@ -450,6 +452,8 @@ export function setup({
       [[1, 2], [3, 4]],
       [[[1, 2, 3], [4, 5, 6]]],
       [1, null, 2],
+      [],
+      []
     ]
     const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {

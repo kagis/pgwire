@@ -2307,9 +2307,12 @@ class PgType {
       else if (inQuotes); // continue
       else if (ch == 0x7b /*{*/) stack.unshift([]), elStart = i + 1;
       else if (ch == 0x7d /*}*/ || ch == 0x2c /*,*/) { // TODO configurable delimiter
+        let empty = false;
         if (!result) {
           const escaped = text.slice(elStart, i); // TODO trim ' \t\n\r\v\f'
-          if (!/^NULL$/ui.test(escaped)) {
+          if (escaped == '') {
+            empty = true;
+          } if (!/^NULL$/ui.test(escaped)) {
             result = escaped.replace(/^"|"$|(?<!\\)\\/ug, '');
             // TODO accept decodeFn as argument,
             // extract parseArray logic out of decoder,
@@ -2317,7 +2320,9 @@ class PgType {
             result = this.decode(result, elemTypeOid);
           }
         }
-        stack[0].push(result);
+        if (!empty) {
+          stack[0].push(result);
+        }
         result = ch == 0x7d /*}*/ ? stack.shift() : null;
         elStart = i + 1; // TODO dry
       }
