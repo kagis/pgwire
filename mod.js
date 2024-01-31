@@ -2267,7 +2267,7 @@ class PgType {
       case   23 /* int4    */:
       case   26 /* oid     */:
       case  700 /* float4  */:
-      case  701 /* float8  */: return Number(text);
+      case  701 /* float8  */: return Number(text); // TODO Number.parseFloat ? (fix '' -> 0)
       case   20 /* int8    */: return BigInt(text);
       case  114 /* json    */:
       case 3802 /* jsonb   */: return JSON.parse(text);
@@ -2298,7 +2298,7 @@ class PgType {
     }
   }
   static _decodeArray(text, elemTypeOid) {
-    text = text.replace(/^\[.+=/u, ''); // skip dimensions
+    text = text.replace(/^\[.+=/, ''); // skip dimensions
     let result;
     for (let i = 0, inQuotes = false, elStart = 0, stack = []; i < text.length; i++) {
       const ch = text.charCodeAt(i);
@@ -2307,18 +2307,21 @@ class PgType {
       else if (inQuotes); // continue
       else if (ch == 0x7b /*{*/) stack.unshift([]), elStart = i + 1;
       else if (ch == 0x7d /*}*/ || ch == 0x2c /*,*/) { // TODO configurable delimiter
-        if (!result) {
-          const escaped = text.slice(elStart, i); // TODO trim ' \t\n\r\v\f'
-          if (!/^NULL$/ui.test(escaped)) {
-            result = escaped.replace(/^"|"$|(?<!\\)\\/ug, '');
-            // TODO accept decodeFn as argument,
-            // extract parseArray logic out of decoder,
-            // do benchmark of static vs dynamic dispatch
-            result = this.decode(result, elemTypeOid);
-          }
+        // TODO ensure .slice is cheap enough to do it unconditionally
+        const escaped = text.slice(elStart, i); // TODO trim ' \t\n\r\v\f'
+        if (result) {
+          stack[0].push(result);
+        } else if (/^NULL$/i.test(escaped)) {
+          stack[0].push(null);
+        } else if (escaped.length) {
+          const unescaped = escaped.replace(/^"|"$|(?<!\\)\\/g, '');
+          // TODO accept decodeFn as argument,
+          // extract parseArray logic out of decoder,
+          // do benchmark of static vs dynamic dispatch
+          const decoded = this.decode(unescaped, elemTypeOid);
+          stack[0].push(decoded);
         }
-        stack[0].push(result);
-        result = ch == 0x7d /*}*/ ? stack.shift() : null;
+        result = ch == 0x7d /*}*/ && stack.shift();
         elStart = i + 1; // TODO dry
       }
     }
