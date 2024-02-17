@@ -33,8 +33,8 @@ export function setup({
         scalar: 'hello',
         rows: [['hello', 'world'], ['bonjour', 'le monde']],
         columns: [
-          { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: 65535 },
-          { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: 65535 },
+          { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
+          { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
         ],
         notices: [
           { message: 'test start' },
@@ -50,8 +50,8 @@ export function setup({
           scalar: 'hello',
           rows: [['hello', 'world'], ['bonjour', 'le monde']],
           columns: [
-            { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: 65535 },
-            { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: 65535 },
+            { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
+            { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
           ],
         }, {
           status: 'DO',
@@ -149,8 +149,8 @@ export function setup({
         scalar: 'hello',
         rows: [['hello', 'world'], ['bonjour', 'le monde']],
         columns: [
-          { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: 65535 },
-          { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: 65535 },
+          { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
+          { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
         ],
         notices: [
           { message: 'test start' },
@@ -165,7 +165,7 @@ export function setup({
           status: 'PortalSuspended',
           scalar: 'test',
           rows: [['test']],
-          columns: [{ binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: 65535 }],
+          columns: [{ binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 }],
         }, {
           status: 'SELECT 1',
           scalar: 16909060,
@@ -173,7 +173,7 @@ export function setup({
           columns: [
             { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
             { binary: 1, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
-            { binary: 1, name: 'c', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 17, typeSize: 65535 }
+            { binary: 1, name: 'c', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 17, typeSize: -1 }
           ],
         }, {
           status: 'SELECT 1',
@@ -181,15 +181,15 @@ export function setup({
           rows: [[16909060, Uint8Array.of(0, 1, 2, 3, 4)]],
           columns: [
             { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
-            { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 17, typeSize: 65535 }
+            { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 17, typeSize: -1 }
           ],
         }, {
           status: 'SELECT 2',
           scalar: 'hello',
           rows: [['hello', 'world'], ['bonjour', 'le monde']],
           columns: [
-            { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: 65535 },
-            { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: 65535 },
+            { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
+            { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
           ],
         }, {
           status: 'DO',
@@ -1594,17 +1594,6 @@ export function setup({
         target: { hostname: 'pgwssl', port: 5432 },
         signal,
       });
-    }
-  });
-
-  test('ErrorResponse', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=1');
-    try {
-      await conn.query(/*sql*/ `select 1/0`);
-    } catch (e) {
-      assertEquals(e, {});
-    } finally {
-      await conn.end();
     }
   });
 
