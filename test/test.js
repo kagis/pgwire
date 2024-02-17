@@ -555,6 +555,18 @@ export function setup({
     }
   });
 
+  test('negative tableColumn', async _ => {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    try {
+      const res = await conn.query({
+        statement: /*sql*/ `select ctid from pg_type limit 0`,
+      });
+      assertEquals(res.columns[0].tableColumn, -1);
+    } finally {
+      await conn.end();
+    }
+  });
+
 // test('CREATE_REPLICATION_SLOT issue', async () => {
 //   const conn = await pgwire.connect(process.env.POSTGRES, {
 //     replication: 'database',
@@ -1582,6 +1594,17 @@ export function setup({
         target: { hostname: 'pgwssl', port: 5432 },
         signal,
       });
+    }
+  });
+
+  test('ErrorResponse', async _ => {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=1');
+    try {
+      await conn.query(/*sql*/ `select 1/0`);
+    } catch (e) {
+      assertEquals(e, {});
+    } finally {
+      await conn.end();
     }
   });
 

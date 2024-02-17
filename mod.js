@@ -1266,7 +1266,7 @@ class BinaryReader {
   }
   _readInt16() {
     this._checkSize(2);
-    return this._b[this._p++] << 8 | this._b[this._p++];
+    return (this._b[this._p++] << 24 | this._b[this._p++] << 16) >> 16;
   }
   _readInt32() {
     this._checkSize(4);
