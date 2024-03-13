@@ -435,7 +435,7 @@ for (const column of pgresult.columns) {
   column.typeOid;
   column.typeMod;
   column.typeSize;
-  column.tableSchema;
+  column.tableOid;
   column.tableColumn;
 }
 

@@ -144,8 +144,12 @@ export interface PgChunkRowDescription extends Uint8Array  {
 
 export interface ColumnDescription {
   readonly name: string;
+  readonly tableOid: number;
+  readonly tableColumn: number;
   readonly typeOid: number;
+  readonly typeSize: number;
   readonly typeMod: number;
+  readonly binary: number;
 }
 
 export interface Statement {
