@@ -2346,25 +2346,50 @@ class PgType {
     const delim = ','; // TODO box[] uses semicolon
     return `{${arr.map(quoteElem).join(delim)}}`;
   }
-  static _decodeBytea(text) {
-    // https://www.postgresql.org/docs/9.6/datatype-binary.html#AEN5830
-    if (!text.startsWith('\\x')) {
-      return Uint8Array.from( // legacy escape format TODO no eval
-        Function(text.replace('"', '\\"').replace(/.*/, 'return "$&"')).call(),
-        x => x.charCodeAt(),
-      );
+  // https://github.com/postgres/postgres/blob/367c989cd8405663bb9a35ec1aa4f79b673a55ff/src/backend/utils/adt/varlena.c#L290
+  static _decodeBytea(/** @type {string} */ text) {
+    // https://www.postgresql.org/docs/16/datatype-binary.html#DATATYPE-BINARY-BYTEA-HEX-FORMAT
+    if (/^\\x/.test(text)) {
+      const hexmap = [
+        ,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9,,,,,,,,
+        10, 11, 12, 13, 14, 15,,,,,,,,,,,,,,,,,,,,,,,,,,,
+        10, 11, 12, 13, 14, 15,
+      ];
+      text = text.slice(2);
+      const bytes = new Uint8Array(text.length >> 1);
+      for (let i = 0; i < bytes.length; i++) {
+        const h = hexmap[text.charCodeAt(i << 1)];
+        const l = hexmap[text.charCodeAt(i << 1 | 1)];
+        if (isNaN(h + l)) throw new PgError({ message: 'Bad encoded bytea received', code: 'protocol_violation' });
+        bytes[i] = h << 4 | l;
+      }
+      return bytes;
     }
-    const hex = text.slice(2); // TODO check hex.length is even ?
-    const bytes = new Uint8Array(hex.length >> 1);
-    for (let i = 0, m = 4; i < hex.length; i++, m ^= 4) {
-      let d = hex.charCodeAt(i);
-      if (0x30 <= d && d <= 0x39) d -= 0x30; // 0-9
-      else if (0x41 <= d && d <= 0x46) d -= 0x41 - 0xa; // A-F
-      else if (0x61 <= d && d <= 0x66) d -= 0x61 - 0xa; // a-f
-      else throw PgError({ message: 'Bad encoded bytea received', code: 'protocol_violation' });
-      bytes[i >> 1] |= d << m; // m==4 on even iter, m==0 on odd iter
+    // https://www.postgresql.org/docs/16/datatype-binary.html#DATATYPE-BINARY-BYTEA-ESCAPE-FORMAT
+    const utf8enc = new TextEncoder();
+    const bytes = utf8enc.encode(text);
+    let j = 0;
+    for (let i = 0; i < bytes.length;) {
+      const b0 = bytes[i++];
+      if (b0 != 0x5c) {
+        bytes[j++] = b0;
+        continue;
+      }
+      const b1 = bytes[i++];
+      if (b1 == 0x5c) {
+        bytes[j++] = 0x5c;
+        continue;
+      }
+      const b2 = bytes[i++];
+      const b3 = bytes[i++];
+      if ((b1 & ~0b11) == 0x30 && (b2 & ~0b111) == 0x30 && (b3 & ~0b111) == 0x30) {
+        bytes[j++] = (b1 & 0b11) << 6 | (b2 & 0b111) << 3 | (b3 & 0b111);
+        continue;
+      }
+      throw new PgError({ message: 'Bad encoded bytea received', code: 'protocol_violation' });
     }
-    return bytes;
+    return bytes.subarray(0, j);
   }
   static _encodeBytea(bytes) {
     return '\\x' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');

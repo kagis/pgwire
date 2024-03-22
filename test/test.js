@@ -421,15 +421,15 @@ export function setup({
       json_build_object('hello', 'world', 'num', 1),
       '1a/2b'::pg_lsn,
       'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid,
-      ARRAY[1, 2, 3]::int[],
-      ARRAY[1, 2, 3]::text[],
-      ARRAY['"quoted"', '{string}', '"{-,-}"', e'\t'],
-      ARRAY[[1, 2], [3, 4]],
+      array[1, 2, 3]::int[],
+      array[1, 2, 3]::text[],
+      array['"quoted"', '{string}', '"{-,-}"', e'\t'],
+      array[[1, 2], [3, 4]],
       '[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}'::int[],
-      ARRAY[1, NULL, 2],
-      ARRAY[NULL]::text[],
-      ARRAY[]::text[],
-      ARRAY[]::int[]
+      array[1, null, 2],
+      array[null]::text[],
+      array[]::text[],
+      array[]::int[]
     `;
     const expected = [
       null,
@@ -456,7 +456,7 @@ export function setup({
       [null],
       [],
       [],
-    ]
+    ];
     const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
     try {
       const [[...simple], [...ext]] = await Promise.all([
@@ -465,6 +465,19 @@ export function setup({
       ]);
       assertEquals(simple, expected);
       assertEquals(ext, expected);
+    } finally {
+      await conn.end();
+    }
+  });
+
+  test('bytea decode escape formated', async _ => {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    try {
+      const [val] = await conn.query(String.raw /*sql*/ `
+        set bytea_output = escape;
+        select bytea 'hello\000\001\002\003\004\\';
+      `);
+      assertEquals(val, Uint8Array.of(0x68, 0x65, 0x6c, 0x6c, 0x6f, 0, 1, 2, 3, 4, 0x5c));
     } finally {
       await conn.end();
     }
