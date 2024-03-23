@@ -1782,7 +1782,7 @@ class PgoutputReader extends BinaryReader {
       typeMod: this._readInt32(),
       typeSchema: null,
       typeName: null, // TODO resolve builtin type names?
-    }
+    };
     Object.assign(col, this._typeCache.get(col.typeOid));
     return col;
   }
@@ -2416,7 +2416,7 @@ function millis(inp) {
 
 class Channel {
   constructor() {
-    this._qnext = []
+    this._qnext = [];
     this._qpush = [];
     this._value = undefined;
     this._pausePushAsync = resolve => this._qpush.push({ done: false, value: this._value, resolve });
