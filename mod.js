@@ -101,16 +101,18 @@ class PgPool {
         cause: this._endReason,
       });
     }
+    let caughtError;
     const conn = this._getConnection();
     try {
       yield * conn.stream(...args);
     } catch (err) {
       // Keep err for cases when _recycleConnection throws PgError.left_in_txn.
       // We will report err as cause of PgError.left_in_txn.
-      await this._recycleConnection(conn, err);
+      caughtError = err;
       throw err;
+    } finally {
+      await this._recycleConnection(conn, caughtError);
     }
-    await this._recycleConnection(conn);
   }
   async end() {
     if (!this._endReason) {

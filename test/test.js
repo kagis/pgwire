@@ -1372,6 +1372,30 @@ export function setup({
     }
   });
 
+  test('pool should release connection after stream interrupted', async _ => {
+    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=0');
+    try {
+      const stream = pool.stream(/*sql*/ `
+        set application_name = 'pool_test';
+        commit;
+        select 'hello';
+      `);
+      for await (const { rows } of stream) {
+        // break after application_name commited
+        if (rows.length) break;
+      }
+
+      const [count] = await pool.query(/*sql*/ `
+        select count(*)
+        from pg_stat_activity
+        where application_name = 'pool_test'
+      `);
+      assertEquals(count, 0n);
+    } finally {
+      await pool.end();
+    }
+  });
+
   test('connection application_name', async _ => {
     const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?application_name=test');
     try {
