@@ -241,7 +241,7 @@ class PgConnection {
       this._rejectReady = reject;
     });
     this._whenReady.catch(Boolean);
-    this._saslScramSha256 = null;
+    this._sasl = null;
     this._authok = false;
     // create StartupMessage here to validate options in constructor call stack
     this._startupmsg = new FrontendMessage.StartupMessage({
@@ -533,6 +533,7 @@ class PgConnection {
     this.parameters = Object.create(null);
     this._lastErrorResponse = null;
     this._ssl = null;
+    this._sasl = null;
     this._femsgw = null;
     _net.closeNullable(this._socket);
     this._socket = null;
@@ -882,33 +883,26 @@ class PgConnection {
     // if (mechanism != 'SCRAM-SHA-256') {
     //   throw new PgError({ message: 'Unsupported SASL mechanism ' + JSON.stringify(mechanism) });
     // }
-    this._saslScramSha256 = new SaslScramSha256();
-    const firstmsg = await this._saslScramSha256.start();
-    const utf8enc = new TextEncoder();
+    this._sasl = new SaslScramSha256();
+    const data = await this._sasl.start();
     await this._writeFemsg(new FrontendMessage.SASLInitialResponse({
       mechanism: 'SCRAM-SHA-256',
-      data: utf8enc.encode(firstmsg),
+      data,
     }));
   }
   async _recvAuthenticationSASLContinue(_, data) {
     if (this._password == null) {
       throw new PgError({
         message: 'Postgres requires authentication, but no password provided',
-        code: 'nopwd_sha256',
+        code: 'nopwd_sasl',
       });
     }
-    const utf8enc = new TextEncoder();
-    const utf8dec = new TextDecoder();
-    const finmsg = await this._saslScramSha256.continue(
-      utf8dec.decode(data),
-      this._password,
-    );
-    await this._writeFemsg(new FrontendMessage.SASLResponse(utf8enc.encode(finmsg)));
+    const finmsg = await this._sasl.continue(data, this._password);
+    await this._writeFemsg(new FrontendMessage.SASLResponse(finmsg));
   }
   _recvAuthenticationSASLFinal(_, data) {
-    const utf8dec = new TextDecoder();
-    this._saslScramSha256.finish(utf8dec.decode(data));
-    this._saslScramSha256 = null;
+    this._sasl.finish(data);
+    this._sasl = null;
   }
   _recvAuthenticationOk() {}
   _recvErrorResponse(_, payload) {
@@ -930,7 +924,11 @@ class PgConnection {
   _startupComplete() {
     // we dont need password anymore, its more secure to forget it
     this._password = null;
-    // TODO we should check that server does not cheat with message order when SASL used
+    // check that SASL auth is complete and server is verified
+    if (this._sasl) {
+      throw new PgError({ message: 'incomplete SASL authentication' });
+    }
+    // TODO impl requireSASL mode
     this._resolveReady();
     this._pipeFemsgqPromise = this._pipeFemsgq();
     if (this._wakeInterval > 0) {
@@ -2473,12 +2471,16 @@ class Channel {
 export class SaslScramSha256 {
   _clientFirstMessageBare;
   _serverSignatureB64;
+
   async start() {
     const clientNonce = this._randomBytes(24);
     this._clientFirstMessageBare = 'n=,r=' + this._b64encode(clientNonce);
-    return 'n,,' + this._clientFirstMessageBare;
+    const utf8enc = new TextEncoder();
+    return utf8enc.encode('n,,' + this._clientFirstMessageBare);
   }
-  async continue(serverFirstMessage, password) {
+  async continue(serverFirstMessageUtf8, password) {
+    const utf8dec = new TextDecoder();
+    const serverFirstMessage = utf8dec.decode(serverFirstMessageUtf8);
     const utf8enc = new TextEncoder();
     const { 'i': iterations, 's': saltB64, 'r': nonceB64 } = this._parseMsg(serverFirstMessage);
     const finalMessageWithoutProof = 'c=biws,r=' + nonceB64;
@@ -2497,13 +2499,15 @@ export class SaslScramSha256 {
     const serverKey = await this._hmac(saltedPassword, utf8enc.encode('Server Key'));
     const serverSignature = await this._hmac(serverKey, authMessage);
     this._serverSignatureB64 = this._b64encode(serverSignature);
-    return finalMessageWithoutProof + ',p=' + this._b64encode(clientProof);
+    return utf8enc.encode(finalMessageWithoutProof + ',p=' + this._b64encode(clientProof));
 
     function xor(a, b) {
       return Uint8Array.from(a, (ai, i) => ai ^ b[i]);
     }
   }
-  finish(response) {
+  finish(responseUtf8) {
+    const utf8dec = new TextDecoder();
+    const response = utf8dec.decode(responseUtf8);
     if (!this._serverSignatureB64) {
       throw Error('unexpected auth finish');
     }

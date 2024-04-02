@@ -1064,7 +1064,7 @@ export function setup({
 
   test('auth scram-sha-256', async _ => {
     const caughtError = await pgconnect('postgres://pgwire_sha256@pgwssl:5432/postgres').catch(Object);
-    assertError(caughtError, 'PgError.nopwd_sha256');
+    assertError(caughtError, 'PgError.nopwd_sasl');
     const conn = await pgconnect('postgres://pgwire_sha256:secret@pgwssl:5432/postgres');
     try {
       const [username] = await conn.query(/*sql*/ `select current_user`);
