@@ -1580,7 +1580,7 @@ class ReplicationStream extends BinaryReader {
       Object.entries(options)
       .map(([k, v]) => pgident(k) + ' ' + pgliteral(v))
       .join(',')
-      .replace(/.+/, '($&)')
+      .replace(/.+/s, '($&)')
     );
     // TODO get wal_sender_timeout,
     // but user may have no access to wal_sender_timeout setting
