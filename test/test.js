@@ -1679,6 +1679,17 @@ export function setup({
     }
   });
 
+  test('maxReadBuf', async _ => {
+    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_maxReadBuf=5242880');
+    try {
+      const err = await conn.query(/*sql*/ `select repeat('a', 10 << 20)`).catch(Object);
+      assertEquals(err instanceof Error, true);
+      assertEquals(err.message, 'postgres sent too big message');
+    } finally {
+      await conn.end();
+    }
+  });
+
   function assertError(actualError, expectedName) {
     if (
       actualError instanceof Error &&

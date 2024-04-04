@@ -205,6 +205,7 @@ class PgConnection {
     hostname, port, password, sslmode, sslrootcert,
     _connectRetry = 0,
     _wakeInterval = 2000,
+    _maxReadBuf = 50 << 20, // 50 MiB
     _debug = false,
     ...options
   }) {
@@ -228,6 +229,7 @@ class PgConnection {
     this._wakeSupress = true;
     this._wakeInterval = Math.max(millis(_wakeInterval), 0);
     this._wakeTimer = null;
+    this._maxReadBuf = _maxReadBuf;
     this._rowColumns = null; // last RowDescription
     this._rowTextDecoder = new TextDecoder('utf-8', { fatal: true });
     this._copyingOut = false;
@@ -560,9 +562,8 @@ class PgConnection {
     this._femsgw = new MessageWriter(this._socket);
     await this._writeFemsg(this._startupmsg);
 
-    const msgr = new MessageReader(this._socket);
     try {
-      for await (const chunk of msgr) {
+      for await (const chunk of MessageReader.readMessages(this._socket, this._maxReadBuf)) {
         await this._recvMessages(chunk);
       }
 
@@ -1327,24 +1328,22 @@ class BinaryReader {
 
 // https://www.postgresql.org/docs/14/protocol-message-formats.html
 class MessageReader extends BinaryReader {
-  constructor(socket) {
-    super();
-    this._iterator = this._iterate(socket);
-  }
-  [Symbol.asyncIterator]() {
-    return this._iterator;
-  }
-  async * _iterate(socket) {
-    let buf = new Uint8Array(16_640);
+  static async * readMessages(socket, maxReadBuf) {
+    let buf = new Uint8Array(0x80000); // 512k
+    maxReadBuf = Math.max(buf.length, maxReadBuf) | 0;
     let nbuf = 0;
+    const msgr = new this();
     for (;;) {
+      if (nbuf >= maxReadBuf) {
+        throw new Error('postgres sent too big message');
+      }
       if (nbuf >= buf.length) { // grow buffer
         const oldbuf = buf;
-        buf = new Uint8Array(oldbuf.length * 2); // TODO prevent uncontrolled grow
+        buf = new Uint8Array(Math.min(buf.length * 2, maxReadBuf));
         buf.set(oldbuf);
       }
       const nread = await _net.read(socket, buf.subarray(nbuf));
-      if (nread == null) break;
+      if (nread == null) break; // EOF
       nbuf += nread;
 
       let nparsed = 0;
@@ -1354,8 +1353,8 @@ class MessageReader extends BinaryReader {
         const isize = itag + 1;
         const ipayload = isize + 4;
         if (nbuf < ipayload) break; // incomplete message
-        // TODO MessageReader._getInt32
-        const size = buf[isize] << 24 | buf[isize + 1] << 16 | buf[isize + 2] << 8 | buf[isize + 3];
+        msgr._reset(buf.subarray(isize, ipayload));
+        const size = msgr._readInt32();
         if (size < 4) {
           throw new PgError({
             message: 'Postgres sent message with invalid size (less than 4)',
@@ -1365,18 +1364,20 @@ class MessageReader extends BinaryReader {
         const inext = isize + size;
         // TODO use grow hint
         if (nbuf < inext) break; // incomplete message
-        this._reset(buf.subarray(ipayload, inext));
-        const message = this._readBackendMessage(buf[itag]);
+        msgr._reset(buf.subarray(ipayload, inext));
+        const message = msgr._readBackendMessage(buf[itag]);
         messages.push(message);
         // TODO batch DataRow here
         nparsed = inext;
       }
-
       if (nparsed) {
         yield { nparsed, messages };
         buf.copyWithin(0, nparsed, nbuf); // move unconsumed bytes to begining of buffer
         nbuf -= nparsed;
       }
+    }
+    if (nbuf > 0) {
+      throw Error('postgres closed connection before message complete');
     }
   }
 
