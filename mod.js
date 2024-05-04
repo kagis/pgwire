@@ -1,4 +1,4 @@
-/* Copyright (c) 2022 exe-dealer@yandex.ru at KAGIS
+/* Copyright (c) 2024 exe-dealer@yandex.ru at KAGIS
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the
@@ -20,13 +20,10 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-/// <reference types="./mod.d.ts" />
-
-// TODO abort signal (connectRetry)
+/** @deprecated */
 export async function pgconnect(...optionsChain) {
   const conn = pgconnection(...optionsChain);
-  await conn.start();
-  // await conn.query();
+  await conn.query();
   return conn;
 }
 
@@ -49,6 +46,14 @@ export function pgident(...segments) {
   return segments.map(it => '"' + it.replace(/"/g, '""') + '"').join('.');
 }
 
+export class PgError extends Error {
+  constructor(errorResponse) {
+    super(errorResponse.message, { cause: errorResponse });
+    this.name = 'PgError.' + errorResponse.code;
+    Object.defineProperty(this, 'name', { enumerable: false });
+  }
+}
+
 function computeConnectionOptions([uriOrObj, ...rest]) {
   if (!uriOrObj) {
     return { hostname: '127.0.0.1', port: 5432 };
@@ -67,20 +72,23 @@ function computeConnectionOptions([uriOrObj, ...rest]) {
       ...Object.fromEntries(uri.searchParams)
     });
   }
+  // TODO skip undefined props not only for uri props
   return Object.assign(computeConnectionOptions(rest), uriOrObj);
 
+  // TODO keep non serialiable values
   function withoutUndefinedProps(obj) {
     return JSON.parse(JSON.stringify(obj));
   }
 }
 
 class PgPool {
-  // TODO whenEnded, pending
+  // TODO .pending, .queryable
+
   constructor(options) {
     /** @type {Set<PgConnection>} */
     this._connections = new Set();
     this._endReason = null;
-    this._options = options;
+    this._options = { ...options, _noExplicitTransactions: true };
     this._poolSize = Math.max(options._poolSize, 0);
     // postgres v14 has `idle_session_timeout` option.
     // But if .query will be called when socket is closed by server
@@ -95,43 +103,22 @@ class PgPool {
   }
   async * stream(...args) {
     if (this._endReason) {
-      throw new PgError({
-        message: 'Unable to do postgres query on ended pool',
-        code: 'conn_ended',
-        cause: this._endReason,
-      });
+      throw Error('postgres query late', { cause: this._endReason });
     }
-    let caughtError;
     const conn = this._getConnection();
     try {
       yield * conn.stream(...args);
-    } catch (err) {
-      // Keep err for cases when _recycleConnection throws PgError.left_in_txn.
-      // We will report err as cause of PgError.left_in_txn.
-      caughtError = err;
-      throw err;
     } finally {
-      await this._recycleConnection(conn, caughtError);
+      await this._recycleConnection(conn);
     }
   }
   async end() {
-    if (!this._endReason) {
-      this._endReason = new PgError({ message: 'Postgres connection pool ended' });
-    }
+    this._endReason ||= Error('postgres pool ended');
     await Promise.all(Array.from(this._connections, conn => conn.end()));
   }
-  destroy(destroyReason) {
-    if (!(destroyReason instanceof Error)) {
-      destroyReason = new PgError({
-        message: 'Postgres connection pool destroyed',
-        cause: destroyReason,
-      });
-    }
-    if (!this._endReason) {
-      this._endReason = destroyReason;
-    }
-    this._connections.forEach(it => it.destroy(destroyReason));
-    return destroyReason;
+  destroy(cause) {
+    this._endReason ||= Error('postgres pool destroyed', { cause });
+    this._connections.forEach(it => it.destroy(cause));
   }
   _getConnection() {
     // try to reuse connection
@@ -150,7 +137,7 @@ class PgPool {
     newConn.whenDestroyed.then(this._onConnectionDestroyed.bind(this, newConn));
     return newConn;
   }
-  async _recycleConnection(conn, queryError) {
+  async _recycleConnection(conn) {
     if (!(this._poolSize > 0)) {
       // TODO not wait
       // but pgbouncer does not allow async Terminate anyway.
@@ -158,35 +145,7 @@ class PgPool {
       await conn.end();
       return;
     }
-
-    if (conn.inTransaction) {
-      // discard all
-      // - people say that it is slow as creating new connection.
-      // + it will cause error when connection is idle in transaction
-
-      // rollback
-      // - generates noisy notices in server log
-
-      // begin; rollback;
-      // + no notices when no active transactions.
-      // + 'begin' causes notice warning when in transaction.
-      // - will be not executed as single query when connection is errored in transaction
-
-      // TODO check if query pipelining actually improves performance
-
-      // Next query can be already executed and can modify db
-      // so destroying connection cannot prevent next query execution.
-      // But next query will be executed in explicit transaction
-      // so modifications of next query will not be commited automaticaly.
-      // Rather then next query does explicit COMMIT
-      throw conn.destroy(new PgError({
-        message: 'Pooled postgres connection left in transaction',
-        code: 'left_in_txn',
-        cause: queryError,
-      }));
-    }
-
-    if (this._poolIdleTimeout && !conn.pending /* is idle */) {
+    if (this._poolIdleTimeout && conn.queryable && !conn.pending /* is idle */) {
       conn._poolTimeoutId = setTimeout(this._onConnectionTimeout, this._poolIdleTimeout, this, conn);
     }
   }
@@ -205,27 +164,27 @@ class PgConnection {
     hostname, port, password, sslmode, sslrootcert,
     _connectRetry = 0,
     _wakeInterval = 2000,
+    _noExplicitTransactions = false,
     _maxReadBuf = 50 << 20, // 50 MiB
     _debug = false,
     ...options
   }) {
     this.onnotification = null;
     this.parameters = Object.create(null);
-    this._debug = ['true', 'on', '1', 1, true].includes(_debug);
-    this._connectOptions = { hostname, port };
+    this._debug = /^(true|on|yes|1)$/i.test(_debug);
+    this._socketOptions = { hostname, port };
     this._user = options.user;
-    this._password = password;
+    this._password = password || '';
     this._sslmode = sslmode;
     this._sslrootcert = sslrootcert;
-    this._ssl = null;
-    this._connectRetry = Math.max(millis(_connectRetry), 0);
-    this._connectRetryTimer = null;
+    this._ssl = false;
+    // TODO ioloop starts not now
+    this._connectDeadline = performance.now() + (Math.max(millis(_connectRetry), 0) || NaN);
     this._socket = null;
     this._backendKeyData = null;
     this._lastErrorResponse = null;
     this._queuedResponseChannels = [];
     this._currResponseChannel = null;
-    this._transactionStatus = null;
     this._wakeSupress = true;
     this._wakeInterval = Math.max(millis(_wakeInterval), 0);
     this._wakeTimer = null;
@@ -236,15 +195,8 @@ class PgConnection {
     this._femsgw = null;
     this._femsgq = new Channel();
     this._endReason = null;
-    this._resolveReady = null;
-    this._rejectReady = null;
-    this._whenReady = new Promise((resolve, reject) => {
-      this._resolveReady = resolve;
-      this._rejectReady = reject;
-    });
-    this._whenReady.catch(Boolean);
     this._sasl = null;
-    this._authok = false;
+    this._noExplicitTransactions = _noExplicitTransactions;
     // create StartupMessage here to validate options in constructor call stack
     this._startupmsg = new FrontendMessage.StartupMessage({
       // Underscored props are used for client only,
@@ -259,26 +211,6 @@ class PgConnection {
     this._pipeFemsgqPromise = null;
     this._ioloopPromise = null;
   }
-  async start() {
-    if (this._endReason) {
-      throw new PgError({
-        message: 'Cannot start ended postgres connection',
-        code: 'conn_ended',
-        cause: this._endReason,
-      });
-    }
-    this._ioloopEnsure();
-    try {
-      await this._whenReady;
-    } catch (cause) {
-      throw new PgError({ cause });
-    }
-  }
-  _ioloopEnsure() {
-    if (!this._ioloopPromise) {
-      this._ioloopPromise = this._ioloop();
-    }
-  }
   get whenDestroyed() {
     return this._femsgq._whenEnded.then(_ => this._ioloopPromise);
   }
@@ -288,13 +220,6 @@ class PgConnection {
   }
   get queryable() {
     return !this._endReason;
-  }
-  get inTransaction() {
-    return this._socket && ( // if not destroyed
-      // TODO != 0x49 /*I*/
-      this._transactionStatus == 0x45 || // E
-      this._transactionStatus == 0x54 // T
-    ) && this._transactionStatus; // avoid T|E value erasure
   }
   /** ID of postgres backend process. */
   get pid() {
@@ -316,43 +241,36 @@ class PgConnection {
   }
   async * stream(...args) {
     if (this._endReason) {
-      throw new PgError({
-        message: 'Unable to do postgres query on ended connection',
-        code: 'conn_ended',
-        cause: this._endReason,
-      });
+      throw Error('postgres query late', this._endReason);
     }
     // TODO test .query after .end should throw stable error ? what if auth failed after .end
 
-    const stdinSignal = { aborted: false, reason: Error('aborted') };
+    const stdinAborter = new AbortController();
     const responseEndLock = new Channel();
     const responseChannel = new Channel();
     // Collect outgoing messages into intermediate array
     // to let errors occur before any message enqueued.
-    const frontendMessages = [
-      // To cancel query we should send CancelRequest _after_
-      // query is received by server and started executing.
-      // But we cannot wait for first chunk because postgres can hold it
-      // for an unpredictably long time. I see no way to make postgres
-      // to flush RowDescription in simple protocol. So we prepend Query message
-      // with Sync to eagerly know when query is started and can be cancelled.
-      // Also it makes possible to determine whether NoticeResponse/ErrorResponse
-      // is asyncronous server message or belongs to query.
-      // (TODO Maybe there is a small window between first ReadyForQuery and actual
-      // query execution, when async messages can be received. Need more source digging)
-      // Seems that this is ok to do Sync during simple protocol
-      // even when replication=database.
-      new FrontendMessage.Sync(),
-    ];
+    const frontendMessages = [];
+    // To cancel query we should send CancelRequest _after_ query is received
+    // by server and started executing. We going to prepend query with Sync
+    // message to detect response start boundary by receiving ReadyForQuery.
+    // ReadyForQuery is flushed immediatly after Sync is handled by server
+    // so we can know when query is started and can be cancelled.
+    // Also it makes possible to determine whether NoticeResponse/ErrorResponse
+    // is asyncronous server message or belongs to query.
+    // Seems that its ok to do Sync during simple protocol even when replication=database.
+    // TODO Maybe there is a small window between first ReadyForQuery and actual
+    // query execution, when async messages can be received. Need more source digging
+    frontendMessages.push(new FrontendMessage.Sync());
     let signal;
     if (typeof args[0] == 'string') {
       const [simpleSql, simpleOptions] = args;
       signal = simpleOptions?.signal;
-      simpleQuery(frontendMessages, stdinSignal, simpleSql, simpleOptions, responseEndLock);
+      simpleQuery(frontendMessages, stdinAborter.signal, simpleSql, simpleOptions, responseEndLock);
     } else {
-      signal = extendedQuery(frontendMessages, stdinSignal, args);
+      signal = extendedQuery(frontendMessages, stdinAborter.signal, args);
     }
-    this._throwIfQueryAborted(signal);
+    // this._throwIfQueryAborted(signal);
     const onabort = this._wake.bind(this);
     // TODO if next two steps throw error then abort handler will not be removed.
     signal?.addEventListener('abort', onabort);
@@ -364,32 +282,43 @@ class PgConnection {
     frontendMessages.forEach(this._femsgq.push, this._femsgq);
     this._queuedResponseChannels.push(responseChannel);
 
-    this._ioloopEnsure();
+    this._ioloopPromise ||= this._ioloop();
+
     try {
+      let value, done, errorResponse;
       for (;;) {
         // Important to call responseChannel.next() as first step of try block
         // to maximize chance that finally block will be executed after
         // query is received by server. So CancelRequest will be emited
         // in case of error, and skip-waiting duration will be minimized.
-        const { value, done } = await responseChannel.next();
-        if (done && value) throw new PgError({ cause: value });
+        ({ value, done } = await responseChannel.next());
         if (done) break;
-        this._throwIfQueryAborted(signal);
+        if (value.tag == 'ErrorResponse') {
+          errorResponse = value.payload;
+        }
         yield value;
+        if (signal?.aborted) {
+          throw Error('postgres query aborted', { cause: signal.reason });
+        }
       }
-    } catch (err) {
-      stdinSignal.reason = err;
-      throw err;
+      if (errorResponse) {
+        throw new PgError(errorResponse);
+      }
+      if (value) { // TODO Error('postgres connection destroyed during query') ?
+        throw Error('postgres query failed', value);
+      }
+    } catch (ex) {
+      stdinAborter.abort(ex);
+      throw ex;
     } finally {
       // if query completed successfully then all stdins are drained,
       // so abort will have no effect and will not break anything.
       // Оtherwise
       // - if error occured
-      // - or iter was .returned()
+      // - or iter was .return()'ed
       // - or no COPY FROM STDIN was queried
       // then we should abort all pending stdins
-      // stdinAbortCtl.abort();
-      stdinSignal.aborted = true;
+      stdinAborter.abort();
 
       // https://github.com/kagis/pgwire/issues/17
       if ( // going to do CancelRequest
@@ -409,22 +338,12 @@ class PgConnection {
         // responseChannel.return() is resolved
         await this._cancelRequest().catch(this._log);
       }
-      // wait ReadyForQuery
-      await responseChannel.return();
+      await responseChannel.return(); // wait ReadyForQuery
       responseEndLock.end();
       // signal is user-provided object, so it can throw and override query error.
       // TODO Its not clear how should we handle this errors, so just do this step
       // at the end of function to minimize impact on code above.
       signal?.removeEventListener('abort', onabort);
-    }
-  }
-  _throwIfQueryAborted(signal) {
-    if (signal?.aborted) {
-      throw new PgError({
-        message: 'Postgres query aborted',
-        code: 'aborted',
-        cause: signal.reason,
-      });
     }
   }
 
@@ -445,57 +364,52 @@ class PgConnection {
       // }
       this._femsgq.push(new FrontendMessage.Terminate());
       this._femsgq.end();
-      this._endReason = new PgError({ message: 'Postgres connection ended' });
-      // this._rejectReady(this._endReason);
+      this._endReason = { cause: Error('postgres connection ended') };
     }
     // TODO _net.close can throw
     await this._ioloopPromise;
   }
-  destroy(destroyReason) {
+  async [Symbol.asyncDispose]() {
+    await this.end();
+  }
+  destroy(cause = Error('postgres connection destroyed')) {
     clearInterval(this._wakeTimer);
-    clearTimeout(this._connectRetryTimer);
     // TODO it can be overwritten in ioloop.
     // It used for PgConnection.pid which is used to
     // determine if connection is alive.
     this._backendKeyData = null;
-    if (!(destroyReason instanceof Error)) {
-      destroyReason = new PgError({
-        message: 'Postgres connection destroyed',
-        cause: destroyReason,
-      });
-    }
+    this._msgw = null;
+    _net.closeNullable(this._socket); // TODO can throw ?
+    this._socket = null;
+
+    // const destroyError = Error('postgres connection destroyed', { cause });
     if (!this._endReason) {
-      this._log('connection destroyed', destroyReason);
       this._femsgq.end();
-      // save destroyReason only if .destroy() called before .end()
+      // save destroyError only if .destroy() called before .end()
       // so new queries will be rejected with the same error before
       // and after _whenReady settled
-      this._endReason = destroyReason;
-      this._rejectReady(destroyReason);
+      this._endReason = { cause };
+      this._log('connection destroyed', cause);
     }
     // TODO await _flushData
     this._currResponseChannel = null;
     while (this._queuedResponseChannels.length) {
-      this._queuedResponseChannels.shift().end(destroyReason);
+      this._queuedResponseChannels.shift().end({ cause });
     }
-    this._msgw = null;
-    _net.closeNullable(this._socket); // TODO can throw ?
-    this._socket = null;
     // TODO do CancelRequest to wake stuck connection which can continue executing ?
-    return destroyReason; // user code can call .destroy and throw destroyReason in one line
   }
-
+  [Symbol.dispose]() {
+    this.destroy();
+  }
   logicalReplication(options) {
     return new ReplicationStream(this, options);
   }
+
   async _cancelRequest() {
     if (!this._backendKeyData) {
-      throw new PgError({
-        message: 'CancelRequest attempt before BackendKeyData received',
-        code: 'misuse',
-      });
+      throw Error('CancelRequest attempt before BackendKeyData received');
     }
-    const socket = await _net.connect(this._connectOptions);
+    const socket = await _net.connect(this._socketOptions);
     try {
       // TODO ssl support
       // if (this._ssl) {
@@ -509,139 +423,118 @@ class PgConnection {
     }
   }
   async _ioloop() {
-    if (this._connectRetry > 0) {
-      // avoid use of Date.now because not monitonic
-      // avoid use of performance.now because nodejs compatibility
-      this._connectRetryTimer = setTimeout(
-        _ => this._connectRetryTimer = null,
-        this._connectRetry,
-      );
-    }
+    let caughtException;
     try {
       while (await this._ioloopAttempt());
-      // Connection should be already ended at this point,
-      // so destroyReason will not be propagated in normal case.
-      throw new PgError({
-        message: 'Postgres closed connection unexpectedly',
-        code: 'protocol_violation',
-      });
-    } catch (err) {
-      this.destroy(err);
-    } finally {
-      await this._pipeFemsgqPromise;
+    } catch (ex) {
+      caughtException = ex || Error('ioloop failed', { cause: ex });
     }
+
+    if (this._lastErrorResponse && !this._currResponseChannel) {
+      // broadcast _lastErrorResponse if it not belongs to current query
+      // e.g. ErrorResponse during startup
+      const errorResponseChunk = new PgChunk();
+      errorResponseChunk.tag = 'ErrorResponse';
+      errorResponseChunk.payload = this._lastErrorResponse;
+      this._queuedResponseChannels.forEach(it => it.push(errorResponseChunk));
+    }
+
+    // TODO If we have _lastErrorResponse when socket closed abruptly
+    // then we should report _lastErrorResponse instead of io error
+    // because _lastErrorResponse will contain more usefull information
+    // about socket destroy reason.
+    this.destroy(
+      caughtException ||
+      this._lastErrorResponse ||
+      Error('postgres eof unexpectedly')
+    );
+    await this._pipeFemsgqPromise;
   }
   async _ioloopAttempt() {
     this.parameters = Object.create(null);
     this._lastErrorResponse = null;
-    this._ssl = null;
+    this._ssl = false;
     this._sasl = null;
     this._femsgw = null;
     _net.closeNullable(this._socket);
     this._socket = null;
 
     try {
-      this._socket = await _net.connect(this._connectOptions);
-    } catch (err) {
-      if (_net.reconnectable(err) && this._connectRetryTimer) {
-        this._log(err);
-        this._log('retrying connection');
-        await this._connectRetryPause();
+      this._socket = await _net.connect(this._socketOptions);
+    } catch (ex) {
+      if (_net.reconnectable(ex) && await this._connectRetryPause()) {
+        this._log('retrying connection', ex);
         return true; // restart
       }
-      throw err;
+      throw ex;
     }
 
-    const shouldRetryNossl = await this._sslNegotiateIfNeed();
-    if (shouldRetryNossl) {
-      this._log('retrying connection without ssl');
-      this._sslmode = 'try_nossl';
-      return true; // restart
+    if (/^(try_ssl|require|prefer)$/.test(this._sslmode)) {
+      // https://www.postgresql.org/docs/16/protocol-flow.html#PROTOCOL-FLOW-SSL
+      const sslReq = new FrontendMessage.SSLRequest();
+      this._logFemsg(sslReq, null);
+      await MessageWriter.writeMessage(this._socket, sslReq);
+      const sslResp = await MessageReader.readSSLResponse(this._socket);
+      this._log('n-> ssl available %o', sslResp);
+      if (sslResp) {
+        try {
+          this._socket = await _net.startTls(this._socket, {
+            hostname: this._socketOptions.hostname,
+            caCerts: this._sslrootcert && [].concat(this._sslrootcert),
+          });
+        } catch (ex) {
+          if (this._sslmode == 'prefer') {
+            this._log('retrying connection without ssl because', ex);
+            this._sslmode = 'try_nossl';
+            return true; // restart
+          }
+          throw ex;
+        }
+        this._ssl = true; // ssl established
+      } else if (this._sslmode == 'require') {
+        throw Error('postgres does not support ssl');
+      } else if (this._sslmode == 'try_ssl') {
+        // TODO throw error which caused connection retry
+        throw Error('postgres does not support ssl (retry)');
+      }
     }
 
     this._femsgw = new MessageWriter(this._socket);
     await this._writeFemsg(this._startupmsg);
 
-    try {
-      for await (const chunk of MessageReader.readMessages(this._socket, this._maxReadBuf)) {
-        await this._recvMessages(chunk);
-      }
+    for await (const chunk of MessageReader.readMessages(this._socket, this._maxReadBuf)) {
+      await this._recvMessages(chunk);
+    }
 
-      if (this._lastErrorResponse && !this._authok) {
-        // cannot_connect_now
-        if (this._lastErrorResponse.code == '57P03' && this._connectRetryTimer) {
-          this._log('retrying connection');
-          await this._connectRetryPause();
-          this._lastErrorResponse = null; // prevent throw
-          return true; // restart
-        }
-        // if (loopState.retryReason) {
-        //   // TODO report _lastErrorResponse too?
-        //   throw loopState.retryReason;
-        // }
-        if (this._lastErrorResponse.code == '28000') { // invalid_authorization_specification
-          if (this._sslmode == 'prefer' && this._ssl) {
-            this._log('retrying connection without ssl');
-            this._lastErrorResponse = null; // prevent throw
-            this._sslmode = 'try_nossl';
-            return true; // restart
-          }
-          if (this._sslmode == 'allow' && !this._ssl) {
-            this._log('retrying connection with ssl');
-            this._lastErrorResponse = null; // prevent throw
-            this._sslmode = 'try_ssl';
-            return true; // restart
-          }
-        }
+    // retry connection if ErrorResponse received before authenticated
+    if (this._lastErrorResponse && !this._pipeFemsgqPromise) {
+      const { code } = this._lastErrorResponse;
+      // 57P03 cannot_connect_now
+      if (code == '57P03' && await this._connectRetryPause()) {
+        this._log('retrying connection');
+        return true; // restart
       }
-    } finally {
-      // If we have _lastResponseError when socket ends,
-      // then we should throw it regardless of tcp error,
-      // because it will contain more usefull information about
-      // socket destroy reason.
-      if (this._lastErrorResponse) {
-        throw PgError.fromErrorResponse(this._lastErrorResponse);
+      // 28000 invalid_authorization_specification
+      if (code == '28000' && this._sslmode == 'prefer' && this._ssl) {
+        this._log('retrying connection without ssl');
+        this._sslmode = 'try_nossl';
+        return true; // restart
       }
+      // TODO can this._ssl be true when this._sslmode == 'allow' ?
+      if (code == '28000' && this._sslmode == 'allow' && !this._ssl) {
+        this._log('retrying connection with ssl');
+        this._sslmode = 'try_ssl';
+        return true; // restart
+      }
+      // TODO if error during this._sslmode = try_nossl
+      // then should throw original error which caused connection retry
     }
   }
   async _connectRetryPause() {
-    await new Promise(resolve => setTimeout(resolve, 2000));
-  }
-  async _sslNegotiateIfNeed() {
-    if (!['require', 'prefer', 'try_ssl'].includes(this._sslmode)) {
-      this._ssl = false;
-      return false; // continue without ssl
-    }
-    const sslreq = new FrontendMessage.SSLRequest();
-    this._logFemsg(sslreq, null);
-    await MessageWriter.writeMessage(this._socket, sslreq);
-    const sslok = await MessageReader.readSSLResponse(this._socket);
-    this._log('n-> ssl available %o', sslok);
-    if (!sslok) {
-      if (this._sslmode == 'prefer') {
-        this._ssl = false;
-        return false; // continue without ssl
-      }
-      // TODO handle try_nossl
-      throw new PgError({
-        message: 'SSL required but not supported',
-        code: 'nossl',
-      });
-    }
-    try {
-      this._socket = await _net.startTls(this._socket, {
-        hostname: this._connectOptions.hostname,
-        caCerts: this._sslrootcert && [].concat(this._sslrootcert),
-      });
-    } catch (err) {
-      if (this._sslmode == 'prefer') {
-        this._log(err);
-        return true; // retry without ssl
-      }
-      throw err;
-    }
-    this._ssl = true;
-    return false; // continue with ssl
+    return (
+      this._connectDeadline - performance.now() > 0 &&
+      new Promise(resolve => setTimeout(resolve, 2000, true))
+    );
   }
   async _recvMessages({ nparsed, messages }) {
     // we are going to batch DataRows and CopyData synchronously
@@ -662,6 +555,7 @@ class PgConnection {
       }
       await this._flushBatch(batch);
 
+      // TODO sync push to responseChannel and wait for currResponseChannel drained in the end
       switch (m.tag) {
         case 'CopyInResponse': await this._recvCopyInResponse(m, m.payload); break;
         case 'CopyOutResponse': await this._recvCopyOutResponse(m, m.payload); break;
@@ -718,10 +612,10 @@ class PgConnection {
         }
         pnext = stack[0].next();
       }
-    } catch (err) {
+    } catch (ex) {
       // _femsgq.return() will wait until _femsgq.end()
       // so we need to destroy connection here to prevent deadlock.
-      this.destroy(err);
+      this.destroy(ex);
     } finally {
       await Promise.all(stack.map(it => it.return()));
     }
@@ -779,9 +673,7 @@ class PgConnection {
       // -> CopyData keepalive message sometimes can be received here before RowDescription message
       return;
     }
-    if (!batch.buf) {
-      batch.buf = new Uint8Array(batch.bufsize);
-    }
+    batch.buf ||= new Uint8Array(batch.bufsize);
     batch.buf.set(data, batch.pos);
     batch.copies.push(batch.buf.subarray(batch.pos, batch.pos + data.length));
     batch.pos += data.length;
@@ -845,22 +737,10 @@ class PgConnection {
     await this._fwdBemsg(m);
   }
   async _recvAuthenticationCleartextPassword() {
-    if (this._password == null) {
-      throw new PgError({
-        message: 'Postgres requires authentication, but no password provided',
-        code: 'nopwd_clear',
-      });
-    }
     // should be always encoded as utf8 even when server_encoding is win1251
     await this._writeFemsg(new FrontendMessage.PasswordMessage(this._password));
   }
   async _recvAuthenticationMD5Password(_, { salt }) {
-    if (this._password == null) {
-      throw new PgError({
-        message: 'Postgres requires authentication, but no password provided',
-        code: 'nopwd_md5',
-      });
-    }
     // should use server_encoding, but there is
     // no way to know server_encoding before authentication.
     // So it should be possible to provide password as Uint8Array
@@ -892,12 +772,6 @@ class PgConnection {
     }));
   }
   async _recvAuthenticationSASLContinue(_, data) {
-    if (this._password == null) {
-      throw new PgError({
-        message: 'Postgres requires authentication, but no password provided',
-        code: 'nopwd_sasl',
-      });
-    }
     const finmsg = await this._sasl.continue(data, this._password);
     await this._writeFemsg(new FrontendMessage.SASLResponse(finmsg));
   }
@@ -906,31 +780,42 @@ class PgConnection {
     this._sasl = null;
   }
   _recvAuthenticationOk() {}
-  _recvErrorResponse(_, payload) {
-    this._lastErrorResponse = payload;
+  _recvErrorResponse(m, payload) {
     this._copyingOut = false;
+    this._lastErrorResponse = payload;
+    if (this._currResponseChannel) {
+      return this._fwdBemsg(m)
+    }
   }
   async _recvReadyForQuery(m, { transactionStatus }) {
-    this._transactionStatus = transactionStatus;
-    if (!this._authok) {
-      this._authok = true;
-      return this._startupComplete();
-    }
-    if (this._currResponseChannel) {
-      await this._endResponse(m);
-    } else {
-      await this._startResponse(m);
+    if (!this._pipeFemsgqPromise) {
+      this._startupComplete();
+    } else if (this._currResponseChannel) { // end response
+      // await this._endResponse(m);
+      if (this._noExplicitTransactions && transactionStatus != 0x49 /*I*/) {
+        // TODO how to prevent next query from executing in transaction of previous query?
+        throw Error('postgres connection left in transaction', { cause: this._lastErrorResponse });
+      }
+      await this._fwdBemsg(m);
+      this._queuedResponseChannels.shift();
+      this._currResponseChannel.end();
+      this._currResponseChannel = null;
+      this._lastErrorResponse = null;
+    } else { // start response
+      this._currResponseChannel = this._queuedResponseChannels[0];
+      // TODO assert this._currResponseChan is not null
+      await this._fwdBemsg(m);
     }
   }
   _startupComplete() {
     // we dont need password anymore, its more secure to forget it
     this._password = null;
-    // check that SASL auth is complete and server is verified
+    // check if SASL auth is complete and server is verified
     if (this._sasl) {
-      throw new PgError({ message: 'incomplete SASL authentication' });
+      throw Error('incomplete SASL authentication');
     }
-    // TODO impl requireSASL mode
-    this._resolveReady();
+    // TODO impl require_auth
+    // https://www.postgresql.org/docs/16/libpq-connect.html#LIBPQ-CONNECT-REQUIRE-AUTH
     this._pipeFemsgqPromise = this._pipeFemsgq();
     if (this._wakeInterval > 0) {
       this._wakeTimer = setInterval(
@@ -939,20 +824,6 @@ class PgConnection {
       );
     }
   }
-  async _startResponse(m) {
-    this._currResponseChannel = this._queuedResponseChannels[0];
-    // TODO assert this._currResponseChan is not null
-    await this._fwdBemsg(m);
-  }
-  async _endResponse(m) {
-    await this._fwdBemsg(m);
-    const error = this._lastErrorResponse && PgError.fromErrorResponse(this._lastErrorResponse);
-    this._queuedResponseChannels.shift();
-    this._currResponseChannel.end(error);
-    this._currResponseChannel = null;
-    this._lastErrorResponse = null;
-  }
-
   async _recvNoticeResponse(m) {
     if (this._currResponseChannel) {
       return this._fwdBemsg(m);
@@ -1006,39 +877,6 @@ class PgChunk extends Uint8Array {
   copies = [];
 }
 
-class PgError extends Error {
-  static kErrorResponse = Symbol.for('pg.ErrorResponse');
-  static kErrorCode = Symbol.for('pg.ErrorCode');
-  static fromErrorResponse(errorResponse) {
-    const {
-      code,
-      message: messageHead,
-      severityEn: _severityEn,
-      ...rest
-    } = errorResponse || 0;
-    const propsfmt = (
-      Object.entries(rest)
-      .filter(([_, v]) => v != null)
-      .map(([k, v]) => k + ' ' + JSON.stringify(v))
-      .join(', ')
-    );
-    const message = `${messageHead}\n    (${propsfmt})`;
-    return new PgError({ message, code, errorResponse });
-  }
-  constructor({
-    cause,
-    message = cause?.message,
-    code = cause?.[PgError.kErrorCode],
-    errorResponse = cause?.[PgError.kErrorResponse],
-  }) {
-    super(message);
-    this.name = ['PgError', code].filter(Boolean).join('.');
-    this.cause = cause;
-    this[PgError.kErrorCode] = code;
-    this[PgError.kErrorResponse] = errorResponse;
-  }
-}
-
 function simpleQuery(out, stdinSignal, script, { stdin, stdins = [] } = 0, responseEndLock) {
   out.push(new FrontendMessage.Query(script));
   // TODO handle case when number of stdins is unknown
@@ -1082,10 +920,7 @@ function extendedQuery(out, stdinSignal, blocks) {
       case 'DescribePortal': extendedQueryDescribePortal(out, m); break;
       case 'ClosePortal': extendedQueryClosePortal(out, m); break;
       case 'Flush': out.push(new FrontendMessage.Flush()); break;
-      default: throw new PgError({
-        message: 'Unknown extended message ' + JSON.stringify(m.message),
-        code: 'misuse',
-      });
+      default: throw Error('unknown extended message');
     }
   }
   out.push(new FrontendMessage.Sync());
@@ -1163,12 +998,12 @@ async function * wrapCopyData(source, signal) {
       yield new FrontendMessage.CopyData(chunk);
     }
     yield new FrontendMessage.CopyDone();
-  } catch (err) {
+  } catch (ex) {
     // TODO err.stack lost
     // store err
     // do CopyFail (copy_error_key)
     // rethrow stored err when ErrorResponse received
-    yield new FrontendMessage.CopyFail(String(err));
+    yield new FrontendMessage.CopyFail(String(ex));
   }
 }
 
@@ -1276,7 +1111,6 @@ class BinaryReader {
   _readString() {
     const endIdx = this._b.indexOf(0x00, this._p);
     if (endIdx < 0) {
-      // TODO PgError.protocol_violation
       throw Error('unexpected end of message');
     }
     const strbuf = this._b.subarray(this._p, endIdx);
@@ -1294,7 +1128,6 @@ class BinaryReader {
   }
   _checkSize(n) {
     if (this._b.length < this._p + n) {
-      // TODO PgError.protocol_violation
       throw Error('unexpected end of message');
     }
   }
@@ -1335,7 +1168,7 @@ class MessageReader extends BinaryReader {
     const msgr = new this();
     for (;;) {
       if (nbuf >= maxReadBuf) {
-        throw new Error('postgres sent too big message');
+        throw Error('postgres sent too big message'); // TODO limit message size instead?
       }
       if (nbuf >= buf.length) { // grow buffer
         const oldbuf = buf;
@@ -1356,10 +1189,7 @@ class MessageReader extends BinaryReader {
         msgr._reset(buf.subarray(isize, ipayload));
         const size = msgr._readInt32();
         if (size < 4) {
-          throw new PgError({
-            message: 'Postgres sent message with invalid size (less than 4)',
-            code: 'protocol_violation',
-          });
+          throw Error('postgres sent invalid message size');
         }
         const inext = isize + size;
         // TODO use grow hint
@@ -1377,7 +1207,7 @@ class MessageReader extends BinaryReader {
       }
     }
     if (nbuf > 0) {
-      throw Error('postgres closed connection before message complete');
+      throw Error('postgres eof before message complete'); // TODO report { cause: buf }
     }
   }
 
@@ -1415,30 +1245,27 @@ class MessageReader extends BinaryReader {
       case 0x45 /*E*/: return m('ErrorResponse', this._readErrorOrNotice());
       case 0x6e /*n*/: return m('NoData');
       case 0x41 /*A*/: return m('NotificationResponse', this._readNotificationResponse());
-
-      case 0x52 /*R*/: switch (this._readInt32()) {
-        case 0       : return m('AuthenticationOk');
-        case 2       : return m('AuthenticationKerberosV5');
-        case 3       : return m('AuthenticationCleartextPassword');
-        case 5       : return m('AuthenticationMD5Password', { salt: this._read(4) });
-        case 6       : return m('AuthenticationSCMCredential');
-        case 7       : return m('AuthenticationGSS');
-        case 8       : return m('AuthenticationGSSContinue', this._readToEnd());
-        case 9       : return m('AuthenticationSSPI');
-        case 10      : return m('AuthenticationSASL', { mechanism: this._readString() });
-        case 11      : return m('AuthenticationSASLContinue', this._readToEnd());
-        case 12      : return m('AuthenticationSASLFinal', this._readToEnd());
-        default      : throw new PgError({
-          message: 'Postgres sent unknown auth message',
-          code: 'protocol_violation',
-        });
+      case 0x52 /*R*/: {
+        const authTag = this._readInt32();
+        switch (authTag) {
+          case 0     : return m('AuthenticationOk');
+          case 2     : return m('AuthenticationKerberosV5');
+          case 3     : return m('AuthenticationCleartextPassword');
+          case 5     : return m('AuthenticationMD5Password', { salt: this._read(4) });
+          case 6     : return m('AuthenticationSCMCredential');
+          case 7     : return m('AuthenticationGSS');
+          case 8     : return m('AuthenticationGSSContinue', this._readToEnd());
+          case 9     : return m('AuthenticationSSPI');
+          case 10    : return m('AuthenticationSASL', { mechanism: this._readString() });
+          case 11    : return m('AuthenticationSASLContinue', this._readToEnd());
+          case 12    : return m('AuthenticationSASLFinal', this._readToEnd());
+          default    : throw Error('postgres sent unknown auth message', { cause: { authTag } });
+        }
       }
-      default: throw new PgError({
-        message: `Postgres sent unknown message ${asciiTag}`,
-        code: 'protocol_violation',
-      });
+      default: Error('postgres sent unknown message', { cause: { asciiTag } });
     }
   }
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-DATAROW
   _readDataRow() {
     const nfields = this._readInt16();
     const row = Array(nfields);
@@ -1448,22 +1275,29 @@ class MessageReader extends BinaryReader {
     }
     return row;
   }
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-NEGOTIATEPROTOCOLVERSION
   _readNegotiateProtocolVersion() {
     const version = this._readInt32();
     const unrecognizedOptions = this._array(this._readInt32(), this._readString);
     return { version, unrecognizedOptions };
   }
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-PARAMETERDESCRIPTION
   _readParameterDescription() {
     return this._array(this._readInt16(), this._readInt32);
   }
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-BACKENDKEYDATA
   _readBackendKeyData() {
     const pid = this._readInt32();
     const secretKey = this._readInt32();
     return { pid, secretKey };
   }
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-READYFORQUERY
   _readReadyForQuery() {
     return { transactionStatus: this._readUint8() };
   }
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-COPYINRESPONSE
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-COPYOUTRESPONSE
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-COPYBOTHRESPONSE
   _readCopyResponse() {
     const binary = this._readUint8();
     const columns = this._array(this._readInt16(), _ => ({
@@ -1472,6 +1306,7 @@ class MessageReader extends BinaryReader {
     }));
     return { binary, columns };
   }
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-ROWDESCRIPTION
   _readRowDescription() {
     return this._array(this._readInt16(), _ => ({
       name: this._readString(),
@@ -1483,14 +1318,15 @@ class MessageReader extends BinaryReader {
       binary: this._readInt16(),
     }));
   }
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-PARAMETERSTATUS
   _readParameterStatus() {
     const parameter = this._readString();
     const value = this._readString();
     return { parameter, value };
   }
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-ERRORRESPONSE
   _readErrorOrNotice() {
-    /** @type {string[]} */
-    const fields = Array(256);
+    const fields = /** @type {string[]} */ (Array(256));
     for (;;) {
       const fieldCode = this._readUint8();
       if (!fieldCode) break;
@@ -1498,8 +1334,8 @@ class MessageReader extends BinaryReader {
     }
     // https://www.postgresql.org/docs/16/protocol-error-fields.html
     return {
+      __proto__: pgErrorOrNoticeProto, // https://github.com/denoland/deno/issues/23416
       severity: fields[0x53], // S
-      severityEn: fields[0x56], // V
       code: fields[0x43], // C
       message: fields[0x4d], // M
       detail: fields[0x44], // D
@@ -1517,8 +1353,10 @@ class MessageReader extends BinaryReader {
       column: fields[0x63], // c
       datatype: fields[0x64], // d
       constraint: fields[0x6e], // n
+      severityEn: fields[0x56], // V
     };
   }
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-NOTIFICATIONRESPONSE
   _readNotificationResponse() {
     const pid = this._readInt32();
     const channel = this._readString();
@@ -1531,22 +1369,22 @@ class MessageReader extends BinaryReader {
     // Deno doc says that nread never equals 0, so don't need to repeat
     const nread = await _net.read(socket, readbuf);
     if (nread == null) {
-      throw new PgError({
-        message: 'Postgres unexpectedly closed connection, ssl response expected',
-        code: 'protocol_violation',
-      });
+      throw Error('postgres eof during ssl response');
     }
     const [resp] = readbuf;
     if (resp == 0x53 /*S*/) return true;
     if (resp == 0x4e /*N*/) return false;
     // TODO postgres doc says that we can receive
-    // 'E'rrorResponse in case of ancient server
-    throw new PgError({
-      message: `Postgres sent unexpected ssl response (${resp})`,
-      code: 'protocol_violation',
-    });
+    // ErrorResponse in case of ancient server
+    throw Error('postgres sent bad ssl response', { cause: { resp } });
   }
 }
+
+const pgErrorOrNoticeProto = {
+  toString() {
+    return JSON.stringify(this, null, 2);
+  }
+};
 
 // https://www.postgresql.org/docs/14/protocol-replication.html#id-1.10.5.9.7.1.5.1.8
 class ReplicationStream extends BinaryReader {
@@ -1628,7 +1466,7 @@ class ReplicationStream extends BinaryReader {
   }
   ack(lsn) {
     if (!/^[0-9a-f]{1,8}[/][0-9a-f]{1,8}$/i.test(lsn)) {
-      throw new PgError({ message: 'Invalid lsn', code: 'invalid_lsn' });
+      throw RangeError('invalid lsn');
     }
     lsn = lsnMakeComparable(lsn);
     if (lsn > this._ackingLsn) {
@@ -1711,7 +1549,7 @@ class PgoutputReader extends BinaryReader {
       case 0x54 /*T*/: return this._upgradeMsgTruncate(out);
       case 0x4d /*M*/: return this._upgradeMsgMessage(out);
       case 0x43 /*C*/: return this._upgradeMsgCommit(out);
-      default: throw Error('unknown pgoutput message');
+      default: throw Error('unknown pgoutput message', { cause: { tag } });
     }
   }
   _upgradeMsgBegin(out) {
@@ -1839,10 +1677,7 @@ class PgoutputReader extends BinaryReader {
           val = unchangedToastFallback?.[name];
           break;
         default:
-          throw new PgError({
-            message: `Unknown attribute kind ${kind}.`,
-            code: 'protocol_violation',
-          });
+          throw Error('unknown attribute kind', { cause: { kind } });
       }
       tuple[name] = val;
     }
@@ -1886,7 +1721,7 @@ class PgoutputReader extends BinaryReader {
   }
 }
 
-// https://www.postgresql.org/docs/14/protocol-message-formats.html
+// https://www.postgresql.org/docs/16/protocol-message-formats.html
 class FrontendMessage {
   constructor(payload) {
     this.payload = payload;
@@ -1896,7 +1731,7 @@ class FrontendMessage {
   get tag() {
     return this.constructor.name; // we will use it only for debug logging
   }
-
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-STARTUPMESSAGE
   static StartupMessage = class extends this {
     write(w, size, options) {
       w.writeInt32(size);
@@ -1908,6 +1743,7 @@ class FrontendMessage {
       w.writeUint8(0);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-CANCELREQUEST
   static CancelRequest = class extends this {
     write(w, _size, { pid, secretKey }) {
       w.writeInt32(16);
@@ -1916,13 +1752,14 @@ class FrontendMessage {
       w.writeInt32(secretKey);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-SSLREQUEST
   static SSLRequest = class extends this {
-    // static inst = new this();
     write(w) {
       w.writeInt32(8);
       w.writeInt32(80877103); // (1234 << 16) | 5679
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-PASSWORDMESSAGE
   static PasswordMessage = class extends this {
     write(w, size, payload) {
       w.writeUint8(0x70); // p
@@ -1930,6 +1767,7 @@ class FrontendMessage {
       w.writeString(payload);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-SASLINITIALRESPONSE
   static SASLInitialResponse = class extends this {
     write(w, size, { mechanism, data }) {
       w.writeUint8(0x70); // p
@@ -1943,6 +1781,7 @@ class FrontendMessage {
       }
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-SASLRESPONSE
   static SASLResponse = class extends this {
     write(w, size, data) {
       w.writeUint8(0x70); // p
@@ -1950,6 +1789,7 @@ class FrontendMessage {
       w.write(data);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-QUERY
   static Query = class extends this {
     write(w, size) {
       w.writeUint8(0x51); // Q
@@ -1957,6 +1797,7 @@ class FrontendMessage {
       w.writeString(this.payload);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-PARSE
   static Parse = class extends this {
     write(w, size, { statement, statementName = '', paramTypeOids = [] }) {
       w.writeUint8(0x50); // P
@@ -1969,6 +1810,7 @@ class FrontendMessage {
       }
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-BIND
   static Bind = class extends this {
     write(w, size, { portal = '', statementName = '', params = [], binary = [] }) {
       w.writeUint8(0x42); // B
@@ -1993,6 +1835,7 @@ class FrontendMessage {
       }
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-EXECUTE
   static Execute = class extends this {
     write(w, size, { portal = '', limit = 0 }) {
       w.writeUint8(0x45); // E
@@ -2001,6 +1844,7 @@ class FrontendMessage {
       w.writeUint32(limit);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-DESCRIBE
   static DescribeStatement = class extends this {
     write(w, size, statementName = '') {
       w.writeUint8(0x44); // D
@@ -2017,6 +1861,7 @@ class FrontendMessage {
       w.writeString(portal);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-CLOSE
   static ClosePortal = class extends this {
     write(w, size, portal = '') {
       w.writeUint8(2); // C
@@ -2033,21 +1878,21 @@ class FrontendMessage {
       w.writeString(statementName);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-SYNC
   static Sync = class extends this {
-    // static inst = new this();
     write(w) {
       w.writeUint8(0x53); // S
       w.writeInt32(4);
     }
   };
-  // unused
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-FLUSH
   static Flush = class extends this {
-    // static inst = new this();
     write(w) {
       w.writeUint8(0x48); // H
       w.writeInt32(4);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-COPYDATA
   static CopyData = class extends this {
     write(w, size, data) {
       w.writeUint8(0x64); // d
@@ -2055,13 +1900,14 @@ class FrontendMessage {
       w.write(data);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-COPYDONE
   static CopyDone = class extends this {
-    // static inst = new this();
     write(w) {
       w.writeUint8(0x63); // c
       w.writeInt32(4);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-COPYFAIL
   static CopyFail = class extends this {
     write(w, size, cause) {
       w.writeUint8(0x66); // f
@@ -2069,8 +1915,8 @@ class FrontendMessage {
       w.writeString(cause);
     }
   };
+  // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-TERMINATE
   static Terminate = class extends this {
-    // static inst = new this();
     write(w) {
       w.writeUint8(0x58); // X
       w.writeInt32(4);
@@ -2193,7 +2039,7 @@ class MessageSizer {
     // do write before zero check to validate val type first
     this.write(val);
     const z = val instanceof Uint8Array ? 0x0 : '\0';
-    if (val.indexOf(z) > 0) {
+    if (~val.indexOf(z)) {
       throw TypeError('zero char is not allowed');
     }
     this.writeUint8(0);
@@ -2231,7 +2077,7 @@ class MessageSizer {
 
 class PgType {
   static resolve(oidOrName) {
-    if (typeof oidOrName == 'number') {
+    if (typeof oidOrName == 'number') { // TODO NaN, Infinity, negative, floats
       return oidOrName;
     }
     switch (oidOrName) { // add line here when register new type
@@ -2362,7 +2208,7 @@ class PgType {
       for (let i = 0; i < bytes.length; i++) {
         const h = hexmap[text.charCodeAt(i << 1)];
         const l = hexmap[text.charCodeAt(i << 1 | 1)];
-        if (isNaN(h + l)) throw new PgError({ message: 'Bad encoded bytea received', code: 'protocol_violation' });
+        if (isNaN(h + l)) throw Error('bad encoded bytea received');
         bytes[i] = h << 4 | l;
       }
       return bytes;
@@ -2388,7 +2234,7 @@ class PgType {
         bytes[j++] = (b1 & 0b11) << 6 | (b2 & 0b111) << 3 | (b3 & 0b111);
         continue;
       }
-      throw new PgError({ message: 'Bad encoded bytea received', code: 'protocol_violation' });
+      throw Error('bad encoded bytea received');
     }
     return bytes.subarray(0, j);
   }
@@ -2398,7 +2244,7 @@ class PgType {
 }
 
 function lsnMakeComparable(text) {
-  const [h, l] = text.split('/');
+  const [h, l] = text.toUpperCase().split('/');
   return h.padStart(8, '0') + '/' + l.padStart(8, '0');
 }
 
@@ -2672,9 +2518,9 @@ export const _net = {
     const tlssock = await Deno.startTls(socket, options);
     try {
       await tlssock.handshake();
-    } catch (err) {
+    } catch (ex) {
       tlssock.close();
-      throw err;
+      throw ex;
     }
     return tlssock;
   },
@@ -2691,9 +2537,9 @@ export const _net = {
     if (!socket) return;
     try {
       socket.close();
-    } catch (err) {
-      if (err instanceof Deno.errors.BadResource) return; // already closed
-      throw err;
+    } catch (ex) {
+      if (ex instanceof Deno.errors.BadResource) return; // already closed
+      throw ex;
     }
   },
 };
