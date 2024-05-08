@@ -46,6 +46,7 @@ export function pgident(...segments) {
   return segments.map(it => '"' + it.replace(/"/g, '""') + '"').join('.');
 }
 
+// TODO avoid class export
 export class PgError extends Error {
   constructor(errorResponse) {
     super(errorResponse.message, { cause: errorResponse });
@@ -82,7 +83,7 @@ function computeConnectionOptions([uriOrObj, ...rest]) {
 }
 
 class PgPool {
-  // TODO .pending, .queryable
+  // TODO? .pending, .queryable
 
   constructor(options) {
     /** @type {Set<PgConnection>} */
@@ -116,9 +117,15 @@ class PgPool {
     this._endReason ||= Error('postgres pool ended');
     await Promise.all(Array.from(this._connections, conn => conn.end()));
   }
+  async [Symbol.asyncDispose]() {
+    await this.end();
+  }
   destroy(cause) {
     this._endReason ||= Error('postgres pool destroyed', { cause });
     this._connections.forEach(it => it.destroy(cause));
+  }
+  [Symbol.dispose]() {
+    this.destroy();
   }
   _getConnection() {
     // try to reuse connection
@@ -189,7 +196,7 @@ class PgConnection {
     this._wakeInterval = Math.max(millis(_wakeInterval), 0);
     this._wakeTimer = null;
     this._maxReadBuf = _maxReadBuf;
-    this._rowColumns = null; // last RowDescription
+    this._rowProto = null;
     this._rowTextDecoder = new TextDecoder('utf-8', { fatal: true });
     this._copyingOut = false;
     this._femsgw = null;
@@ -382,12 +389,8 @@ class PgConnection {
     _net.closeNullable(this._socket); // TODO can throw ?
     this._socket = null;
 
-    // const destroyError = Error('postgres connection destroyed', { cause });
     if (!this._endReason) {
       this._femsgq.end();
-      // save destroyError only if .destroy() called before .end()
-      // so new queries will be rejected with the same error before
-      // and after _whenReady settled
       this._endReason = { cause };
       this._log('connection destroyed', cause);
     }
@@ -630,33 +633,47 @@ class PgConnection {
     pid = pid || 'n';
     const tagStyle = 'font-weight: bold; color: magenta';
     if (typeof payload == 'undefined') {
-      return console.log('%s<- %c%s', pid, tagStyle, tag);
+      return console.error('%s<- %c%s', pid, tagStyle, tag);
     }
-    console.log('%s<- %c%s%c %o', pid, tagStyle, tag, '', payload);
+    console.error('%s<- %c%s%c %o', pid, tagStyle, tag, '', payload);
   }
   _logBemsg({ tag, payload }) {
     if (!this._debug) return;
     const pid = this.pid || 'n';
     if (typeof payload == 'undefined') {
-      return console.log('%s-> %s', pid, tag);
+      return console.error('%s-> %s', pid, tag);
     }
-    console.log('%s-> %s %o', pid, tag, payload);
+    console.error('%s-> %s %o', pid, tag, payload);
+  }
+  async _recvRowDescription(m, columns) {
+    this._rowProto = {
+      columns,
+      length: columns.length,
+      [Symbol.iterator]: Array.prototype.values,
+    };
+    for (let i = 0; i < columns.length; i++) {
+      Object.defineProperty(this._rowProto, i, {
+        get() {
+          const val = this.raw[i];
+          const { typeOid } = this.columns[i];
+          return typeof val == 'string' ? PgType.decode(val, typeOid) : val;
+        },
+      });
+    }
+    await this._fwdBemsg(m);
   }
   _recvDataRow(_, /** @type {Array<Uint8Array>} */ row, batch) {
-    for (let i = 0; i < this._rowColumns.length; i++) {
+    const { columns } = this._rowProto;
+    for (let i = 0; i < columns.length; i++) {
       const valbuf = row[i];
-      if (valbuf == null) continue;
-      const { binary, typeOid } = this._rowColumns[i];
-      // TODO avoid this._clientTextDecoder.decode for bytea
-      row[i] = (
-        binary
-          // do not valbuf.slice() because nodejs Buffer .slice does not copy
-          // TODO but we not going to receive Buffer here ?
-          ? Uint8Array.prototype.slice.call(valbuf)
-          : PgType.decode(this._rowTextDecoder.decode(valbuf), typeOid)
-      );
+      if (!valbuf) continue;
+      const { binary } = columns[i];
+      // TODO avoid this._rowTextDecoder.decode for bytea
+      // TODO maybe allocate buffer per socket.read will be faster
+      // then allocating and copying buffer per cell in binary case?
+      row[i] = binary ? valbuf.slice() : this._rowTextDecoder.decode(valbuf);
     }
-    batch.rows.push(row);
+    batch.rows.push({ __proto__: this._rowProto, raw: row });
   }
   _recvCopyData(_, /** @type {Uint8Array} */ data, batch) {
     if (!this._copyingOut) {
@@ -730,10 +747,6 @@ class PgConnection {
     await this._fwdBemsg(m);
   }
   async _recvNoData(m) {
-    await this._fwdBemsg(m);
-  }
-  async _recvRowDescription(m, columns) {
-    this._rowColumns = columns;
     await this._fwdBemsg(m);
   }
   async _recvAuthenticationCleartextPassword() {
@@ -1045,6 +1058,7 @@ class PgResult {
   constructor(results, notices) {
     /** @type {PgSubResult[]} */
     this.results = results;
+    /** @type {ErrorOrNotice[]} */
     this.notices = notices;
   }
   /** @deprecated */
@@ -1075,9 +1089,11 @@ class PgResult {
 }
 
 class PgSubResult {
-  /** @type {any[][]} */
+  /** @type {Row[]} */
   rows = [];
+  /** @type {ColumnDescription[]} */
   columns = [];
+  /** @type {string} */
   status = null;
   /** @deprecated */
   get scalar() { return this.rows[0]?.[0]; }
@@ -1102,11 +1118,12 @@ class BinaryReader {
   }
   _readInt16() {
     this._checkSize(2);
-    return (this._b[this._p++] << 24 | this._b[this._p++] << 16) >> 16;
+    return (this._b[this._p++] << 8 | this._b[this._p++]) << 16 >> 16;
   }
   _readInt32() {
     this._checkSize(4);
-    return this._b[this._p++] << 24 | this._b[this._p++] << 16 | this._b[this._p++] << 8 | this._b[this._p++];
+    return ((this._b[this._p++] << 8 | this._b[this._p++]) << 8 |
+      this._b[this._p++]) << 8 | this._b[this._p++];
   }
   _readString() {
     const endIdx = this._b.indexOf(0x00, this._p);
@@ -2543,3 +2560,8 @@ export const _net = {
     }
   },
 };
+
+
+/** @typedef {ArrayLike & Iterable & { raw: (string | Uint8Array | null)[] }} Row */
+/** @typedef {ReturnType<typeof MessageReader.prototype._readRowDescription>[0]} ColumnDescription */
+/** @typedef {ReturnType<typeof MessageReader.prototype._readErrorOrNotice>} ErrorOrNotice */

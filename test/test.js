@@ -9,167 +9,163 @@ export function setup({
   test('simple proto', async _ => {
     const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const res = await conn.query(/*sql*/ `
-        do $$ begin raise notice 'start'; end $$;
-        select 'hello' a, 'world' b union all select 'bonjour', 'le monde';
-        do $$ begin raise notice 'end'; end $$;
+      var res = await conn.query(/*sql*/ `
+        select null a;
+        values ('hello', -42), ('привет', 42);
+        do $$ begin raise notice 'sample message'; end $$;
       `);
-
-      assertEquals([...res], ['hello', 'world']);
-
-      assertEquals(res.status, null);
-      assertEquals(res.scalar, 'hello'); // TODO deprecated
-      assertEquals(res.rows, res.results[1].rows);
-      assertEquals(res.columns, res.results[1].columns);
-      assertEquals(res.notices.length, 2);
-      assertEquals(res.results.length, 3);
-
-      assertEquals(res.notices[0].message, 'start');
-      assertEquals(res.notices[0].code, '00000');
-      assertEquals(res.notices[0].severity, 'NOTICE');
-      assertEquals(res.notices[0].severityEn, 'NOTICE');
-
-      assertEquals(res.notices[1].message, 'end');
-      assertEquals(res.notices[1].code, '00000');
-      assertEquals(res.notices[1].severity, 'NOTICE');
-      assertEquals(res.notices[1].severityEn, 'NOTICE');
-
-      assertEquals(res.results[0].status, 'DO');
-      assertEquals(res.results[0].scalar, undefined); // TODO deprecated
-      assertEquals(res.results[0].rows, []);
-      assertEquals(res.results[0].columns, []);
-
-      assertEquals(res.results[1].status, 'SELECT 2');
-      assertEquals(res.results[1].scalar, 'hello'); // TODO deprecated
-      assertEquals(res.results[1].rows, [['hello', 'world'], ['bonjour', 'le monde']]);
-      assertEquals(res.results[1].columns, [
-        { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-        { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-      ]);
-
-      assertEquals(res.results[2].status, 'DO');
-      assertEquals(res.results[2].scalar, undefined); // TODO deprecated
-      assertEquals(res.results[2].rows, []);
-      assertEquals(res.results[2].columns, []);
     } finally {
       await conn.end();
     }
+
+    // avoid ambiguous status for multistatement query
+    assertEquals(res.status, null);
+
+    // root result should be from last selectish statement
+    assertEquals(res.scalar, 'hello'); // TODO deprecated
+    assertEquals(res.rows, res.results[1].rows);
+    assertEquals(res.columns, res.results[1].columns);
+    assertEquals([...res], [...res.results[1].rows[0]]);
+
+    assertEquals(res.results.length, 3);
+    assertEquals(res.results[0].status, 'SELECT 1');
+    assertEquals(res.results[0].scalar, null); // TODO deprecated
+    assertEquals(res.results[0].columns, [
+      { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
+    ]);
+    // test null bypasses decoding
+    assertEquals(res.results[0].rows.length, 1);
+    assertEquals(res.results[0].rows[0][0], null);
+    assertEquals(res.results[0].rows[0].raw, [null]);
+
+    assertEquals(res.results[1].status, 'SELECT 2');
+    assertEquals(res.results[1].scalar, 'hello'); // TODO deprecated
+    assertEquals(res.results[1].columns, [
+      { binary: 0, name: 'column1', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
+      { binary: 0, name: 'column2', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
+    ]);
+    const { rows } = res.results[1];
+    assertEquals(rows.length, 2);
+    {
+      const row = rows[0];
+      assertEquals(row.length, 2);
+      assertEquals([row[0], row[1]], ['hello', -42]);
+      assertEquals([...row], ['hello', -42]);
+      assertEquals(row.raw, ['hello', '-42']);
+    }
+    {
+      const row = rows[1];
+      assertEquals(row.length, 2);
+      assertEquals([row[0], row[1]], ['привет', 42]);
+      assertEquals([...row], ['привет', 42]);
+      assertEquals(row.raw, ['привет', '42']);
+    }
+
+    assertEquals(res.results[2].status, 'DO');
+    assertEquals(res.results[2].scalar, undefined); // TODO deprecated
+    assertEquals(res.results[2].columns, []);
+    assertEquals(res.results[2].rows, []);
+
+    assertEquals(res.notices.length, 1);
+    assertEquals(res.notices[0].message, 'sample message');
+    assertEquals(res.notices[0].code, '00000');
+    assertEquals(res.notices[0].severity, 'NOTICE');
+    assertEquals(res.notices[0].severityEn, 'NOTICE');
   });
 
   test('simple proto empty', async _ => {
     const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const res = await conn.query(/*sql*/ ``);
-      assertEquals([...res], []);
-      assertEquals(res.status, 'EmptyQueryResponse');
-      assertEquals(res.scalar, undefined); // TODO deprecated
-      assertEquals(res.rows, []);
-      assertEquals(res.columns, []);
-      assertEquals(res.notices, []);
-      assertEquals(res.results.length, 1);
-      assertEquals(res.results[0].status, 'EmptyQueryResponse');
-      assertEquals(res.results[0].scalar, undefined); // TODO deprecated
-      assertEquals(res.results[0].rows, []);
-      assertEquals(res.results[0].columns, []);
+      var res = await conn.query(/*sql*/ ``);
     } finally {
       await conn.end();
     }
+    assertEquals([...res], []);
+    assertEquals(res.status, 'EmptyQueryResponse');
+    assertEquals(res.scalar, undefined); // TODO deprecated
+    assertEquals(res.rows, []);
+    assertEquals(res.columns, []);
+    assertEquals(res.notices, []);
+    assertEquals(res.results.length, 1);
+    assertEquals(res.results[0].status, 'EmptyQueryResponse');
+    assertEquals(res.results[0].scalar, undefined); // TODO deprecated
+    assertEquals(res.results[0].rows, []);
+    assertEquals(res.results[0].columns, []);
   });
 
   test('extended proto', async _ => {
     const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const res = await conn.query({
-        statement: /*sql*/ `do $$ begin raise notice 'start'; end $$`
+      var res = await conn.query({
+        statement: /*sql*/ `do $$ begin raise notice 'sample message'; end $$`
       }, {
-        // suspended
-        statement: /*sql*/ `select 'test' a from generate_series(0, 10) i`,
-        limit: 1,
-      }, {
-        // binary output
-        statement: String.raw /*sql*/ `select int4 '16909060' a, int4 '16909060' b, bytea '\xcafebabe' c`,
-        binary: [false, true, true],
-      }, {
-        // binary params
-        statement: /*sql*/ `select $1 a, $2 b`,
+        statement: String.raw /*sql*/ `select $1 a, $2 b`,
+        binary: [false, true],
         params: [
-          { type: 'int4', value: Uint8Array.of(1, 2, 3, 4) },
-          { type: 'bytea', value: Uint8Array.of(0, 1, 2, 3, 4) },
+          { type: 'int4', value: Uint8Array.of(1, 2, 3, 4) }, // binary param
+          { type: 'int4', value: '-42' }, // text param
         ],
       }, {
-        statement: /*sql*/ `select $1 a, 'world' b union all select $2, 'le monde'`,
-        params: [{ type: 'text', value: 'hello' }, { type: 'text', value: 'bonjour' }],
+        // PortalSuspended
+        statement: /*sql*/ `values ('hello'), ('bonjour')`,
+        limit: 1,
       }, {
-        statement: /*sql*/ `do $$ begin raise notice 'end'; end $$;`
-      }, {
-        statement: /*sql*/ `/*empty*/`
+        // EmptyQueryResponse
+        statement: ''
       });
-
-      assertEquals([...res], ['hello', 'world']);
-      assertEquals(res.status, null);
-      assertEquals(res.scalar, 'hello'); // TODO deprecated
-      assertEquals(res.rows, res.results[4].rows);
-      assertEquals(res.columns, res.results[4].columns);
-      assertEquals(res.notices.length, 2);
-      assertEquals(res.results.length, 7);
-
-      assertEquals(res.notices[0].message, 'start');
-      assertEquals(res.notices[0].code, '00000');
-      assertEquals(res.notices[0].severity, 'NOTICE');
-      assertEquals(res.notices[0].severityEn, 'NOTICE');
-
-      assertEquals(res.notices[1].message, 'end');
-      assertEquals(res.notices[1].code, '00000');
-      assertEquals(res.notices[1].severity, 'NOTICE');
-      assertEquals(res.notices[1].severityEn, 'NOTICE');
-
-      assertEquals(res.results[0].status, 'DO');
-      assertEquals(res.results[0].scalar, undefined); // TODO deprecated
-      assertEquals(res.results[0].rows, []);
-      assertEquals(res.results[0].columns, []);
-
-      assertEquals(res.results[1].status, 'PortalSuspended');
-      assertEquals(res.results[1].scalar, 'test'); // TODO deprecated
-      assertEquals(res.results[1].rows, [['test']]);
-      assertEquals(res.results[1].columns, [{ binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 }]);
-
-      assertEquals(res.results[2].status, 'SELECT 1');
-      assertEquals(res.results[2].scalar, 16909060); // TODO deprecated
-      assertEquals(res.results[2].rows, [[16909060, Uint8Array.of(1, 2, 3, 4), Uint8Array.of(0xca, 0xfe, 0xba, 0xbe)]]);
-      assertEquals(res.results[2].columns, [
-        { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
-        { binary: 1, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
-        { binary: 1, name: 'c', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 17, typeSize: -1 }
-      ]);
-
-      assertEquals(res.results[3].status, 'SELECT 1');
-      assertEquals(res.results[3].scalar, 16909060); // TODO deprecated
-      assertEquals(res.results[3].rows, [[16909060, Uint8Array.of(0, 1, 2, 3, 4)]]);
-      assertEquals(res.results[3].columns, [
-        { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
-        { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 17, typeSize: -1 }
-      ]);
-
-      assertEquals(res.results[4].status, 'SELECT 2');
-      assertEquals(res.results[4].scalar, 'hello'); // TODO deprecated
-      assertEquals(res.results[4].rows, [['hello', 'world'], ['bonjour', 'le monde']]);
-      assertEquals(res.results[4].columns, [
-        { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-        { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-      ]);
-
-      assertEquals(res.results[5].status, 'DO');
-      assertEquals(res.results[5].scalar, undefined); // TODO deprecated
-      assertEquals(res.results[5].rows, []);
-      assertEquals(res.results[5].columns, []);
-
-      assertEquals(res.results[6].status, 'EmptyQueryResponse');
-      assertEquals(res.results[6].scalar, undefined); // TODO deprecated
-      assertEquals(res.results[6].rows, []);
-      assertEquals(res.results[6].columns, []);
     } finally {
       await conn.end();
     }
+
+    // avoid ambiguous status for multistatement query
+    assertEquals(res.status, null);
+
+    // root result should be from last selectish statement
+    assertEquals(res.scalar, 'hello'); // TODO deprecated
+    assertEquals(res.rows, res.results[2].rows);
+    assertEquals(res.columns, res.results[2].columns);
+    assertEquals([...res], ['hello']);
+
+    assertEquals(res.results.length, 4);
+
+    assertEquals(res.results[0].status, 'DO');
+    assertEquals(res.results[0].scalar, undefined); // TODO deprecated
+    assertEquals(res.results[0].rows, []);
+    assertEquals(res.results[0].columns, []);
+
+    assertEquals(res.results[1].status, 'SELECT 1');
+    assertEquals(res.results[1].scalar, 16909060); // TODO deprecated
+    assertEquals(res.results[1].columns, [
+      { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
+      { binary: 1, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
+    ]);
+    assertEquals(res.results[1].rows.length, 1);
+    const row = res.results[1].rows[0];
+    assertEquals(row.length, 2);
+    assertEquals(row[0], 16909060);
+    assertEquals(row[1], Uint8Array.of(0xff, 0xff, 0xff, 0xd6)); // -42
+    assertEquals([...row], [16909060, Uint8Array.of(0xff, 0xff, 0xff, 0xd6)]);
+    assertEquals(row.raw, ['16909060', Uint8Array.of(0xff, 0xff, 0xff, 0xd6)]);
+
+    assertEquals(res.results[2].status, 'PortalSuspended');
+    assertEquals(res.results[2].scalar, 'hello'); // TODO deprecated
+    assertEquals(res.results[2].columns, [{ binary: 0, name: 'column1', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 }]);
+    assertEquals(res.results[2].rows.length, 1);
+    assertEquals(res.results[2].rows[0].length, 1);
+    assertEquals(res.results[2].rows[0][0], 'hello');
+    assertEquals([...res.results[2].rows[0]], ['hello']);
+    assertEquals(res.results[2].rows[0].raw, ['hello']);
+
+    assertEquals(res.results[3].status, 'EmptyQueryResponse');
+    assertEquals(res.results[3].scalar, undefined); // TODO deprecated
+    assertEquals(res.results[3].rows, []);
+    assertEquals(res.results[3].columns, []);
+
+    assertEquals(res.notices.length, 1);
+    assertEquals(res.notices[0].message, 'sample message');
+    assertEquals(res.notices[0].code, '00000');
+    assertEquals(res.notices[0].severity, 'NOTICE');
+    assertEquals(res.notices[0].severityEn, 'NOTICE');
   });
 
 // test('sync connection', async _ => {
@@ -250,82 +246,81 @@ export function setup({
   test('copy from stdin extended', async _ => {
     const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const datasrc = ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode);
-      const { rows } = await conn.query(
-        { statement: /*sql*/ `create temp table test(foo text, bar text)` },
-        { statement: /*sql*/ `copy test from stdin`, stdin: datasrc },
-        { statement: /*sql*/ `select * from test` },
+      var [outDump] = await conn.query(
+        { statement: /*sql*/ `create temp table greeting(id int, body text)` },
+        { statement: /*sql*/ `copy greeting from stdin`, stdin: genInputDump() },
+        { statement: /*sql*/ `select jsonb_agg(jsonb_build_array(id, body) order by id) from greeting` },
       );
-      assertEquals(rows, [['1', 'hello'], ['2', 'world']]);
     } finally {
       await conn.end();
     }
-    function utf8encode(s) {
-      return new TextEncoder().encode(s);
+    async function * genInputDump() {
+      const utf8enc = new TextEncoder();
+      yield * ['-255\t', 'hello\n', '255\t', 'привет\n'].map(utf8enc.encode, utf8enc);
     }
+    assertEquals(outDump, [[-255, 'hello'], [255, 'привет']]);
   });
 
   test('copy from stdin extended missing', async _ => {
     const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const [res] = await Promise.allSettled([
+      var [res] = await Promise.allSettled([
         conn.query(
-          { statement: /*sql*/ `create temp table test(foo int, bar text)` },
-          { statement: /*sql*/ `copy test from stdin` },
+          { statement: /*sql*/ `create temp table greeting(id int, body text)` },
+          { statement: /*sql*/ `copy greeting from stdin` },
         ),
       ]);
-      assertEquals(res.status, 'rejected');
-      assertEquals(String(res.reason), 'PgError.57014: COPY from stdin failed: no stdin provided');
     } finally {
       await conn.end();
     }
+    assertEquals(res.status, 'rejected');
+    assertEquals(String(res.reason), 'PgError.57014: COPY from stdin failed: no stdin provided');
   });
 
   test('copy from stdin simple', async _ => {
     const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const { rows } = await conn.query(/*sql*/ `
-        create temp table test(foo text, bar text);
-        copy test from stdin;
-        select * from test;
-      `, {
-        stdin: ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode),
-      });
-      assertEquals(rows, [['1', 'hello'], ['2', 'world']]);
+      var [outDump] = await conn.query(/*sql*/ `
+        create temp table greeting(id int, body text);
+        copy greeting from stdin;
+        select jsonb_agg(jsonb_build_array(id, body) order by id) from greeting;
+      `, { stdin: genInputDump() });
     } finally {
       await conn.end();
     }
-    function utf8encode(s) {
-      return new TextEncoder().encode(s);
+    async function * genInputDump() {
+      const utf8enc = new TextEncoder();
+      yield * ['-255\t', 'hello\n', '255\t', 'привет\n'].map(utf8enc.encode, utf8enc);
     }
+    assertEquals(outDump, [[-255, 'hello'], [255, 'привет']]);
   });
 
   test('copy from stdin simple 2', async _ => {
     const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const { rows } = await conn.query(/*sql*/ `
-        create temp table test(foo text, bar text);
-        copy test from stdin;
-        copy test from stdin;
-        select * from test;
+      var [outDump] = await conn.query(/*sql*/ `
+        create temp table greeting(id int, body text);
+        copy greeting from stdin;
+        copy greeting from stdin;
+        select jsonb_agg(jsonb_build_array(id, body) order by id) from greeting;
       `, {
         stdins: [
-          ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode),
-          ['3\t', 'hello\n', '4\t', 'world\n'].map(utf8encode),
+          ['1\t', 'hello\n', '2\t', 'привет\n'].map(utf8encode),
+          ['3\t', 'bonjour\n', '4\t', 'hola\n'].map(utf8encode),
         ],
       });
-      assertEquals(rows, [
-        ['1', 'hello'],
-        ['2', 'world'],
-        ['3', 'hello'],
-        ['4', 'world'],
-      ]);
     } finally {
       await conn.end();
     }
     function utf8encode(s) {
       return new TextEncoder().encode(s);
     }
+    assertEquals(outDump, [
+      [1, 'hello'],
+      [2, 'привет'],
+      [3, 'bonjour'],
+      [4, 'hola'],
+    ]);
   });
 
   test('copy from stdin simple missing', async _ => {
