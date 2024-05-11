@@ -191,7 +191,8 @@ class PgConnection {
     this._backendKeyData = null;
     this._lastErrorResponse = null;
     this._queuedResponseChannels = [];
-    this._currResponseChannel = null;
+    this._readyState = 'start';
+    this._transactionStatus = -1;
     this._wakeSupress = true;
     this._wakeInterval = Math.max(millis(_wakeInterval), 0);
     this._wakeTimer = null;
@@ -221,7 +222,7 @@ class PgConnection {
   get whenDestroyed() {
     return this._femsgq._whenEnded.then(_ => this._ioloopPromise);
   }
-  /** number of pending queries */
+  /** Number of pending queries. */
   get pending() {
     return this._queuedResponseChannels.length;
   }
@@ -235,6 +236,11 @@ class PgConnection {
   }
   get ssl() {
     return this._ssl;
+  }
+  /** Truthy if connection is idle in transaction. */
+  get inTransaction() {
+    const s = this._transactionStatus;
+    return this._readyState == 'idle' && s != 0x49 ? s : 0;
   }
   // TODO executemany?
   // Parse
@@ -330,10 +336,11 @@ class PgConnection {
       // https://github.com/kagis/pgwire/issues/17
       if ( // going to do CancelRequest
         // if response is started and not ended
-        this._currResponseChannel == responseChannel &&
-         // and there are no other pending responses
-         // (to prevent miscancel of next queued query)
-        this._queuedResponseChannels.length == 1
+        // and there are no other pending responses
+        // (to prevent miscancel of next queued query)
+        this._readyState == 'responding' &&
+        this._queuedResponseChannels.length == 1 &&
+        this._queuedResponseChannels[0] == responseChannel
       ) {
         if (!this._endReason) {
           // new queries should not be emitted during CancelRequest
@@ -395,7 +402,7 @@ class PgConnection {
       this._log('connection destroyed', cause);
     }
     // TODO await _flushData
-    this._currResponseChannel = null;
+    this._readyState = 'end';
     while (this._queuedResponseChannels.length) {
       this._queuedResponseChannels.shift().end({ cause });
     }
@@ -433,7 +440,7 @@ class PgConnection {
       caughtException = ex || Error('ioloop failed', { cause: ex });
     }
 
-    if (this._lastErrorResponse && !this._currResponseChannel) {
+    if (this._lastErrorResponse && this._readyState != 'responding') {
       // broadcast _lastErrorResponse if it not belongs to current query
       // e.g. ErrorResponse during startup
       const errorResponseChunk = new PgChunk();
@@ -510,7 +517,7 @@ class PgConnection {
     }
 
     // retry connection if ErrorResponse received before authenticated
-    if (this._lastErrorResponse && !this._pipeFemsgqPromise) {
+    if (this._lastErrorResponse && this._readyState == 'start') {
       const { code } = this._lastErrorResponse;
       // 57P03 cannot_connect_now
       if (code == '57P03' && await this._connectRetryPause()) {
@@ -704,14 +711,14 @@ class PgConnection {
       batch.pos = 0;
       batch.copies = [];
       this._wakeSupress = true;
-      await this._currResponseChannel.push(copyChunk);
+      await this._queuedResponseChannels[0].push(copyChunk);
     }
     if (batch.rows.length) {
       const rowsChunk = new PgChunk();
       rowsChunk.tag = 'DataRow';
       rowsChunk.rows = batch.rows;
       this._wakeSupress = true;
-      await this._currResponseChannel.push(rowsChunk);
+      await this._queuedResponseChannels[0].push(rowsChunk);
       batch.rows = [];
     }
   }
@@ -793,32 +800,37 @@ class PgConnection {
     this._sasl = null;
   }
   _recvAuthenticationOk() {}
-  _recvErrorResponse(m, payload) {
+  async _recvErrorResponse(m, payload) {
     this._copyingOut = false;
     this._lastErrorResponse = payload;
-    if (this._currResponseChannel) {
-      return this._fwdBemsg(m)
+    if (this._readyState == 'responding') {
+      await this._fwdBemsg(m);
     }
   }
   async _recvReadyForQuery(m, { transactionStatus }) {
-    if (!this._pipeFemsgqPromise) {
-      this._startupComplete();
-    } else if (this._currResponseChannel) { // end response
-      // await this._endResponse(m);
-      if (this._noExplicitTransactions && transactionStatus != 0x49 /*I*/) {
-        // TODO how to prevent next query from executing in transaction of previous query?
-        throw Error('postgres connection left in transaction', { cause: this._lastErrorResponse });
-      }
-      await this._fwdBemsg(m);
-      this._queuedResponseChannels.shift();
-      this._currResponseChannel.end();
-      this._currResponseChannel = null;
-      this._lastErrorResponse = null;
-    } else { // start response
-      this._currResponseChannel = this._queuedResponseChannels[0];
-      // TODO assert this._currResponseChan is not null
-      await this._fwdBemsg(m);
+    switch (this._readyState) {
+      case 'start':
+        this._startupComplete();
+        this._readyState = 'idle';
+        break;
+
+      case 'idle': // response start
+        this._readyState = 'responding';
+        await this._fwdBemsg(m);
+        break;
+
+      case 'responding': // response end
+        if (this._noExplicitTransactions && transactionStatus != 0x49 /*I*/) {
+          // TODO how to prevent next query from executing in transaction of previous query?
+          throw Error('postgres connection left in transaction', { cause: this._lastErrorResponse });
+        }
+        await this._fwdBemsg(m);
+        this._readyState = 'idle';
+        this._lastErrorResponse = null;
+        this._queuedResponseChannels.shift().end();
+        break;
     }
+    this._transactionStatus = transactionStatus;
   }
   _startupComplete() {
     // we dont need password anymore, its more secure to forget it
@@ -838,8 +850,8 @@ class PgConnection {
     }
   }
   async _recvNoticeResponse(m) {
-    if (this._currResponseChannel) {
-      return this._fwdBemsg(m);
+    if (this._readyState == 'responding') {
+      await this._fwdBemsg(m);
     }
     // TODO dispatchEvent for nonquery NoticeResponse
   }
@@ -859,7 +871,7 @@ class PgConnection {
     chunk.tag = tag;
     chunk.payload = payload;
     this._wakeSupress = true;
-    await this._currResponseChannel.push(chunk);
+    await this._queuedResponseChannels[0].push(chunk);
   }
   _wakeIfStuck() {
     // We will send 'wake' chunk if response
@@ -872,10 +884,12 @@ class PgConnection {
     this._wake();
   }
   _wake() {
-    if (!this._currResponseChannel?.drained) return;
-    const wakeChunk = new PgChunk();
-    wakeChunk.tag = 'wake';
-    this._currResponseChannel.push(wakeChunk);
+    const resp = this._queuedResponseChannels[0];
+    if (this._readyState == 'responding' && resp.drained) {
+      const wakeChunk = new PgChunk();
+      wakeChunk.tag = 'wake';
+      resp.push(wakeChunk);
+    }
   }
   _log = (...args) => {
     if (!this._debug) return;

@@ -1731,11 +1731,29 @@ export function setup({
       // conn.whenDestroyed,
     ]);
   });
+
+  test('conn.inTransaction', async _ => {
+    const conn = pgconnection('postgres://pgwire@pg:6432/postgres');
+    try {
+      assertEquals(conn.inTransaction, 0);
+      await conn.query(/*sql*/ `select`);
+      assertEquals(conn.inTransaction, 0);
+      await conn.query(/*sql*/ `begin`);
+      assertEquals(conn.inTransaction, 0x54); // T
+      await Promise.allSettled([conn.query(/*sql*/ `select 1 / 0`)]);
+      assertEquals(conn.inTransaction, 0x45); // E
+      await conn.query(/*sql*/ `rollback`);
+      assertEquals(conn.inTransaction, 0);
+    } finally {
+      await conn.end();
+    }
+    assertEquals(conn.inTransaction, 0);
+  });
 }
 
 // mute
 function _test() {}
 
 async function delay(duration) {
-  return new Promise(resolve => setTimeout(resolve, duration));
+  await new Promise(resolve => setTimeout(resolve, duration));
 }
