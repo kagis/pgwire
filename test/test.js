@@ -739,7 +739,11 @@ export function setup({
       assertEquals(minsert.tag, 'insert');
       assertEquals(minsert.relation, mrel);
       assertEquals(minsert.before, null);
-      assertEquals(minsert.after, { __proto__: null, id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
+      assertEquals(minsert.beforeRaw, null);
+      assertEquals(minsert.afterRaw, { __proto__: null, id: '1', val: 'foo', note: '_toasted_'.repeat(10000) });
+      assertEquals(minsert.after.id, 1);
+      assertEquals(minsert.after.val, 'foo');
+      assertEquals(minsert.after.note, '_toasted_'.repeat(10000));
 
       // update pgo1rel set val = 'bar'
       const mupdate = actual.shift();
@@ -748,7 +752,11 @@ export function setup({
       assertEquals(mupdate.tag, 'update');
       assertEquals(mupdate.relation, mrel);
       assertEquals(mupdate.before, null); // key was not changed
-      assertEquals(mupdate.after, { __proto__: null, id: 1, val: 'bar', note: undefined });
+      assertEquals(mupdate.beforeRaw, null); // key was not changed
+      assertEquals(mupdate.afterRaw, { __proto__: null, id: '1', val: 'bar', note: undefined });
+      assertEquals(mupdate.after.id, 1);
+      assertEquals(mupdate.after.val, 'bar');
+      assertEquals(mupdate.after.note, undefined);
 
       // update pgo1rel set id = 2
       const mupdate_ = actual.shift();
@@ -756,8 +764,14 @@ export function setup({
       assertEquals(typeof mupdate_.time, 'bigint');
       assertEquals(mupdate_.tag, 'update');
       assertEquals(mupdate_.relation, mrel);
-      assertEquals(mupdate_.before, { __proto__: null, id: 1, val: undefined, note: undefined });
-      assertEquals(mupdate_.after, { __proto__: null, id: 2, val: 'bar', note: undefined });
+      assertEquals(mupdate_.beforeRaw, { __proto__: null, id: '1', val: undefined, note: undefined });
+      assertEquals(mupdate_.before.id, 1);
+      assertEquals(mupdate_.before.val, undefined);
+      assertEquals(mupdate_.before.note, undefined);
+      assertEquals(mupdate_.afterRaw, { __proto__: null, id: '2', val: 'bar', note: undefined });
+      assertEquals(mupdate_.after.id, 2);
+      assertEquals(mupdate_.after.val, 'bar');
+      assertEquals(mupdate_.after.note, undefined);
 
       // delete from pgo1rel
       const mdelete = actual.shift();
@@ -765,7 +779,11 @@ export function setup({
       assertEquals(typeof mdelete.time, 'bigint');
       assertEquals(mdelete.tag, 'delete');
       assertEquals(mdelete.relation, mrel);
-      assertEquals(mdelete.before, { __proto__: null, id: 2, note: undefined, val: undefined });
+      assertEquals(mdelete.beforeRaw, { __proto__: null, id: '2', note: undefined, val: undefined });
+      assertEquals(mdelete.before.id, 2);
+      assertEquals(mdelete.before.note, undefined);
+      assertEquals(mdelete.before.val, undefined);
+      assertEquals(mdelete.afterRaw, null);
       assertEquals(mdelete.after, null);
 
       // alter table pgo1rel replica identity full
@@ -788,23 +806,37 @@ export function setup({
       assertEquals(typeof minsert2.time, 'bigint');
       assertEquals(minsert2.tag, 'insert');
       assertEquals(minsert2.relation, mrel2);
+      assertEquals(minsert2.beforeRaw, null);
       assertEquals(minsert2.before, null);
-      assertEquals(minsert2.after, { __proto__: null, id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
+      assertEquals(minsert2.afterRaw, { __proto__: null, id: '1', val: 'foo', note: '_toasted_'.repeat(10000) });
+      assertEquals(minsert2.after.id, 1);
+      assertEquals(minsert2.after.val, 'foo');
+      assertEquals(minsert2.after.note, '_toasted_'.repeat(10000));
 
       const mupdate2 = actual.shift();
       assertEquals(typeof mupdate2.lsn, 'string');
       assertEquals(typeof mupdate2.time, 'bigint');
       assertEquals(mupdate2.tag, 'update');
       assertEquals(mupdate2.relation, mrel2);
-      assertEquals(mupdate2.before, { __proto__: null, id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
-      assertEquals(mupdate2.after, { __proto__: null, id: 1, val: 'bar', note: '_toasted_'.repeat(10000) });
+      assertEquals(mupdate2.beforeRaw, { __proto__: null, id: '1', val: 'foo', note: '_toasted_'.repeat(10000) });
+      assertEquals(mupdate2.before.id, 1);
+      assertEquals(mupdate2.before.val, 'foo');
+      assertEquals(mupdate2.before.note, '_toasted_'.repeat(10000));
+      assertEquals(mupdate2.afterRaw, { __proto__: null, id: '1', val: 'bar', note: '_toasted_'.repeat(10000) });
+      assertEquals(mupdate2.after.id, 1);
+      assertEquals(mupdate2.after.val, 'bar');
+      assertEquals(mupdate2.after.note, '_toasted_'.repeat(10000));
 
       const mdelete2 = actual.shift();
       assertEquals(typeof mdelete2.lsn, 'string');
       assertEquals(typeof mdelete2.time, 'bigint');
       assertEquals(mdelete2.tag, 'delete');
       assertEquals(mdelete2.relation, mrel2);
-      assertEquals(mdelete2.before, { __proto__: null, id: 1, val: 'bar', note: '_toasted_'.repeat(10000) });
+      assertEquals(mdelete2.beforeRaw, { __proto__: null, id: '1', val: 'bar', note: '_toasted_'.repeat(10000) });
+      assertEquals(mdelete2.before.id, 1);
+      assertEquals(mdelete2.before.val, 'bar');
+      assertEquals(mdelete2.before.note, '_toasted_'.repeat(10000));
+      assertEquals(mdelete2.afterRaw, null);
       assertEquals(mdelete2.after, null);
 
       const mrel3 = actual.shift();

@@ -653,24 +653,30 @@ class PgConnection {
     console.error('%s-> %s %o', pid, tag, payload);
   }
   async _recvRowDescription(m, columns) {
-    this._rowProto = {
-      columns,
-      length: columns.length,
-      [Symbol.iterator]: Array.prototype.values,
-    };
-    for (let i = 0; i < columns.length; i++) {
-      Object.defineProperty(this._rowProto, i, {
+    const kRawTuple = Symbol('RawTuple');
+    function PgRow(raw) {
+      this[kRawTuple] = raw;
+    }
+    Object.defineProperties(PgRow.prototype, {
+      length: { enumerable: false, value: columns.length },
+      columns: { enumerable: false, value: columns },
+      raw: { enumerable: false, get() { return this[kRawTuple]; } },
+      [Symbol.iterator]: { value: Array.prototype.values },
+    });
+    for (const [i, { typeOid }] of columns.entries()) {
+      Object.defineProperty(PgRow.prototype, i, {
+        enumerable: true,
         get() {
-          const val = this.raw[i];
-          const { typeOid } = this.columns[i];
+          const val = this[kRawTuple][i];
           return typeof val == 'string' ? PgType.decode(val, typeOid) : val;
         },
       });
     }
+    this._rowCtor = PgRow;
     await this._fwdBemsg(m);
   }
   _recvDataRow(_, /** @type {Array<Uint8Array>} */ row, batch) {
-    const { columns } = this._rowProto;
+    const { columns } = this._rowCtor.prototype;
     for (let i = 0; i < columns.length; i++) {
       const valbuf = row[i];
       if (!valbuf) continue;
@@ -680,7 +686,7 @@ class PgConnection {
       // then allocating and copying buffer per cell in binary case?
       row[i] = binary ? valbuf.slice() : this._rowTextDecoder.decode(valbuf);
     }
-    batch.rows.push({ __proto__: this._rowProto, raw: row });
+    batch.rows.push(new this._rowCtor(row));
   }
   _recvCopyData(_, /** @type {Uint8Array} */ data, batch) {
     if (!this._copyingOut) {
@@ -1620,16 +1626,26 @@ class PgoutputReader extends BinaryReader {
     out.name = this._readString();
     out.replicaIdentity = this._readRelationReplicaIdentity();
     out.columns = this._array(this._readInt16(), this._readRelationColumn);
-    out._tupleDecoder = {
-      _typeOids: new Map(out.columns.map(({ name, typeOid }) => [name, typeOid])),
-      get(tupleRaw, columnName) {
-        const rawval = tupleRaw[columnName];
-        const typeOid = this._typeOids.get(columnName);
-        if (typeof rawval == 'string' && typeOid) return PgType.decode(rawval, typeOid);
-        return rawval;
-      },
-      // TODO make proxy (or target tuple) readonly?
+    out._tupleCtor = PgoTuple;
+
+    const kRawTuple = Symbol('RawTuple'); // TODO global static
+    function PgoTuple(raw) {
+      this[kRawTuple] = raw;
+    }
+    PgoTuple.prototype = {
+      __proto__: null,
+      * [Symbol.iterator]() { for (const k in this) yield [k, this[k]]; },
     };
+    for (const { name, typeOid } of out.columns) {
+      Object.defineProperty(PgoTuple.prototype, name, {
+        enumerable: true,
+        get() {
+          const val = this[kRawTuple][name];
+          // TODO is !typeOid possible?
+          return typeof val == 'string' && typeOid ? PgType.decode(val, typeOid) : val;
+        },
+      });
+    }
     // mem leak not likely to happen because amount of relations is usually small
     this._relationCache.set(out.relationOid, out);
   }
@@ -1675,9 +1691,9 @@ class PgoutputReader extends BinaryReader {
     // https://github.com/kagis/pgwire/issues/16
     // https://github.com/kagis/pgwire/issues/27
     out.beforeRaw = before;
-    out.before = before && new Proxy(before, relation._tupleDecoder);
+    out.before = before && new relation._tupleCtor(before);
     out.afterRaw = after;
-    out.after = after && new Proxy(after, relation._tupleDecoder);
+    out.after = after && new relation._tupleCtor(after);
     // avoid use out.new to make message destructuring easy
   }
   _readTuple({ columns }, tuple, unchangedToastFallback) {
@@ -2213,7 +2229,7 @@ class PgType {
     return result;
   }
   // TODO multi dimension
-  // TODO array_nulls https://www.postgresql.org/docs/14/runtime-config-compatible.html#id-1.6.7.16.2.2.1.1.3
+  // TODO array_nulls https://www.postgresql.org/docs/16/runtime-config-compatible.html#GUC-ARRAY-NULLS
   static _encodeArray(arr, elemTypeOid) {
     const quoteElem = elem => {
       if (elem == null) return 'NULL';
