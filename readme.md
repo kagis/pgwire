@@ -40,7 +40,7 @@ $ POSTGRES='postgres://USER:PASSWORD@HOST:PORT/DATABASE' deno run --allow-env --
 
 ```js
 const pg = await pgconnect({
-  hostname: '127.0.0.1',
+  host: '127.0.0.1',
   port: 5432,
   user: 'postgres',
   password: 'postgres',

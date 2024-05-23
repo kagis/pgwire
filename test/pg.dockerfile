@@ -26,6 +26,7 @@ RUN set -x \
 
  && printf %s\\n \
   "listen_addresses = '0.0.0.0'" \
+  "unix_socket_directories = '/run/postgresql'" \
   "wal_level = logical" \
   "log_timezone = UTC" \
   "timezone = UTC" \
@@ -63,6 +64,7 @@ RUN set -x \
   "[pgbouncer]" \
   "listen_port = 6432" \
   "listen_addr = 0.0.0.0" \
+  "unix_socket_dir = /run/postgresql" \
   "auth_type = any" \
   > pgbouncer.ini \
  ;

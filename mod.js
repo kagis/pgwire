@@ -57,7 +57,7 @@ export class PgError extends Error {
 
 function computeConnectionOptions([uriOrObj, ...rest]) {
   if (!uriOrObj) {
-    return { hostname: '127.0.0.1', port: 5432 };
+    return { host: '127.0.0.1', port: '5432' };
   }
   if (typeof uriOrObj == 'string' || uriOrObj instanceof URL) {
     const uri = new URL(uriOrObj);
@@ -65,8 +65,8 @@ function computeConnectionOptions([uriOrObj, ...rest]) {
     //   throw Error(`invalid postgres protocol ${JSON.stringify(uri.protocol)}`);
     // }
     uriOrObj = withoutUndefinedProps({
-      hostname: uri.hostname || undefined,
-      port: Number(uri.port) || undefined,
+      host: decodeURIComponent(uri.hostname) || undefined,
+      port: uri.port || undefined,
       password: decodeURIComponent(uri.password) || undefined,
       'user': decodeURIComponent(uri.username) || undefined,
       'database': decodeURIComponent(uri.pathname).replace(/^[/]/, '') || undefined,
@@ -168,8 +168,10 @@ class PgPool {
 
 class PgConnection {
   constructor({
-    hostname, port, password, sslmode, sslrootcert,
-    _connectRetry = 0,
+    host, port, password,
+    keepalives = '1', // https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-KEEPALIVES
+    sslmode, sslrootcert,
+    _connectRetry = 0, // TODO connect_timeout
     _wakeInterval = 2000,
     _noExplicitTransactions = false,
     _maxReadBuf = 50 << 20, // 50 MiB
@@ -179,7 +181,14 @@ class PgConnection {
     this.onnotification = null;
     this.parameters = Object.create(null);
     this._debug = /^(true|on|yes|1)$/i.test(_debug);
-    this._socketOptions = { hostname, port };
+    this._socketOptions = {
+      host,
+      port: Number(port),
+      keepAlive: /^(true|on|yes|1)$/i.test(keepalives),
+      // TODO windows support
+      // https://github.com/postgres/postgres/blob/c37267162e889fe783786b9e28d1b65b82365a00/src/include/libpq/pqcomm.h#L67
+      path: /^[/]/.test(host) && host.replace(/[/]*$/g, '/.s.PGSQL.' + port),
+    };
     this._user = options.user;
     this._password = password || '';
     this._sslmode = sslmode;
@@ -419,7 +428,7 @@ class PgConnection {
     if (!this._backendKeyData) {
       throw Error('CancelRequest attempt before BackendKeyData received');
     }
-    const socket = await _net.connect(this._socketOptions);
+    const socket = await _net.connect({ ...this._socketOptions, keepAlive: false });
     try {
       // TODO ssl support
       // if (this._ssl) {
@@ -479,6 +488,7 @@ class PgConnection {
       throw ex;
     }
 
+    // TODO tcp only? which host should be used in case of unix socket?
     if (/^(try_ssl|require|prefer)$/.test(this._sslmode)) {
       // https://www.postgresql.org/docs/16/protocol-flow.html#PROTOCOL-FLOW-SSL
       const sslReq = new FrontendMessage.SSLRequest();
@@ -489,7 +499,7 @@ class PgConnection {
       if (sslResp) {
         try {
           this._socket = await _net.startTls(this._socket, {
-            hostname: this._socketOptions.hostname,
+            hostname: this._socketOptions.host,
             caCerts: this._sslrootcert && [].concat(this._sslrootcert),
           });
         } catch (ex) {
@@ -2553,7 +2563,17 @@ function md5(/** @type {Uint8Array} */ input) {
 
 export const _net = {
   connect(options) {
-    return Deno.connect(options);
+    return options.path ? this.connectUnix(options) : this.connectTcp(options);
+  },
+  async connectTcp({ host, port, keepAlive }) {
+    const socket = await Deno.connect({ hostname: host, port });
+    if (keepAlive) {
+      socket.setKeepAlive(keepAlive); // TODO should close socket on error?
+    }
+    return socket;
+  },
+  async connectUnix({ path }) {
+    return await Deno.connect({ transport: 'unix', path });
   },
   reconnectable(err) {
     return (

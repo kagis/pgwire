@@ -1765,7 +1765,7 @@ export function setup({
   });
 
   test('conn.inTransaction', async _ => {
-    const conn = pgconnection('postgres://pgwire@pg:6432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       assertEquals(conn.inTransaction, 0);
       await conn.query(/*sql*/ `select`);
@@ -1780,6 +1780,32 @@ export function setup({
       await conn.end();
     }
     assertEquals(conn.inTransaction, 0);
+  });
+
+  test('unix socket', async _ => {
+    const conn = pgconnection('postgres://?host=/run/postgresql&port=5432&user=pgwire&database=postgres&x.state=initial');
+    try {
+      const response = conn.stream(/*sql*/ `
+        begin;
+        set x.state = 'started';
+        commit;
+        do $$ begin raise notice 'flush'; end $$;
+        select from pg_sleep(10);
+        set x.state = 'completed';
+      `);
+      let commitReceived = false;
+      for await (const { tag, payload } of response) {
+        if (tag == 'CommandComplete' && payload == 'COMMIT') {
+          commitReceived = true;
+          break;
+        }
+      }
+      assertEquals(commitReceived, true);
+      const [state] = await conn.query(/*sql*/ `show x.state`);
+      assertEquals(state, 'started'); // but not completed
+    } finally {
+      await conn.end();
+    }
   });
 }
 

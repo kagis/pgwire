@@ -28,8 +28,11 @@ Object.assign(SaslScramSha256.prototype, {
 });
 
 Object.assign(_net, {
-  connect({ hostname, port }) {
-    return SocketAdapter.connect(hostname, port);
+  connectTcp({ host, port, keepAlive }) {
+    return SocketAdapter.connect({ host, port, keepAlive });
+  },
+  connectUnix({ path }) {
+    return SocketAdapter.connect({ path });
   },
   reconnectable(err) {
     return ['ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET'].includes(err?.code);
@@ -44,14 +47,13 @@ Object.assign(_net, {
     return sockadapt.write(data);
   },
   closeNullable(sockadapt) {
-    if (!sockadapt) return;
-    return sockadapt.close();
+    return sockadapt?.close();
   },
 });
 
 class SocketAdapter {
-  static async connect(host, port) {
-    const socket = net.connect({ host, port });
+  static async connect(options) {
+    const socket = net.connect(options);
     await once(socket, 'connect');
     return new this(socket);
   }
@@ -109,7 +111,6 @@ class SocketAdapter {
     this._socket.write(data, this._writeResume);
     await p;
     if (this._error) throw this._error; // TODO callstack
-    return data.length;
   }
   // async closeWrite() {
   //   if (this._error) throw this._error; // TODO callstack
