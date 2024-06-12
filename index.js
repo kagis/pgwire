@@ -89,14 +89,14 @@ class SocketAdapter {
     for (;;) {
       if (this._error) throw this._error; // TODO callstack
       if (this._socket.readableEnded) return null;
-      buf = this._socket.read();
+      const toRead = Math.min(out.length, this._socket.readableLength);
+      buf = this._socket.read(toRead);
+
       if (buf?.length) break;
       if (!buf) await new Promise(this._readPauseAsync);
     }
     if (buf.length > out.length) {
-      out.set(buf.subarray(0, out.length));
-      this._socket.unshift(buf.subarray(out.length));
-      return out.length;
+      throw new Error('Read more data than expected');
     }
     out.set(buf);
     return buf.length;
