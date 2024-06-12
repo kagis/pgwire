@@ -93,12 +93,11 @@ class SocketAdapter {
       if (this._socket.readableEnded) return null;
       const toRead = Math.min(out.length, this._socket.readableLength);
       buf = this._socket.read(toRead);
-
       if (buf?.length) break;
       if (!buf) await new Promise(this._readPauseAsync);
     }
-    if (buf.length > out.length) {
-      throw new Error('Read more data than expected');
+    if (buf.length > out.length) { // should never happen
+      throw Error('read more data than expected');
     }
     out.set(buf);
     return buf.length;
