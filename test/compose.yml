@@ -1,29 +1,43 @@
-version: '3.8'
 name: pgwire
 services:
+
   deno:
-    build:
-      dockerfile: deno.dockerfile
-    depends_on: [pgwssl, pgwossl]
+    image: denoland/deno:alpine-1.40.0
     working_dir: /app
-    volumes: [..:/app]
     environment: [TEST_FILTER]
-    command: sh -c 'sleep 0 && deno test --allow-net --v8-flags=--stack_trace_limit=30 --filter="$TEST_FILTER" test/test_deno.js'
+    command: >
+      deno test
+      --allow-net=pg
+      --allow-read=/run/postgresql
+      --allow-write=/run/postgresql
+      --v8-flags=--stack_trace_limit=30
+      --filter="$TEST_FILTER"
+      test/test_deno.js
+    # command: sh -c 'deno test --coverage=/tmp --allow-net --v8-flags=--stack_trace_limit=30 --filter="$TEST_FILTER" test/test_deno.js && deno coverage /tmp'
+    volumes:
+      - ..:/app:ro
+      - usock:/run/postgresql:ro
+    depends_on:
+      pg:
+        condition: service_healthy
 
   node:
-    image: node:14.18-alpine3.15
-    depends_on: [pgwssl, pgwossl]
+    image: node:18.17.0-alpine
     working_dir: /app
-    volumes: [..:/app]
     environment: [TEST_FILTER]
-    command: sh -c 'sleep 0 && node --unhandled-rejections=strict test/test_node.js'
+    command: node --test --test-name-pattern=".?$TEST_FILTER" test/test_node.js
+    volumes:
+      - ..:/app:ro
+      - usock:/run/postgresql:ro
+    depends_on:
+      pg:
+        condition: service_healthy
 
-  pgwssl:
+  pg:
     build:
       dockerfile: pg.dockerfile
-    command: sh -c 'sleep 0 && postgres'
+    volumes:
+      - usock:/run/postgresql
 
-  pgwossl:
-    build:
-      dockerfile: pg.dockerfile
-    command: sh -c 'sleep 0 && postgres -c ssl=off'
+volumes:
+  usock:

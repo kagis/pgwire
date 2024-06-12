@@ -1,215 +1,175 @@
+import { assertEquals } from './assert.js';
+
 export function setup({
-  pgconnect,
+  pgconnection,
   pgpool,
   test,
-  assertEquals,
-  tcpproxy,
 }) {
 
   test('simple proto', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const res = await conn.query(/*sql*/ `
-        do $$ begin raise notice 'test start'; end $$;
-        select 'hello' a, 'world' b union all select 'bonjour', 'le monde';
-        do $$ begin raise notice 'test end'; end $$;
+      var res = await conn.query(/*sql*/ `
+        select null a;
+        values ('hello', -42), ('привет', 42);
+        do $$ begin raise notice 'sample message'; end $$;
       `);
-      const [...row] = res;
-      assertEquals(row, ['hello', 'world']);
-      assertEquals({
-        status: res.status,
-        scalar: res.scalar,
-        rows: res.rows,
-        columns: res.columns,
-        notices: res.notices?.map(it => ({ message: it?.message })),
-        results: res.results?.map(it => ({
-          status: it?.status,
-          scalar: it?.scalar,
-          rows: it?.rows,
-          columns: it?.columns,
-        })),
-      }, {
-        status: null,
-        scalar: 'hello',
-        rows: [['hello', 'world'], ['bonjour', 'le monde']],
-        columns: [
-          { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-          { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-        ],
-        notices: [
-          { message: 'test start' },
-          { message: 'test end' },
-        ],
-        results: [{
-          status: 'DO',
-          scalar: undefined,
-          rows: [],
-          columns: [],
-        }, {
-          status: 'SELECT 2',
-          scalar: 'hello',
-          rows: [['hello', 'world'], ['bonjour', 'le monde']],
-          columns: [
-            { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-            { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-          ],
-        }, {
-          status: 'DO',
-          scalar: undefined,
-          rows: [],
-          columns: [],
-        }],
-      });
     } finally {
       await conn.end();
     }
+
+    // avoid ambiguous status for multistatement query
+    assertEquals(res.status, null);
+
+    // root result should be from last selectish statement
+    assertEquals(res.scalar, 'hello'); // TODO deprecated
+    assertEquals(res.rows, res.results[1].rows);
+    assertEquals(res.columns, res.results[1].columns);
+    assertEquals([...res], [...res.results[1].rows[0]]);
+
+    assertEquals(res.results.length, 3);
+    assertEquals(res.results[0].status, 'SELECT 1');
+    assertEquals(res.results[0].scalar, null); // TODO deprecated
+    assertEquals(res.results[0].columns, [
+      { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
+    ]);
+    // test null bypasses decoding
+    assertEquals(res.results[0].rows.length, 1);
+    assertEquals(res.results[0].rows[0][0], null);
+    assertEquals(res.results[0].rows[0].raw, [null]);
+
+    assertEquals(res.results[1].status, 'SELECT 2');
+    assertEquals(res.results[1].scalar, 'hello'); // TODO deprecated
+    assertEquals(res.results[1].columns, [
+      { binary: 0, name: 'column1', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
+      { binary: 0, name: 'column2', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
+    ]);
+    const { rows } = res.results[1];
+    assertEquals(rows.length, 2);
+    {
+      const row = rows[0];
+      assertEquals(row.length, 2);
+      assertEquals([row[0], row[1]], ['hello', -42]);
+      assertEquals([...row], ['hello', -42]);
+      assertEquals(row.raw, ['hello', '-42']);
+    }
+    {
+      const row = rows[1];
+      assertEquals(row.length, 2);
+      assertEquals([row[0], row[1]], ['привет', 42]);
+      assertEquals([...row], ['привет', 42]);
+      assertEquals(row.raw, ['привет', '42']);
+    }
+
+    assertEquals(res.results[2].status, 'DO');
+    assertEquals(res.results[2].scalar, undefined); // TODO deprecated
+    assertEquals(res.results[2].columns, []);
+    assertEquals(res.results[2].rows, []);
+
+    assertEquals(res.notices.length, 1);
+    assertEquals(res.notices[0].message, 'sample message');
+    assertEquals(res.notices[0].code, '00000');
+    assertEquals(res.notices[0].severity, 'NOTICE');
+    assertEquals(res.notices[0].severityEn, 'NOTICE');
   });
 
   test('simple proto empty', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const res = await conn.query(/*sql*/ ``);
-      const [...row] = res;
-      assertEquals(row, []);
-      assertEquals({
-        status: res.status,
-        scalar: res.scalar,
-        rows: res.rows,
-        columns: res.columns,
-        notices: res.notices,
-        results: res.results?.map(it => ({
-          status: it?.status,
-          scalar: it?.scalar,
-          rows: it?.rows,
-          columns: it?.columns,
-        })),
-      }, {
-        status: 'EmptyQueryResponse',
-        scalar: undefined,
-        rows: [],
-        columns: [],
-        notices: [],
-        results: [{
-          status: 'EmptyQueryResponse',
-          scalar: undefined,
-          rows: [],
-          columns: [],
-        }],
-      });
+      var res = await conn.query(/*sql*/ ``);
     } finally {
       await conn.end();
     }
+    assertEquals([...res], []);
+    assertEquals(res.status, 'EmptyQueryResponse');
+    assertEquals(res.scalar, undefined); // TODO deprecated
+    assertEquals(res.rows, []);
+    assertEquals(res.columns, []);
+    assertEquals(res.notices, []);
+    assertEquals(res.results.length, 1);
+    assertEquals(res.results[0].status, 'EmptyQueryResponse');
+    assertEquals(res.results[0].scalar, undefined); // TODO deprecated
+    assertEquals(res.results[0].rows, []);
+    assertEquals(res.results[0].columns, []);
   });
 
   test('extended proto', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const res = await conn.query({
-        statement: /*sql*/ `do $$ begin raise notice 'test start'; end $$`
+      var res = await conn.query({
+        statement: /*sql*/ `do $$ begin raise notice 'sample message'; end $$`
       }, {
-        // suspended
-        statement: /*sql*/ `select 'test' a from generate_series(0, 10) i`,
+        statement: String.raw /*sql*/ `select $1 a, $2 b`,
+        binary: [false, true],
+        params: [
+          { type: 'int4', value: Uint8Array.of(1, 2, 3, 4) }, // binary param
+          { type: 'int4', value: '-42' }, // text param
+        ],
+      }, {
+        // PortalSuspended
+        statement: /*sql*/ `values ('hello'), ('bonjour')`,
         limit: 1,
       }, {
-        // binary output
-        statement: /*sql*/ `select 16909060::int4 a, 16909060::int4 b, decode('0001020304', 'hex') c`,
-        binary: [false, true, true],
-      }, {
-        // binary params
-        statement: /*sql*/ `select $1 a, $2 b`,
-        params: [
-          { type: 'int4', value: Uint8Array.of(1, 2, 3, 4) },
-          { type: 'bytea', value: Uint8Array.of(0, 1, 2, 3, 4) },
-        ],
-      }, {
-        statement: /*sql*/ `select $1 a, 'world' b union all select $2, 'le monde'`,
-        params: [{ type: 'text', value: 'hello' }, { type: 'text', value: 'bonjour' }],
-      }, {
-        statement: /*sql*/ `do $$ begin raise notice 'test end'; end $$;`
-      }, {
-        statement: /*sql*/ `/*empty*/`
-      });
-
-      const [...row] = res;
-      assertEquals(row, ['hello', 'world']);
-      assertEquals({
-        status: res.status,
-        scalar: res.scalar,
-        rows: res.rows,
-        columns: res.columns,
-        notices: res.notices?.map(it => ({ message: it?.message })),
-        results: res.results?.map(it => ({
-          status: it?.status,
-          scalar: it?.scalar,
-          rows: it?.rows,
-          columns: it?.columns,
-        })),
-      }, {
-        status: null,
-        scalar: 'hello',
-        rows: [['hello', 'world'], ['bonjour', 'le monde']],
-        columns: [
-          { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-          { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-        ],
-        notices: [
-          { message: 'test start' },
-          { message: 'test end' },
-        ],
-        results: [{
-          status: 'DO',
-          scalar: undefined,
-          rows: [],
-          columns: [],
-        }, {
-          status: 'PortalSuspended',
-          scalar: 'test',
-          rows: [['test']],
-          columns: [{ binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 }],
-        }, {
-          status: 'SELECT 1',
-          scalar: 16909060,
-          rows: [[16909060, Uint8Array.of(1, 2, 3, 4), Uint8Array.of(0, 1, 2, 3, 4)]],
-          columns: [
-            { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
-            { binary: 1, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
-            { binary: 1, name: 'c', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 17, typeSize: -1 }
-          ],
-        }, {
-          status: 'SELECT 1',
-          scalar: 16909060,
-          rows: [[16909060, Uint8Array.of(0, 1, 2, 3, 4)]],
-          columns: [
-            { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
-            { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 17, typeSize: -1 }
-          ],
-        }, {
-          status: 'SELECT 2',
-          scalar: 'hello',
-          rows: [['hello', 'world'], ['bonjour', 'le monde']],
-          columns: [
-            { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-            { binary: 0, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 },
-          ],
-        }, {
-          status: 'DO',
-          scalar: undefined,
-          rows: [],
-          columns: [],
-        }, {
-          status: 'EmptyQueryResponse',
-          scalar: undefined,
-          rows: [],
-          columns: [],
-        }],
+        // EmptyQueryResponse
+        statement: ''
       });
     } finally {
       await conn.end();
     }
+
+    // avoid ambiguous status for multistatement query
+    assertEquals(res.status, null);
+
+    // root result should be from last selectish statement
+    assertEquals(res.scalar, 'hello'); // TODO deprecated
+    assertEquals(res.rows, res.results[2].rows);
+    assertEquals(res.columns, res.results[2].columns);
+    assertEquals([...res], ['hello']);
+
+    assertEquals(res.results.length, 4);
+
+    assertEquals(res.results[0].status, 'DO');
+    assertEquals(res.results[0].scalar, undefined); // TODO deprecated
+    assertEquals(res.results[0].rows, []);
+    assertEquals(res.results[0].columns, []);
+
+    assertEquals(res.results[1].status, 'SELECT 1');
+    assertEquals(res.results[1].scalar, 16909060); // TODO deprecated
+    assertEquals(res.results[1].columns, [
+      { binary: 0, name: 'a', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
+      { binary: 1, name: 'b', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 23, typeSize: 4 },
+    ]);
+    assertEquals(res.results[1].rows.length, 1);
+    const row = res.results[1].rows[0];
+    assertEquals(row.length, 2);
+    assertEquals(row[0], 16909060);
+    assertEquals(row[1], Uint8Array.of(0xff, 0xff, 0xff, 0xd6)); // -42
+    assertEquals([...row], [16909060, Uint8Array.of(0xff, 0xff, 0xff, 0xd6)]);
+    assertEquals(row.raw, ['16909060', Uint8Array.of(0xff, 0xff, 0xff, 0xd6)]);
+
+    assertEquals(res.results[2].status, 'PortalSuspended');
+    assertEquals(res.results[2].scalar, 'hello'); // TODO deprecated
+    assertEquals(res.results[2].columns, [{ binary: 0, name: 'column1', tableColumn: 0, tableOid: 0, typeMod: -1, typeOid: 25, typeSize: -1 }]);
+    assertEquals(res.results[2].rows.length, 1);
+    assertEquals(res.results[2].rows[0].length, 1);
+    assertEquals(res.results[2].rows[0][0], 'hello');
+    assertEquals([...res.results[2].rows[0]], ['hello']);
+    assertEquals(res.results[2].rows[0].raw, ['hello']);
+
+    assertEquals(res.results[3].status, 'EmptyQueryResponse');
+    assertEquals(res.results[3].scalar, undefined); // TODO deprecated
+    assertEquals(res.results[3].rows, []);
+    assertEquals(res.results[3].columns, []);
+
+    assertEquals(res.notices.length, 1);
+    assertEquals(res.notices[0].message, 'sample message');
+    assertEquals(res.notices[0].code, '00000');
+    assertEquals(res.notices[0].severity, 'NOTICE');
+    assertEquals(res.notices[0].severityEn, 'NOTICE');
   });
 
 // test('sync connection', async _ => {
-//   const { connection } = pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+//   const { connection } = pgconnect('postgres://pgwire@pg:5432/postgres');
 //   try {
 //     await connection.query(/*sql*/ `select 'hello'`);
 //   } finally {
@@ -218,7 +178,7 @@ export function setup({
 // });
 
 // test('connection error during query', async _ => {
-//   const { connection } = pgconnect('postgres://invalid@pgwssl:5432/postgres');
+//   const { connection } = pgconnect('postgres://invalid@pg:5432/postgres');
 //   try {
 //     await assertRejects(
 //       _ => connection.query(/*sql*/ `select`),
@@ -231,7 +191,7 @@ export function setup({
 // });
 
 // test('throw when query after close', async _ => {
-//   const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+//   const conn = await pgconnect('postgres://pgwire@pg:5432/postgres');
 //   await conn.end();
 //   await assertRejects(
 //     _ => conn.query(/*sql*/ `select`),
@@ -252,106 +212,137 @@ export function setup({
 //   assert.deepStrictEqual(pgwire.pgident(`public`, `foo`), `"public"."foo"`);
 // });
 
-  test('connect with unexisting user', async _ => {
-    const caughtError = await pgconnect('postgres://unknown@pgwssl:5432/postgres').catch(Object);
-    assertError(caughtError, 'PgError.28000');
+
+  test('connect with unexisting user, query', async _ => {
+    const conn = pgconnection('postgres://unicorn@pg:5432/postgres?_debug=0');
+    try {
+      const [res] = await Promise.allSettled([
+        conn.query(/*sql*/ `select`),
+      ]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(res.reason.name, 'PgError.28000');
+      assertEquals(res.reason.cause.severity, 'FATAL');
+      assertEquals(res.reason.cause.code, '28000');
+    } finally {
+      await conn.end();
+    }
+  });
+
+  test('connect with unexisting user, pool', async _ => {
+    const pool = pgpool('postgres://unicorn@pg:5432/postgres?_debug=0');
+    try {
+      const [res] = await Promise.allSettled([
+        pool.query(/*sql*/ `select`),
+      ]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(res.reason.name, 'PgError.28000');
+      assertEquals(res.reason.cause.severity, 'FATAL');
+      assertEquals(res.reason.cause.code, '28000');
+    } finally {
+      await pool?.end();
+    }
   });
 
   test('copy from stdin extended', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const datasrc = ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode);
-      const { rows } = await conn.query(
-        { statement: /*sql*/ `create temp table test(foo text, bar text)` },
-        { statement: /*sql*/ `copy test from stdin`, stdin: datasrc },
-        { statement: /*sql*/ `select * from test` },
+      var [outDump] = await conn.query(
+        { statement: /*sql*/ `create temp table greeting(id int, body text)` },
+        { statement: /*sql*/ `copy greeting from stdin`, stdin: genInputDump() },
+        { statement: /*sql*/ `select jsonb_agg(jsonb_build_array(id, body) order by id) from greeting` },
       );
-      assertEquals(rows, [['1', 'hello'], ['2', 'world']]);
     } finally {
       await conn.end();
     }
-    function utf8encode(s) {
-      return new TextEncoder().encode(s);
+    async function * genInputDump() {
+      const utf8enc = new TextEncoder();
+      yield * ['-255\t', 'hello\n', '255\t', 'привет\n'].map(utf8enc.encode, utf8enc);
     }
+    assertEquals(outDump, [[-255, 'hello'], [255, 'привет']]);
   });
 
   test('copy from stdin extended missing', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const caughtError = await conn.query(
-        { statement: /*sql*/ `create temp table test(foo int, bar text)` },
-        { statement: /*sql*/ `copy test from stdin` },
-      ).catch(Object);
-      assertError(caughtError, 'PgError.57014');
-    } finally {
-      await conn.end();
-    }
-  });
-
-  test('copy from stdin simple', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
-    try {
-      const { rows } = await conn.query(/*sql*/ `
-        create temp table test(foo text, bar text);
-        copy test from stdin;
-        select * from test;
-      `, {
-        stdin: ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode),
-      });
-      assertEquals(rows, [['1', 'hello'], ['2', 'world']]);
-    } finally {
-      await conn.end();
-    }
-    function utf8encode(s) {
-      return new TextEncoder().encode(s);
-    }
-  });
-
-  test('copy from stdin simple 2', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
-    try {
-      const { rows } = await conn.query(/*sql*/ `
-        create temp table test(foo text, bar text);
-        copy test from stdin;
-        copy test from stdin;
-        select * from test;
-      `, {
-        stdins: [
-          ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode),
-          ['3\t', 'hello\n', '4\t', 'world\n'].map(utf8encode),
-        ],
-      });
-      assertEquals(rows, [
-        ['1', 'hello'],
-        ['2', 'world'],
-        ['3', 'hello'],
-        ['4', 'world'],
+      var [res] = await Promise.allSettled([
+        conn.query(
+          { statement: /*sql*/ `create temp table greeting(id int, body text)` },
+          { statement: /*sql*/ `copy greeting from stdin` },
+        ),
       ]);
     } finally {
       await conn.end();
     }
+    assertEquals(res.status, 'rejected');
+    assertEquals(String(res.reason), 'PgError.57014: COPY from stdin failed: no stdin provided');
+  });
+
+  test('copy from stdin simple', async _ => {
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
+    try {
+      var [outDump] = await conn.query(/*sql*/ `
+        create temp table greeting(id int, body text);
+        copy greeting from stdin;
+        select jsonb_agg(jsonb_build_array(id, body) order by id) from greeting;
+      `, { stdin: genInputDump() });
+    } finally {
+      await conn.end();
+    }
+    async function * genInputDump() {
+      const utf8enc = new TextEncoder();
+      yield * ['-255\t', 'hello\n', '255\t', 'привет\n'].map(utf8enc.encode, utf8enc);
+    }
+    assertEquals(outDump, [[-255, 'hello'], [255, 'привет']]);
+  });
+
+  test('copy from stdin simple 2', async _ => {
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
+    try {
+      var [outDump] = await conn.query(/*sql*/ `
+        create temp table greeting(id int, body text);
+        copy greeting from stdin;
+        copy greeting from stdin;
+        select jsonb_agg(jsonb_build_array(id, body) order by id) from greeting;
+      `, {
+        stdins: [
+          ['1\t', 'hello\n', '2\t', 'привет\n'].map(utf8encode),
+          ['3\t', 'bonjour\n', '4\t', 'hola\n'].map(utf8encode),
+        ],
+      });
+    } finally {
+      await conn.end();
+    }
     function utf8encode(s) {
       return new TextEncoder().encode(s);
     }
+    assertEquals(outDump, [
+      [1, 'hello'],
+      [2, 'привет'],
+      [3, 'bonjour'],
+      [4, 'hola'],
+    ]);
   });
 
   test('copy from stdin simple missing', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const caughtError = await conn.query(/*sql*/ `
-        create temp table test(foo int, bar text);
-        copy test from stdin;
-        select 'hello';
-        copy test from stdin;
-        copy test from stdin;
-      `, {
-        stdins: [
-          ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode),
-          ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode),
-          // here should be third one
-        ],
-      }).catch(Object);
-      assertError(caughtError, 'PgError.57014');
+      const [res] = await Promise.allSettled([
+        conn.query(/*sql*/ `
+          create temp table test(foo int, bar text);
+          copy test from stdin;
+          select 'hello';
+          copy test from stdin;
+          copy test from stdin;
+        `, {
+          stdins: [
+            ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode),
+            ['1\t', 'hello\n', '2\t', 'world\n'].map(utf8encode),
+            // here should be third one
+          ],
+        }),
+      ]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(String(res.reason), 'PgError.57014: COPY from stdin failed: no stdin provided');
     } finally {
       await conn.end();
     }
@@ -361,7 +352,7 @@ export function setup({
   });
 
   test('copy to stdout', async _ => {
-    const conn = await pgconnect('postgres://postgres:qwerty@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       const stdout = conn.stream(/*sql*/ `copy (values (1, 'hello'), (2, 'world')) to stdout`);
       const dump = await readAll(stdout)
@@ -373,7 +364,7 @@ export function setup({
   });
 
   test('copy to stdout multi', async _ => {
-    const conn = await pgconnect('postgres://postgres:qwerty@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       const stdout = conn.stream(/*sql*/ `
         copy (values (1, 'hello'), (2, 'world')) to stdout;
@@ -457,7 +448,7 @@ export function setup({
       [],
       [],
     ];
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       const [[...simple], [...ext]] = await Promise.all([
         conn.query(statement),
@@ -471,7 +462,7 @@ export function setup({
   });
 
   test('bytea decode escape formated', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       const [val] = await conn.query(String.raw /*sql*/ `
         set bytea_output = escape;
@@ -518,7 +509,7 @@ export function setup({
   });
 
   test('type encode', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       let typeName, text;
       // int4
@@ -590,7 +581,7 @@ export function setup({
   });
 
   test('emoji', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       const [res] = await conn.query({
         statement: /*sql*/ `select $1`,
@@ -603,7 +594,7 @@ export function setup({
   });
 
   test('negative tableColumn', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       const res = await conn.query({
         statement: /*sql*/ `select ctid from pg_type limit 0`,
@@ -634,7 +625,7 @@ export function setup({
 // });
 
   _test('logical replication', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?replication=database');
+    const conn = await pgconnect('postgres://pgwire@pg:5432/postgres?replication=database');
     try {
       await conn.query(/*sql*/ `
         select pg_create_logical_replication_slot('test_2b265aa1', 'test_decoding', temporary:=true)
@@ -668,7 +659,7 @@ export function setup({
   });
 
   test('logical replication pgoutput', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?replication=database');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres?replication=database');
     try {
       await Promise.all([
         conn.query(/*sql*/ `create table pgo1rel(id int not null primary key, val text, note text)`),
@@ -748,7 +739,11 @@ export function setup({
       assertEquals(minsert.tag, 'insert');
       assertEquals(minsert.relation, mrel);
       assertEquals(minsert.before, null);
-      assertEquals(minsert.after, { __proto__: null, id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
+      assertEquals(minsert.beforeRaw, null);
+      assertEquals(minsert.afterRaw, { __proto__: null, id: '1', val: 'foo', note: '_toasted_'.repeat(10000) });
+      assertEquals(minsert.after.id, 1);
+      assertEquals(minsert.after.val, 'foo');
+      assertEquals(minsert.after.note, '_toasted_'.repeat(10000));
 
       // update pgo1rel set val = 'bar'
       const mupdate = actual.shift();
@@ -757,7 +752,11 @@ export function setup({
       assertEquals(mupdate.tag, 'update');
       assertEquals(mupdate.relation, mrel);
       assertEquals(mupdate.before, null); // key was not changed
-      assertEquals(mupdate.after, { __proto__: null, id: 1, val: 'bar', note: undefined });
+      assertEquals(mupdate.beforeRaw, null); // key was not changed
+      assertEquals(mupdate.afterRaw, { __proto__: null, id: '1', val: 'bar', note: undefined });
+      assertEquals(mupdate.after.id, 1);
+      assertEquals(mupdate.after.val, 'bar');
+      assertEquals(mupdate.after.note, undefined);
 
       // update pgo1rel set id = 2
       const mupdate_ = actual.shift();
@@ -765,8 +764,14 @@ export function setup({
       assertEquals(typeof mupdate_.time, 'bigint');
       assertEquals(mupdate_.tag, 'update');
       assertEquals(mupdate_.relation, mrel);
-      assertEquals(mupdate_.before, { __proto__: null, id: 1, val: undefined, note: undefined });
-      assertEquals(mupdate_.after, { __proto__: null, id: 2, val: 'bar', note: undefined });
+      assertEquals(mupdate_.beforeRaw, { __proto__: null, id: '1', val: undefined, note: undefined });
+      assertEquals(mupdate_.before.id, 1);
+      assertEquals(mupdate_.before.val, undefined);
+      assertEquals(mupdate_.before.note, undefined);
+      assertEquals(mupdate_.afterRaw, { __proto__: null, id: '2', val: 'bar', note: undefined });
+      assertEquals(mupdate_.after.id, 2);
+      assertEquals(mupdate_.after.val, 'bar');
+      assertEquals(mupdate_.after.note, undefined);
 
       // delete from pgo1rel
       const mdelete = actual.shift();
@@ -774,7 +779,11 @@ export function setup({
       assertEquals(typeof mdelete.time, 'bigint');
       assertEquals(mdelete.tag, 'delete');
       assertEquals(mdelete.relation, mrel);
-      assertEquals(mdelete.before, { __proto__: null, id: 2, note: undefined, val: undefined });
+      assertEquals(mdelete.beforeRaw, { __proto__: null, id: '2', note: undefined, val: undefined });
+      assertEquals(mdelete.before.id, 2);
+      assertEquals(mdelete.before.note, undefined);
+      assertEquals(mdelete.before.val, undefined);
+      assertEquals(mdelete.afterRaw, null);
       assertEquals(mdelete.after, null);
 
       // alter table pgo1rel replica identity full
@@ -797,23 +806,37 @@ export function setup({
       assertEquals(typeof minsert2.time, 'bigint');
       assertEquals(minsert2.tag, 'insert');
       assertEquals(minsert2.relation, mrel2);
+      assertEquals(minsert2.beforeRaw, null);
       assertEquals(minsert2.before, null);
-      assertEquals(minsert2.after, { __proto__: null, id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
+      assertEquals(minsert2.afterRaw, { __proto__: null, id: '1', val: 'foo', note: '_toasted_'.repeat(10000) });
+      assertEquals(minsert2.after.id, 1);
+      assertEquals(minsert2.after.val, 'foo');
+      assertEquals(minsert2.after.note, '_toasted_'.repeat(10000));
 
       const mupdate2 = actual.shift();
       assertEquals(typeof mupdate2.lsn, 'string');
       assertEquals(typeof mupdate2.time, 'bigint');
       assertEquals(mupdate2.tag, 'update');
       assertEquals(mupdate2.relation, mrel2);
-      assertEquals(mupdate2.before, { __proto__: null, id: 1, val: 'foo', note: '_toasted_'.repeat(10000) });
-      assertEquals(mupdate2.after, { __proto__: null, id: 1, val: 'bar', note: '_toasted_'.repeat(10000) });
+      assertEquals(mupdate2.beforeRaw, { __proto__: null, id: '1', val: 'foo', note: '_toasted_'.repeat(10000) });
+      assertEquals(mupdate2.before.id, 1);
+      assertEquals(mupdate2.before.val, 'foo');
+      assertEquals(mupdate2.before.note, '_toasted_'.repeat(10000));
+      assertEquals(mupdate2.afterRaw, { __proto__: null, id: '1', val: 'bar', note: '_toasted_'.repeat(10000) });
+      assertEquals(mupdate2.after.id, 1);
+      assertEquals(mupdate2.after.val, 'bar');
+      assertEquals(mupdate2.after.note, '_toasted_'.repeat(10000));
 
       const mdelete2 = actual.shift();
       assertEquals(typeof mdelete2.lsn, 'string');
       assertEquals(typeof mdelete2.time, 'bigint');
       assertEquals(mdelete2.tag, 'delete');
       assertEquals(mdelete2.relation, mrel2);
-      assertEquals(mdelete2.before, { __proto__: null, id: 1, val: 'bar', note: '_toasted_'.repeat(10000) });
+      assertEquals(mdelete2.beforeRaw, { __proto__: null, id: '1', val: 'bar', note: '_toasted_'.repeat(10000) });
+      assertEquals(mdelete2.before.id, 1);
+      assertEquals(mdelete2.before.val, 'bar');
+      assertEquals(mdelete2.before.note, '_toasted_'.repeat(10000));
+      assertEquals(mdelete2.afterRaw, null);
       assertEquals(mdelete2.after, null);
 
       const mrel3 = actual.shift();
@@ -869,17 +892,17 @@ export function setup({
   });
 
   test('logical replication invalid startLsn', async _ => {
-    let caughtError;
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?replication=database&_debug=0');
-    const replicationStream = conn.logicalReplication({ slot: 'test', startLsn: 'invalid/lsn' });
+    let caughtException;
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres?replication=database&_debug=0');
     try {
+      const replicationStream = conn.logicalReplication({ slot: 'test', startLsn: 'invalid/lsn' });
       for await (const _ of replicationStream);
     } catch (err) {
-      caughtError = err;
+      caughtException = err;
     } finally {
       await conn.end();
     }
-    assertError(caughtError, 'PgError.invalid_lsn');
+    assertEquals(String(caughtException), 'RangeError: invalid lsn');
   });
 
 // test('logical replication ack', async () => {
@@ -971,7 +994,7 @@ export function setup({
 // });
 
   _test('parse bind execute', async _ => {
-    const pg = pgpool('postgres://postgres:secret@pgwssl:5432/postgres');
+    const pg = pgpool('postgres://postgres:secret@pg:5432/postgres');
     const { scalar } = await pg.query({
       message: 'Parse',
       statement: /*sql*/ `SELECT $1`,
@@ -989,26 +1012,31 @@ export function setup({
   });
 
   test('connection end', async _ => {
-    const conn = await pgconnect('postgres://postgres:qwerty@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const [[health],,,, immediateQueryAfterEnd] = await Promise.all([
-        // check that connection is working
-        conn.query(/*sql*/ `select 'ok'`),
+      assertEquals(conn.queryable, true);
+      await conn.query(); // connect
+      await Promise.all([
+        // connection should be queryable
+        conn.query(/*sql*/ `select 'ok'`).then(([health]) => assertEquals(health, 'ok')),
         // enqueue connection end
-        conn.end(),
-        // ensure connection is still alive
-        assertEquals(Boolean(conn.pid), true),
-         // concurent .end calls should be no-op,
-         // but still wait until connection terminated
-        conn.end().then(_ => assertEquals(Boolean(conn.pid), false)),
+        conn.end().then(_ => assertEquals(conn.pid, null)),
+        // connection expected to be alive
+        assertEquals(conn.pid > 0, true),
+        // but not queryable
+        assertEquals(conn.queryable, false),
+         // concurent .end calls should be no-op, but still wait until connection terminated
+        conn.end().then(_ => assertEquals(conn.pid, null)),
         // connection should be closed for new queries immediately
-        conn.query(/*sql*/ `select 'impossible'`).catch(Object),
+        Promise.allSettled([conn.query(/*sql*/ `select 'impossible'`)]).then(([{ status, reason }]) => {
+          assertEquals(status, 'rejected');
+          assertEquals(String(reason), 'Error: postgres query late');
+        }),
       ]);
-      assertEquals(health, 'ok');
-      assertError(immediateQueryAfterEnd, 'PgError.conn_ended');
       // connection should still be closed for new queries
-      const seqQueryAfterEnd = await conn.query(/*sql*/ `select 'impossible'`).catch(Object);
-      assertError(seqQueryAfterEnd, 'PgError.conn_ended');
+      const [res] = await Promise.allSettled([conn.query(/*sql*/ `select 'impossible'`)]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(String(res.reason), 'Error: postgres query late');
     } finally {
       // subsequent .end calls should be no-op
       await conn.end();
@@ -1016,32 +1044,45 @@ export function setup({
   });
 
   test('pending queries should be rejected when server closes connection', async _ => {
-    let conn, conn1;
+    // if exit_on_error=on then all errors destroy connection
+    // https://www.postgresql.org/docs/16/runtime-config-error-handling.html#GUC-EXIT-ON-ERROR
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres?exit_on_error=on');
     try {
-      conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0');
-      conn1 = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
-      const pid = conn.pid;
-      const [caughtError] = await Promise.all([
-        conn.query(/*sql*/ `select pg_sleep(5)`).catch(Object),
-        conn1.query(/*sql*/ `select pg_terminate_backend(${pid}) from pg_sleep(0.1)`),
+      const [res1, res2] = await Promise.allSettled([
+        conn.query(/*sql*/ `select 1 / 0`),
+        conn.query(/*sql*/ `select 'doomed'`),
       ]);
-      assertError(caughtError, 'PgError.57P01');
+      assertEquals(res1.status, 'rejected');
+      assertEquals(String(res1.reason), 'PgError.22012: division by zero');
+      assertEquals(res1.reason.cause.severity, 'FATAL');
+      assertEquals(res1.reason.cause.code, '22012');
+      assertEquals(res1.reason.cause.message, 'division by zero');
+
+      assertEquals(res2.status, 'rejected');
+      assertEquals(String(res2.reason), 'Error: postgres query failed');
     } finally {
-      await conn?.end();
-      await conn1?.end();
+      await conn.end();
     }
   });
 
-// test('pgbouncer', async () => {
-//   const pool = pgwire.pool(process.env.POSTGRES_PGBOUNCER);
-//   const { scalar } = await pool.query(/*sql*/ `SELECT 1`);
-//   assert.deepStrictEqual(scalar, 1);
-// });
+  test('auth cleartext with bad password', async _ => {
+    const conn = pgconnection('postgres://pgwire_pwd@pg:5432/postgres');
+    try {
+      const [res] = await Promise.allSettled([
+        conn.query(),
+      ]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(String(res.reason), 'PgError.28P01: empty password returned by client');
+      // assertEquals(res.reason.cause.severity, 'FATAL');
+      // assertEquals(res.reason.cause.code, '28P01');
+      // assertEquals(res.reason.cause.message, 'empty password returned by client');
+    } finally {
+      await conn.end();
+    }
+  });
 
-  test('auth clear', async _ => {
-    const caughtError = await pgconnect('postgres://pgwire_pwd@pgwssl:5432/postgres').catch(Object);
-    assertError(caughtError, 'PgError.nopwd_clear');
-    const conn = await pgconnect('postgres://pgwire_pwd:secret@pgwssl:5432/postgres');
+  test('auth cleartext', async _ => {
+    const conn = pgconnection('postgres://pgwire_pwd:secret@pg:5432/postgres');
     try {
       const [username] = await conn.query(/*sql*/ `select current_user`);
       assertEquals(username, 'pgwire_pwd');
@@ -1050,10 +1091,24 @@ export function setup({
     }
   });
 
+  test('auth md5 with bad password', async _ => {
+    const conn = pgconnection('postgres://pgwire_md5@pg:5432/postgres');
+    try {
+      const [res] = await Promise.allSettled([
+        conn.query(),
+      ]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(String(res.reason), 'PgError.28P01: password authentication failed for user "pgwire_md5"');
+      // assertEquals(res.reason.cause.severity, 'FATAL');
+      // assertEquals(res.reason.cause.code, '28P01');
+      // assertEquals(res.reason.cause.message, 'password authentication failed for user "pgwire_md5"');
+    } finally {
+      await conn.end();
+    }
+  });
+
   test('auth md5', async _ => {
-    const caughtError = await pgconnect('postgres://pgwire_md5@pgwssl:5432/postgres').catch(Object);
-    assertError(caughtError, 'PgError.nopwd_md5');
-    const conn = await pgconnect('postgres://pgwire_md5:secret@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire_md5:secret@pg:5432/postgres');
     try {
       const [username] = await conn.query(/*sql*/ `select current_user`);
       assertEquals(username, 'pgwire_md5');
@@ -1062,10 +1117,24 @@ export function setup({
     }
   });
 
+  test('auth scram-sha-256 with bad password', async _ => {
+    const conn = pgconnection('postgres://pgwire_sha256@pg:5432/postgres');
+    try {
+      const [res] = await Promise.allSettled([
+        conn.query(),
+      ]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(String(res.reason), 'PgError.28P01: password authentication failed for user "pgwire_sha256"');
+      // assertEquals(res.reason.cause.severity, 'FATAL');
+      // assertEquals(res.reason.cause.code, '28P01');
+      // assertEquals(res.reason.cause.message, 'password authentication failed for user "pgwire_sha256"');
+    } finally {
+      await conn.end();
+    }
+  });
+
   test('auth scram-sha-256', async _ => {
-    const caughtError = await pgconnect('postgres://pgwire_sha256@pgwssl:5432/postgres').catch(Object);
-    assertError(caughtError, 'PgError.nopwd_sasl');
-    const conn = await pgconnect('postgres://pgwire_sha256:secret@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire_sha256:secret@pg:5432/postgres');
     try {
       const [username] = await conn.query(/*sql*/ `select current_user`);
       assertEquals(username, 'pgwire_sha256');
@@ -1074,33 +1143,19 @@ export function setup({
     }
   });
 
-  _test('auth scram-sha-256-plus', async _ => {
-    const conn0 = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
-    const [sslrootcert] = await conn0.query(/*sql*/ `show x.cacert`).finally(_ => conn0.end());
-
-    const caughtError = await pgconnect('postgres://pgwire_sha256@pgwssl:5432/postgres', {
-      sslmode: 'require',
-      sslrootcert,
-    }).catch(Object);
-    assertError(caughtError, 'PgError.nopwd_sha256p');
-
-    const conn = await pgconnect('postgres://pgwire_sha256:secret@pgwssl:5432/postgres?_debug=1', {
-      sslmode: 'require',
-      sslrootcert,
-    });
+  async function get_sslrootcert() {
+    const conn1 = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
-      const [username] = await conn.query(/*sql*/ `select current_user`);
-      assertEquals(username, 'pgwire_sha256');
+      const [sslrootcert] = await conn1.query(/*sql*/ `select pg_read_file('ca.crt')`);
+      return sslrootcert;
     } finally {
-      await conn.end();
+      await conn1.end();
     }
-  });
+  }
 
   test('sslmode=require should create encrypted connection if ssl is supported', async _ => {
-    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
-      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
-    ));
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
+    const sslrootcert = await get_sslrootcert();
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres', {
       sslmode: 'require',
       sslrootcert,
     });
@@ -1114,24 +1169,26 @@ export function setup({
   });
 
   test('sslmode=require should reject connection if ssl is not supported', async _ => {
-    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
-      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
-    ));
-    const caughtError = await (
-      pgconnect('postgres://pgwire@pgwossl:5432/postgres', {
-        sslmode: 'require',
-        sslrootcert,
-      })
-      .catch(Object)
-    );
-    assertError(caughtError, 'PgError.nossl');
+    const sslrootcert = await get_sslrootcert();
+    const conn = pgconnection('postgres://pgwire@pg:6432/postgres', {
+      sslmode: 'require',
+      sslrootcert,
+    });
+    try {
+      const [res] = await Promise.allSettled([
+        conn.query(),
+      ]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(String(res.reason), 'Error: postgres query failed');
+      assertEquals(String(res.reason.cause), 'Error: postgres does not support ssl');
+    } finally {
+      await conn.end();
+    }
   });
 
   test('sslmode=prefer should create encypted connection if ssl is supported', async _ => {
-    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
-      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
-    ));
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
+    const sslrootcert = await get_sslrootcert();
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres', {
       sslmode: 'prefer',
       sslrootcert,
     });
@@ -1145,10 +1202,8 @@ export function setup({
   });
 
   test('sslmode=prefer should create unencypted connection if ssl is not supported', async _ => {
-    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
-      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
-    ));
-    const conn = await pgconnect('postgres://pgwire@pgwossl:5432/postgres', {
+    const sslrootcert = await get_sslrootcert();
+    const conn = pgconnection('postgres://pgwire@pg:6432/postgres', {
       sslmode: 'prefer',
       sslrootcert,
     });
@@ -1162,10 +1217,8 @@ export function setup({
   });
 
   test('sslmode=prefer should create unencypted connection if ssl is denied', async _ => {
-    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
-      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
-    ));
-    const conn = await pgconnect('postgres://pgwire_nossl@pgwssl:5432/postgres', {
+    const sslrootcert = await get_sslrootcert();
+    const conn = pgconnection('postgres://pgwire_nossl@pg:5432/postgres', {
       sslmode: 'prefer',
       sslrootcert,
       // _debug: true,
@@ -1180,9 +1233,9 @@ export function setup({
   });
 
   test('sslmode=prefer should create unencypted connection if ssl handshake fails', async _ => {
-    const conn = await pgconnect('postgres://pgwire_nossl@pgwssl:5432/postgres', {
+    const conn = pgconnection('postgres://pgwire_nossl@pg:5432/postgres', {
       sslmode: 'prefer',
-      // sslrootcert,
+      sslrootcert: '__invalid_cert__',
       // _debug: true,
     });
     try {
@@ -1195,7 +1248,7 @@ export function setup({
   });
 
   test('sslmode=allow should create unencypted connection if possible', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres', {
       sslmode: 'allow',
       // _debug: true,
     });
@@ -1209,10 +1262,8 @@ export function setup({
   });
 
   test('sslmode=allow should use ssl if server requires ssl', async _ => {
-    const [sslrootcert] = await pgconnect('postgres://pgwire@pgwssl:5432/postgres').then(conn => (
-      conn.query(/*sql*/ `select pg_read_file('ca.crt')`).finally(_ => conn.end())
-    ));
-    const conn = await pgconnect('postgres://pgwire_sslonly@pgwssl:5432/postgres', {
+    const sslrootcert = await get_sslrootcert();
+    const conn = pgconnection('postgres://pgwire_sslonly@pg:5432/postgres', {
       sslmode: 'allow',
       sslrootcert,
       // _debug: true,
@@ -1227,7 +1278,7 @@ export function setup({
   });
 
   test('pool should reuse connection', async _ => {
-    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1');
+    const pool = pgpool('postgres://pgwire@pg:5432/postgres?_poolSize=1');
     try {
       const [pid1] = await pool.query(/*sql*/ `select pg_backend_pid()`);
       const [pid2] = await pool.query(/*sql*/ `select pg_backend_pid()`);
@@ -1238,7 +1289,7 @@ export function setup({
   });
 
   test('pool should do connection per query when poolSize is unset', async _ => {
-    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres');
+    const pool = pgpool('postgres://pgwire@pg:5432/postgres');
     try {
       const [pid] = await pool.query(/*sql*/ `select pg_backend_pid()`);
       assertEquals(typeof pid, 'number');
@@ -1250,16 +1301,20 @@ export function setup({
   });
 
   test('pool should prevent idle in trasaction', async _ => {
-    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1');
+    const pool = pgpool('postgres://pgwire@pg:5432/postgres?_poolSize=1');
     try {
-      const [caughtError1, caughtError2] = await Promise.all([
+      const [res1, res2] = await Promise.allSettled([
         // emit bad query with explicit transaction
-        pool.query(/*sql*/ `begin`).catch(Object),
+        pool.query(/*sql*/ `begin`),
         // then enqueue good innocent query in the same connection as previous query
-        pool.query(/*sql*/ `select 1`).catch(Object)
+        pool.query(/*sql*/ `select 1`),
       ]);
-      assertError(caughtError1, 'PgError.left_in_txn');
-      assertError(caughtError2, 'PgError.left_in_txn');
+      assertEquals(res1.status, 'rejected');
+      assertEquals(String(res1.reason), 'Error: postgres query failed');
+      assertEquals(String(res1.reason.cause), 'Error: postgres connection left in transaction');
+      assertEquals(res2.status, 'rejected');
+      assertEquals(String(res2.reason), 'Error: postgres query failed');
+      assertEquals(String(res2.reason.cause), 'Error: postgres connection left in transaction');
       // poisoned connection should be already destroyed and forgotten
       // in this event loop iteration and fresh connection should be created
       // so no errors expected
@@ -1274,20 +1329,21 @@ export function setup({
   // Seems that postgres fails to `commit` because
   // we not consume all backend messages before connection destroy.
   // Can we rely on this behavior?
-  test('pool should auto rollback', async _ => {
-    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1&_debug=0');
+  _test('pool should auto rollback', async _ => {
+    const pool = pgpool('postgres://pgwire@pg:5432/postgres?_poolSize=1&_debug=0');
     try {
-      const [caughtError1, caughtError2] = await Promise.all([
+      const [res1, res2] = await Promise.allSettled([
         // emit bad query with explicit transaction
-        pool.query(/*sql*/ `begin; create table this_table_should_not_be_created();`).catch(Object),
+        pool.query(/*sql*/ `begin; create table this_table_should_not_be_created();`),
         // then enqueue `commit` in the same connection as previous query
-        pool.query(/*sql*/ `commit`).catch(Object),
+        pool.query(/*sql*/ `commit`),
       ]);
-      assertError(caughtError1, 'PgError.left_in_txn');
-      assertError(caughtError2, 'PgError.left_in_txn');
-      assertEquals(caughtError2.cause == caughtError1, true);
-      // console.log(caughtError1);
-      // console.log(caughtError2);
+
+      assertEquals(res1.status, 'rejected');
+      assertEquals(String(res1.reason), 'Error: postgres connection left in transaction');
+      assertEquals(res2.status, 'rejected');
+      assertEquals(String(res2.reason), 'Error: postgres query failed');
+      // assertEquals(caughtError2.cause == caughtError1, true);
       // if first query was not rollbacked then next query will fail
       await pool.query(/*sql*/ `create temp table this_table_should_not_be_created()`);
     } finally {
@@ -1295,16 +1351,15 @@ export function setup({
     }
   });
 
-  test('pool should keep reason of left_in_txn', async _ => {
-    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1&_debug=0');
+  _test('pool should keep reason of left_in_txn', async _ => {
+    const pool = pgpool('postgres://pgwire@pg:5432/postgres?_poolSize=1&_debug=0');
     try {
-      const caughtError = await (
-        pool.query(/*sql*/ `begin; select 1 / 0; commit;`)
-        .catch(Object)
-      );
-      assertError(caughtError, 'PgError.left_in_txn');
-      assertError(caughtError.cause, 'PgError.22012'); // division by zero
-      // console.log(caughtError);
+      const [res] = await Promise.allSettled([
+        pool.query(/*sql*/ `begin; select 1 / 0; commit;`),
+      ]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(String(res.reason), 'Error: postgres connection left in transaction');
+      assertEquals(String(res.reason.cause), 'PgError.22012: division by zero');
     } finally {
       await pool.end();
     }
@@ -1324,8 +1379,8 @@ export function setup({
   // });
 
   test('pool idle timeout', async _ => {
-    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1&_poolIdleTimeout=1s');
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const pool = pgpool('postgres://pgwire@pg:5432/postgres?_poolSize=1&_poolIdleTimeout=1s');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       const [pid] = await pool.query(/*sql*/ `select pg_backend_pid()`);
       assertEquals(typeof pid, 'number');
@@ -1333,8 +1388,8 @@ export function setup({
       const [alive] = await conn.query(/*sql*/ `select exists (select from pg_stat_activity where pid = ${pid})`);
       assertEquals(alive, true);
       await delay(2000);
-      const [stilAlive] =  await conn.query(/*sql*/ `select exists (select from pg_stat_activity where pid = ${pid})`);
-      assertEquals(stilAlive, false);
+      const [stillAlive] =  await conn.query(/*sql*/ `select exists (select from pg_stat_activity where pid = ${pid})`);
+      assertEquals(stillAlive, false);
     } finally {
       await pool.end();
       await conn.end();
@@ -1343,8 +1398,8 @@ export function setup({
 
   test('pool async error', async _ => {
     // use pool with single connection
-    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=1');
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const pool = pgpool('postgres://pgwire@pg:5432/postgres?_poolSize=1');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       // new pooled connection should be created
       const [pid] = await pool.query(/*sql*/ `select pg_backend_pid()`);
@@ -1353,8 +1408,8 @@ export function setup({
       // cause pooled connection down,
       await conn.query(/*sql*/ `select pg_terminate_backend(${pid})`);
       await delay(200);
-      const [stilAlive] = await conn.query(/*sql*/ `select exists (select from pg_stat_activity where pid = ${pid})`);
-      assertEquals(stilAlive, false);
+      const [stillAlive] = await conn.query(/*sql*/ `select exists (select from pg_stat_activity where pid = ${pid})`);
+      assertEquals(stillAlive, false);
       // pool should be able to execute queries in new connection
       const [hello] = await pool.query(/*sql*/ `select 'hello'`);
       assertEquals(hello, 'hello');
@@ -1365,7 +1420,7 @@ export function setup({
   });
 
   test('pool should destroy ephemeral conns when _poolSize=0', async _ => {
-    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=0');
+    const pool = pgpool('postgres://pgwire@pg:5432/postgres?_poolSize=0');
     const [loid] = await pool.query(/*sql*/ `select lo_from_bytea(0, 'initial')`);
     // assertEquals(typeof loid, 'number'); // TODO register oid type
     const resp = pool.stream(/*sql*/ `
@@ -1379,7 +1434,7 @@ export function setup({
     } catch (err) {
       // console.error(err);
     }
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       const [lo] = await conn.query(/*sql*/ `select convert_from(lo_get(${loid}), 'sql_ascii')`);
       // destroyed query should be started but not completed
@@ -1390,10 +1445,10 @@ export function setup({
   });
 
   test('pool end should wait until all connections destroyed', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
     try {
       const [loid] = await conn.query(/*sql*/ `select lo_from_bytea(0, 'initial')`);
-      const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=0');
+      const pool = pgpool('postgres://pgwire@pg:5432/postgres?_poolSize=0');
       const [, [p1], [p2]] = await Promise.all([
         pool.query(/*sql*/ `select lo_put(${loid}, 0, 'completed') from pg_sleep(1)`),
         pool.end().then(_ => conn.query(/*sql*/ `select convert_from(lo_get(${loid}), 'sql_ascii')`)),
@@ -1407,7 +1462,7 @@ export function setup({
   });
 
   test('pool should release connection after stream interrupted', async _ => {
-    const pool = pgpool('postgres://pgwire@pgwssl:5432/postgres?_poolSize=0');
+    const pool = pgpool('postgres://pgwire@pg:5432/postgres?_poolSize=0');
     try {
       const stream = pool.stream(/*sql*/ `
         set application_name = 'pool_test';
@@ -1431,7 +1486,7 @@ export function setup({
   });
 
   test('connection application_name', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?application_name=test');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres?application_name=test');
     try {
       const [appname] = await conn.query(/*sql*/ `show application_name`);
       assertEquals(appname, 'test');
@@ -1451,7 +1506,7 @@ export function setup({
   });
 
   _test('streaming', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres');
+    const conn = await pgconnect('postgres://pgwire@pg:5432/postgres');
     try {
       const resp = conn.query(/*sql*/ `select 'hello' col`);
       for await (const chunk of resp) {
@@ -1463,7 +1518,7 @@ export function setup({
   });
 
   test('cancel by break', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0', {
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres?_debug=0', {
       'x.state': 'initial',
     });
     try {
@@ -1485,26 +1540,26 @@ export function setup({
   });
 
   test('cancel simple by signal', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres', {
       // disable wake timer to test that connection wakes on .abort()
       _wakeInterval: 0,
       'x.state': 'initial',
     });
     try {
-      const abortCtl = new PoormanAbortController();
+      const abortCtl = new AbortController();
       const abortReason = Error('cause we can');
       setTimeout(_ => abortCtl.abort(abortReason), 1000);
-      const caughtError = await (
+      const [res] = await Promise.allSettled([
         conn.query(/*sql*/ `
           set x.state = 'started';
           commit;
           select from pg_sleep(10);
           set x.state = 'completed';
-        `, { signal: abortCtl.signal })
-        .catch(Object)
-      );
-      assertError(caughtError, 'PgError.aborted');
-      assertEquals(caughtError.cause == abortReason, true);
+        `, { signal: abortCtl.signal }),
+      ]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(String(res.reason), 'Error: postgres query aborted');
+      assertEquals(res.reason.cause, abortReason);
       const [state] = await conn.query(/*sql*/ `show x.state`);
       assertEquals(state, 'started');
     } finally {
@@ -1513,27 +1568,27 @@ export function setup({
   });
 
   test('cancel extended by signal', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres', {
       // disable wake timer to test that connection wakes on .abort()
       _wakeInterval: 0,
       'x.state': 'initial',
     });
     try {
-      const abortCtl = new PoormanAbortController();
+      const abortCtl = new AbortController();
       const abortReason = Error('cause we can');
       setTimeout(_ => abortCtl.abort(abortReason), 1000);
-      const caughtError = await (
+      const [res] = await Promise.allSettled([
         conn.query(
           { statement: /*sql*/ `set x.state = 'started'` },
           { statement: /*sql*/ `commit` },
           { statement: /*sql*/ `select from pg_sleep(10)` },
           { statement: /*sql*/ `set x.state = 'completed'` },
           { signal: abortCtl.signal },
-        )
-        .catch(Object)
-      );
-      assertError(caughtError, 'PgError.aborted');
-      assertEquals(caughtError.cause == abortReason, true);
+        ),
+      ]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(String(res.reason), 'Error: postgres query aborted');
+      assertEquals(res.reason.cause, abortReason);
       const [state] = await conn.query(/*sql*/ `show x.state`);
       assertEquals(state, 'started');
     } finally {
@@ -1542,7 +1597,7 @@ export function setup({
   });
 
   _test('wake', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
+    const conn = await pgconnect('postgres://pgwire@pg:5432/postgres', {
       _wakeInterval: 2,
       _debug: 0,
     });
@@ -1586,7 +1641,7 @@ export function setup({
 
 
   _test('wake2', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres', {
+    const conn = await pgconnect('postgres://pgwire@pg:5432/postgres', {
       _wakeInterval: 2,
       _debug: 0,
     });
@@ -1610,27 +1665,27 @@ export function setup({
   });
 
   test('notifications', async _ => {
-    const actual = [];
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=0');
-    const pid = conn.pid;
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres?_debug=0');
     try {
+      const actual = [];
+      const [pid] = await conn.query(/*sql*/ `select pg_backend_pid()`);
       conn.onnotification = n => actual.push(n);
       await conn.query(/*sql*/ `listen test_chan`);
       await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello1')`);
       await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello2')`);
       await conn.query(/*sql*/ `select pg_notify('test_chan', 'hello3')`);
+      assertEquals(actual, [
+        { pid, channel: 'test_chan', payload: 'hello1' },
+        { pid, channel: 'test_chan', payload: 'hello2' },
+        { pid, channel: 'test_chan', payload: 'hello3' },
+      ]);
     } finally {
       await conn.end();
     }
-    assertEquals(actual, [
-      { pid, channel: 'test_chan', payload: 'hello1' },
-      { pid, channel: 'test_chan', payload: 'hello2' },
-      { pid, channel: 'test_chan', payload: 'hello3' },
-    ]);
   });
 
   _test('notifications handler should not swallow errors', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_debug=1');
+    const conn = await pgconnect('postgres://pgwire@pg:5432/postgres?_debug=1');
     try {
       conn.onnotification = onnotification;
       await conn.query(/*sql*/ `listen test_chan`);
@@ -1644,32 +1699,39 @@ export function setup({
   });
 
   test('connectRetry', async _ => {
-    const aborter = new PoormanAbortController();
-    await Promise.all([client(aborter), server(aborter.signal)]);
+    const aborter = new AbortController();
+    await Promise.all([
+      client(aborter),
+      server(aborter.signal),
+    ]);
 
     async function client(aborter) {
-      let conn;
+      const conn = pgconnection('postgres://pgwire@pg:5433/postgres?_connectRetry=10s&_debug=0');
       try {
-        conn = await pgconnect('postgres://pgwire@127.0.0.1:5433/postgres?_connectRetry=10s&_debug=0');
         const [health] = await conn.query(/*sql*/ `select 'ok'`);
         assertEquals(health, 'ok');
       } finally {
-        await conn?.end();
+        await conn.end();
         aborter.abort();
       }
     }
-    async function server(signal) {
-      await delay(4000);
-      await tcpproxy({
-        listen: { hostname: '127.0.0.1', port: 5433 },
-        target: { hostname: 'pgwssl', port: 5432 },
-        signal,
-      });
+    async function server() {
+      const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
+      try {
+        await conn.query(String.raw /*sql*/ `
+          select pg_sleep(4);
+          set statement_timeout = '10s';
+          create temp table _out (ln text);
+          copy _out from program 'socat TCP4-LISTEN:5433 TCP4:127.0.0.1:5432'
+        `);
+      } finally {
+        await conn.end();
+      }
     }
   });
 
   _test('idle_session_timeout', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?idle_session_timeout=2s&_debug=1');
+    const conn = await pgconnect('postgres://pgwire@pg:5432/postgres?idle_session_timeout=2s&_debug=1');
     try {
       const [health0] = await conn.query(/*sql*/ `select 'ok'`);
       await delay(10_000);
@@ -1680,43 +1742,76 @@ export function setup({
   });
 
   test('maxReadBuf', async _ => {
-    const conn = await pgconnect('postgres://pgwire@pgwssl:5432/postgres?_maxReadBuf=5242880');
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres?_maxReadBuf=5242880');
     try {
-      const err = await conn.query(/*sql*/ `select repeat('a', 10 << 20)`).catch(Object);
-      assertEquals(err instanceof Error, true);
-      assertEquals(err.message, 'postgres sent too big message');
+      const [res] = await Promise.allSettled([
+        conn.query(/*sql*/ `select repeat('a', 10 << 20)`),
+      ]);
+      assertEquals(res.status, 'rejected');
+      assertEquals(String(res.reason), 'Error: postgres query failed');
+      assertEquals(String(res.reason.cause), 'Error: postgres sent too big message');
     } finally {
       await conn.end();
     }
   });
 
-  function assertError(actualError, expectedName) {
-    if (
-      actualError instanceof Error &&
-      actualError.name == expectedName
-    ) return;
-    assertEquals(actualError, Symbol(expectedName));
-  }
+  _test('pgbouncer async terminate', async _ => {
+    const conn = pgconnection('postgres://pgwire@pg:6432/postgres?_debug=1');
+    await Promise.all([
+      conn.query(/*sql*/ `select 'hello';`),
+      conn.end(),
+      // conn.whenDestroyed,
+    ]);
+  });
+
+  test('conn.inTransaction', async _ => {
+    const conn = pgconnection('postgres://pgwire@pg:5432/postgres');
+    try {
+      assertEquals(conn.inTransaction, 0);
+      await conn.query(/*sql*/ `select`);
+      assertEquals(conn.inTransaction, 0);
+      await conn.query(/*sql*/ `begin`);
+      assertEquals(conn.inTransaction, 0x54); // T
+      await Promise.allSettled([conn.query(/*sql*/ `select 1 / 0`)]);
+      assertEquals(conn.inTransaction, 0x45); // E
+      await conn.query(/*sql*/ `rollback`);
+      assertEquals(conn.inTransaction, 0);
+    } finally {
+      await conn.end();
+    }
+    assertEquals(conn.inTransaction, 0);
+  });
+
+  test('unix socket', async _ => {
+    const conn = pgconnection('postgres://?host=/run/postgresql&port=5432&user=pgwire&database=postgres&x.state=initial');
+    try {
+      const response = conn.stream(/*sql*/ `
+        begin;
+        set x.state = 'started';
+        commit;
+        do $$ begin raise notice 'flush'; end $$;
+        select from pg_sleep(10);
+        set x.state = 'completed';
+      `);
+      let commitReceived = false;
+      for await (const { tag, payload } of response) {
+        if (tag == 'CommandComplete' && payload == 'COMMIT') {
+          commitReceived = true;
+          break;
+        }
+      }
+      assertEquals(commitReceived, true);
+      const [state] = await conn.query(/*sql*/ `show x.state`);
+      assertEquals(state, 'started'); // but not completed
+    } finally {
+      await conn.end();
+    }
+  });
 }
 
 // mute
 function _test() {}
 
 async function delay(duration) {
-  return new Promise(resolve => setTimeout(resolve, duration));
-}
-
-class PoormanAbortController {
-  signal = {
-    aborted: false,
-    reason: null,
-    _listeners: new Set(),
-    addEventListener(_e, handler) { this._listeners.add(handler); },
-    removeEventListener(_e, handler) { this._listeners.delete(handler); },
-  };
-  abort(reason = Error('aborted')) {
-    this.signal.aborted = true;
-    this.signal.reason = reason;
-    this.signal._listeners.forEach(queueMicrotask);
-  }
+  await new Promise(resolve => setTimeout(resolve, duration));
 }
