@@ -1719,12 +1719,11 @@ class PgoutputReader extends BinaryReader {
       switch (kind) {
         case 0x62: // 'b' binary
         case 0x74: // 't' text
-          const valsize = this._readInt32();
           // no need to clone bytes because new buffer
           // is created for each replication chunk
-          val = this._read(valsize);
+          val = this._read(this._readInt32());
           if (kind == 0x74 /* t */) {
-            val = this._textDecoder.decode(val);
+            val = this._textDecoder.decode(val); // TODO fatal: true, lossless utf8 decoding
           }
           break;
         case 0x6e: // 'n' null
