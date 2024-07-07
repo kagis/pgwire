@@ -168,9 +168,12 @@ class PgPool {
 
 class PgConnection {
   constructor({
-    host, port, password,
+    host, // https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNECT-HOST
+    port, // https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNECT-PORT
+    password, // https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNECT-PASSWORD
     keepalives = '1', // https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-KEEPALIVES
-    sslmode, sslrootcert,
+    sslmode, // https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNECT-SSLMODE
+    sslrootcert, // TODO accept filename as psql do
     _connectRetry = 0, // TODO connect_timeout
     _wakeInterval = 2000,
     _noExplicitTransactions = false,
@@ -200,6 +203,7 @@ class PgConnection {
     this._backendKeyData = null;
     this._lastErrorResponse = null;
     this._queuedResponseChannels = [];
+    /** @type {'start'|'idle'|'responding'|'end'} */
     this._readyState = 'start';
     this._transactionStatus = -1;
     this._wakeSupress = true;
