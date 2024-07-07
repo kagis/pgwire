@@ -55,31 +55,31 @@ export class PgError extends Error {
   }
 }
 
-function computeConnectionOptions([uriOrObj, ...rest]) {
-  if (!uriOrObj) {
-    return { host: '127.0.0.1', port: '5432' };
+function computeConnectionOptions(optionsChain) {
+  return optionsChain.reduceRight(reduceConnectionOptions, {
+    host: '127.0.0.1',
+    port: '5432',
+  });
+}
+function reduceConnectionOptions(result, uriOrObj) {
+  if (typeof uriOrObj == 'string') {
+    uriOrObj = new URL(uriOrObj);
   }
-  if (typeof uriOrObj == 'string' || uriOrObj instanceof URL) {
-    const uri = new URL(uriOrObj);
-    // if (!(uri.protocol == 'postgresql' || uri.protocol == 'postgres')) {
-    //   throw Error(`invalid postgres protocol ${JSON.stringify(uri.protocol)}`);
-    // }
-    uriOrObj = withoutUndefinedProps({
-      host: decodeURIComponent(uri.hostname) || undefined,
-      port: uri.port || undefined,
-      password: decodeURIComponent(uri.password) || undefined,
-      'user': decodeURIComponent(uri.username) || undefined,
-      'database': decodeURIComponent(uri.pathname).replace(/^[/]/, '') || undefined,
-      ...Object.fromEntries(uri.searchParams)
-    });
+  if (uriOrObj instanceof URL) {
+    uriOrObj = {
+      host: decodeURIComponent(uriOrObj.hostname) || undefined,
+      port: uriOrObj.port || undefined,
+      password: decodeURIComponent(uriOrObj.password) || undefined,
+      'user': decodeURIComponent(uriOrObj.username) || undefined,
+      'database': decodeURIComponent(uriOrObj.pathname).replace(/^[/]/, '') || undefined,
+      ...Object.fromEntries(uriOrObj.searchParams)
+    };
   }
-  // TODO skip undefined props not only for uri props
-  return Object.assign(computeConnectionOptions(rest), uriOrObj);
-
-  // TODO keep non serialiable values
-  function withoutUndefinedProps(obj) {
-    return JSON.parse(JSON.stringify(obj));
+  for (const [k, v] of Object.entries(uriOrObj)) {
+    if (v === undefined) continue;
+    result[k] = v;
   }
+  return result;
 }
 
 class PgPool {

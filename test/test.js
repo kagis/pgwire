@@ -1807,6 +1807,22 @@ export function setup({
       await conn.end();
     }
   });
+
+  test('override undefined options', async _ => {
+    const conn = pgconnection(
+      { 'x.foo': undefined, 'x.bar': 'world' },
+      'postgres://pgwire@pg:5432/postgres?x.foo=hello&x.bar=bang',
+    );
+    let actual;
+    try {
+      [actual] = await conn.query(/*sql*/ `
+        select format('%s %s', current_setting('x.foo'), current_setting('x.bar'))
+      `);
+    } finally {
+      await conn.end();
+    }
+    assertEquals(actual, 'hello world');
+  });
 }
 
 // mute
