@@ -82,6 +82,7 @@ try {
       return new Response(greeting);
     },
   });
+  await websrv.finished;
 } finally {
   await pg.end();
 }
