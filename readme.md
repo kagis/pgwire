@@ -12,22 +12,22 @@ PostgreSQL client library for Deno and Node.js that exposes all features of wire
 - Efficient bytea transferring
 - Pure js without dependencies
 
-# Connecting to PostgreSQL server
+# Create connection
 
 ```js
-import { pgconnect } from 'https://raw.githubusercontent.com/kagis/pgwire/main/mod.js';
-//                                use exact commit or tag instead of main ^^^^
-const pg = await pgconnect('postgres://USER:PASSWORD@HOST:PORT/DATABASE');
+import { pgconnection } from 'https://raw.githubusercontent.com/kagis/pgwire/main/mod.js';
+//                                   use exact commit or tag instead of main ^^^^
+const pg = pgconnection('postgres://USER:PASSWORD@HOST:PORT/DATABASE');
 ```
 
-https://www.postgresql.org/docs/11/libpq-connect.html#id-1.7.3.8.3.6
+https://www.postgresql.org/docs/16/libpq-connect.html#LIBPQ-CONNSTRING-URIS
 
 Good practice is to get connection URI from environment variable:
 
 ```js
 // app.js
-import { pgconnect } from 'https://raw.githubusercontent.com/kagis/pgwire/main/mod.js';
-const pg = await pgconnect(Deno.env.get('POSTGRES'));
+import { pgconnection } from 'https://raw.githubusercontent.com/kagis/pgwire/main/mod.js';
+const pg = pgconnection(Deno.env.get('POSTGRES'));
 ```
 
 Set `POSTGRES` environment variable when run process:
@@ -36,10 +36,10 @@ Set `POSTGRES` environment variable when run process:
 $ POSTGRES='postgres://USER:PASSWORD@HOST:PORT/DATABASE' deno run --allow-env --allow-net app.js
 ```
 
-`pgconnect()` function also accepts parameters as object:
+`pgconnection()` function also accepts parameters as object:
 
 ```js
-const pg = await pgconnect({
+const pg = pgconnection({
   host: '127.0.0.1',
   port: 5432,
   user: 'postgres',
@@ -48,10 +48,10 @@ const pg = await pgconnect({
 });
 ```
 
-Its possible to pass multiple connection URIs or objects to `pgconnect()` function. In this case actual connection parameters will be computed by merging all parameters in first-win priority. Following technique can be used to force specific parameters values or provide default-fallback values:
+Its possible to pass multiple connection URIs or objects to `pgconnection()` function. In this case actual connection parameters will be computed by merging all parameters in first-win priority. Following technique can be used to force specific parameters values or provide default-fallback values:
 
 ```js
-const pg = await pgconnect(Deno.env.get('POSTGRES'), {
+const pg = pgconnection(Deno.env.get('POSTGRES'), {
   // use default application_name if not set in env
   application_name: 'my-awesome-app',
 });
@@ -60,7 +60,7 @@ const pg = await pgconnect(Deno.env.get('POSTGRES'), {
 Don't forget to `.end()` connection when you don't need it anymore:
 
 ```js
-const pg = await pgconnect(Deno.env.get('POSTGRES'));
+const pg = pgconnection(Deno.env.get('POSTGRES'));
 try {
   // use `pg`
 } finally {
@@ -72,19 +72,19 @@ try {
 
 ```js
 // app.js
-import { serve } from 'https://deno.land/std@0.147.0/http/server.ts';
 import { pgpool } from 'https://raw.githubusercontent.com/kagis/pgwire/main/mod.js';
 
 const pg = pgpool(Deno.env.get('POSTGRES'));
-async function handleRequest(_req) {
-  const [greeting] = await pg.query(`SELECT 'hello world, ' || now()`);
-  return new Response(greeting);
+try {
+  const websrv = Deno.serve({
+    handler(_req) {
+      const [greeting] = await pg.query(`SELECT 'hello world, ' || now()`);
+      return new Response(greeting);
+    },
+  });
+} finally {
+  await pg.end();
 }
-
-const aborter = new AbortController();
-Deno.addSignalListener('SIGINT', _ => aborter.abort());
-await serve(handleRequest, { port: 8080, signal: aborter.signal });
-await pg.end();
 ```
 
 ```sh
@@ -175,7 +175,7 @@ assertEquals(products, [
 ]);
 ```
 
-Postgres wraps multi-statement query into transaction implicitly. Implicit transaction does rollback automatically when error occures or does commit when all statements successfully executed. Multi-statement queries and implicit transactions are described here https://www.postgresql.org/docs/14/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT
+Postgres wraps multi-statement query into transaction implicitly. Implicit transaction does rollback automatically when error occures or does commit when all statements successfully executed. Multi-statement queries and implicit transactions are described here https://www.postgresql.org/docs/16/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT
 
 Top level `rows` accessor will contain rows returned by last SELECTish statement.
 Iterator accessor will iterate over first row returned by last SELECTish statement.
@@ -356,9 +356,9 @@ TRUNCATE foo;
 Now we are ready to consume replication messages:
 
 ```js
-import { pgconnect } from 'https://raw.githubusercontent.com/kagis/pgwire/main/mod.js';
+import { pgconnection } from 'https://raw.githubusercontent.com/kagis/pgwire/main/mod.js';
 
-const pg = await pgconnect({ replication: 'database' }, Deno.env.get('POSTGRES'));
+const pg = pgconnection({ replication: 'database' }, Deno.env.get('POSTGRES'));
 try {
   const replicationStream = pg.logicalReplication({ slot: 'my-app-slot' });
   const utf8dec = new TextDecoder();
@@ -393,9 +393,9 @@ SELECT pg_create_logical_replication_slot(
 ```
 
 ```js
-import { pgconnect } from 'https://raw.githubusercontent.com/kagis/pgwire/main/mod.js';
+import { pgconnection } from 'https://raw.githubusercontent.com/kagis/pgwire/main/mod.js';
 
-const pg = await pgconnect({ replication: 'database' }, Deno.env.get('POSTGRES'));
+const pg = pgconnection({ replication: 'database' }, Deno.env.get('POSTGRES'));
 try {
   const replicationStream = pg.logicalReplication({
     slot: 'my-app-slot',
