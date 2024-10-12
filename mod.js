@@ -1924,7 +1924,7 @@ class FrontendMessage {
   // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-CLOSE
   static ClosePortal = class extends this {
     write(w, size, portal = '') {
-      w.writeUint8(2); // C
+      w.writeUint8(0x43); // C
       w.writeInt32(size - 1);
       w.writeUint8(0x50); // P
       w.writeString(portal);
@@ -1932,7 +1932,7 @@ class FrontendMessage {
   };
   static CloseStatement = class extends this {
     write(w, size, statementName = '') {
-      w.writeUint8(2); // C
+      w.writeUint8(0x43); // C
       w.writeInt32(size - 1);
       w.writeUint8(0x53); // S
       w.writeString(statementName);
