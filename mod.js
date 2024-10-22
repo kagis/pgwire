@@ -573,6 +573,7 @@ class PgConnection {
     for (const m of messages) {
       this._logBemsg(m);
       // TODO check if connection is destroyed to prevent errors?
+
       switch (m.tag) {
         case 'DataRow': this._recvDataRow(m, m.payload, batch); continue;
         case 'CopyData': this._recvCopyData(m, m.payload, batch); continue;
@@ -586,24 +587,33 @@ class PgConnection {
         case 'CopyBothResponse': await this._recvCopyBothResponse(m, m.payload); break;
         case 'CopyDone': await this._recvCopyDone(m, m.payload); break;
         case 'RowDescription': await this._recvRowDescription(m, m.payload); break;
-        case 'NoData': await this._recvNoData(m, m.payload); break;
-        case 'PortalSuspended': await this._recvPortalSuspended(m, m.payload); break;
         case 'CommandComplete': await this._recvCommandComplete(m, m.payload); break;
-        case 'EmptyQueryResponse': await this._recvEmptyQueryResponse(m, m.payload); break;
-
-        case 'AuthenticationMD5Password': await this._recvAuthenticationMD5Password(m, m.payload); break;
-        case 'AuthenticationCleartextPassword': await this._recvAuthenticationCleartextPassword(m, m.payload); break;
-        case 'AuthenticationSASL': await this._recvAuthenticationSASL(m, m.payload); break;
-        case 'AuthenticationSASLContinue': await this._recvAuthenticationSASLContinue(m, m.payload); break;
-        case 'AuthenticationSASLFinal': await this._recvAuthenticationSASLFinal(m, m.payload); break;
-        // TODO throw unimplemented on other auth messages
-        case 'AuthenticationOk': await this._recvAuthenticationOk(m, m.payload); break;
         case 'ParameterStatus': await this._recvParameterStatus(m, m.payload); break;
         case 'BackendKeyData': await this._recvBackendKeyData(m, m.payload); break;
         case 'NoticeResponse': await this._recvNoticeResponse(m, m.payload); break;
         case 'ErrorResponse': await this._recvErrorResponse(m, m.payload); break;
         case 'ReadyForQuery': await this._recvReadyForQuery(m, m.payload); break;
         case 'NotificationResponse': this._recvNotificationResponse(m, m.payload); break;
+
+        case 'NoData':
+        case 'ParameterDescription':
+        case 'ParseComplete':
+        case 'BindComplete':
+        case 'PortalSuspended':
+        case 'CloseComplete':
+        case 'EmptyQueryResponse':
+          await this._fwdBemsg(m);
+          break;
+
+        case 'AuthenticationOk': await this._recvAuthenticationOk(m, m.payload); break;
+        case 'AuthenticationMD5Password': await this._recvAuthenticationMD5Password(m, m.payload); break;
+        case 'AuthenticationCleartextPassword': await this._recvAuthenticationCleartextPassword(m, m.payload); break;
+        case 'AuthenticationSASL': await this._recvAuthenticationSASL(m, m.payload); break;
+        case 'AuthenticationSASLContinue': await this._recvAuthenticationSASLContinue(m, m.payload); break;
+        case 'AuthenticationSASLFinal': await this._recvAuthenticationSASLFinal(m, m.payload); break;
+
+        default:
+          throw Error('postgres sent unsupported message', { case: m });
       }
     }
     await this._flushBatch(batch);
@@ -765,15 +775,6 @@ class PgConnection {
     // https://github.com/postgres/postgres/blob/0266e98c6b865246c3031bbf55cb15f330134e30/src/backend/replication/walsender.c#L2307
     // streamingDoneReceiving and streamingDoneSending not reset to false before replication start
     this._copyingOut = false;
-    await this._fwdBemsg(m);
-  }
-  async _recvEmptyQueryResponse(m) {
-    await this._fwdBemsg(m);
-  }
-  async _recvPortalSuspended(m) {
-    await this._fwdBemsg(m);
-  }
-  async _recvNoData(m) {
     await this._fwdBemsg(m);
   }
   async _recvAuthenticationCleartextPassword() {
