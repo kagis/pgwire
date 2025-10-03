@@ -1314,7 +1314,7 @@ class MessageReader extends BinaryReader {
           default    : throw Error('postgres sent unknown auth message', { cause: { authTag } });
         }
       }
-      default: Error('postgres sent unknown message', { cause: { asciiTag } });
+      default: throw Error('postgres sent unknown message', { cause: { asciiTag } });
     }
   }
   // https://www.postgresql.org/docs/16/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-DATAROW

@@ -2,7 +2,7 @@ name: pgwire
 services:
 
   deno:
-    image: denoland/deno:alpine-1.40.0
+    image: denoland/deno:alpine-2.5.3
     working_dir: /app
     environment: [TEST_FILTER]
     command: >
@@ -22,7 +22,7 @@ services:
         condition: service_healthy
 
   node:
-    image: node:18.17.0-alpine
+    image: node:22.20.0-alpine
     working_dir: /app
     environment: [TEST_FILTER]
     command: node --test --test-name-pattern=".?$TEST_FILTER" test/test_node.js
