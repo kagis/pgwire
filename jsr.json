@@ -1,0 +1,9 @@
+{
+  "name": "@kagis/pgwire",
+  "version": "0.8.1",
+  "exports": "./mod.js",
+  "license": "MIT",
+  "publish": {
+    "include": ["mod.js", "readme.md"]
+  }
+}
