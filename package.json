@@ -1,13 +1,13 @@
 {
   "name": "pgwire",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "type": "module",
   "exports": "./index.js",
-  "description": "PostgreSQL client library for Deno and NodeJS which exposes all features of wire protocol",
-  "author": "exe-dealer@yandex.ru",
+  "description": "PostgreSQL client library for Deno and Node.js that exposes all features of the wire protocol.",
+  "author": "exe-dealer@yandex.kz",
   "license": "MIT",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.17.0"
   },
   "homepage": "https://github.com/kagis/pgwire#readme",
   "repository": {
@@ -26,5 +26,6 @@
     "logical-replication",
     "streaming-replication",
     "node-postgres"
-  ]
+  ],
+  "files": ["mod.js", "index.js"]
 }

@@ -1,8 +1,8 @@
-import net from 'net';
-import tls from 'tls';
-import { createHash, pbkdf2 as _pbkdf2, randomFillSync } from 'crypto';
-import { once } from 'events';
-import { promisify } from 'util';
+import net from 'node:net';
+import tls from 'node:tls';
+import { createHash, pbkdf2 as _pbkdf2, randomFillSync } from 'node:crypto';
+import { once } from 'node:events';
+import { promisify } from 'node:util';
 import { _net, SaslScramSha256 } from './mod.js';
 export * from './mod.js';
 

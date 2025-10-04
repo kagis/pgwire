@@ -22,7 +22,7 @@ services:
         condition: service_healthy
 
   node:
-    image: node:22.20.0-alpine
+    image: node:18.17.0-alpine
     working_dir: /app
     environment: [TEST_FILTER]
     command: node --test --test-name-pattern=".?$TEST_FILTER" test/test_node.js
