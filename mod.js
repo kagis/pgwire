@@ -2376,6 +2376,7 @@ class Channel {
 
 // https://www.postgresql.org/docs/14/sasl-authentication.html
 // https://datatracker.ietf.org/doc/html/rfc5802#section-3
+/** @internal */
 export class SaslScramSha256 {
   _clientFirstMessageBare;
   _serverSignatureB64;
@@ -2565,6 +2566,7 @@ function md5(/** @type {Uint8Array} */ input) {
   }
 }
 
+/** @internal */
 export const _net = {
   connect(options) {
     return options.path ? this.connectUnix(options) : this.connectTcp(options);
