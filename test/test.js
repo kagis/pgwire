@@ -1699,20 +1699,18 @@ export function setup({
   });
 
   test('connectRetry', async _ => {
-    const aborter = new AbortController();
     await Promise.all([
-      client(aborter),
-      server(aborter.signal),
+      client(),
+      server(),
     ]);
 
-    async function client(aborter) {
+    async function client() {
       const conn = pgconnection('postgres://pgwire@pg:5433/postgres?_connectRetry=10s&_debug=0');
       try {
         const [health] = await conn.query(/*sql*/ `select 'ok'`);
         assertEquals(health, 'ok');
       } finally {
         await conn.end();
-        aborter.abort();
       }
     }
     async function server() {
