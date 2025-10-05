@@ -1,5 +1,8 @@
 # pgwire is
 
+[![JSR](https://jsr.io/badges/@kagis/pgwire)](https://jsr.io/@kagis/pgwire)
+[![NPM](https://img.shields.io/npm/v/pgwire.svg)](https://www.npmjs.com/package/pgwire)
+
 PostgreSQL client library for Deno and Node.js that exposes all features of wire protocol.
 
 - Memory efficient data streaming
